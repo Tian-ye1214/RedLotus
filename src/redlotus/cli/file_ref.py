@@ -15,8 +15,8 @@ from redlotus.references.models import ReferenceFile
 from redlotus.references.store import ReferenceStore
 
 
-def _resolve_ref_path(ref: str) -> Path:
-    return (current_workspace() / Path(ref).expanduser()).resolve()
+def _resolve_ref_path(ref: str, root: Path) -> Path:
+    return (root / Path(ref).expanduser()).resolve()
 
 
 def _looks_like_inline_text_suffix(suffix: str) -> bool:
@@ -30,14 +30,14 @@ def _looks_like_inline_text_suffix(suffix: str) -> bool:
     )
 
 
-def _resolve_existing_ref_prefix(ref: str) -> tuple[str, Path] | None:
+def _resolve_existing_ref_prefix(ref: str, root: Path) -> tuple[str, Path] | None:
     for end in range(len(ref) - 1, 0, -1):
         suffix = ref[end:]
         if not _looks_like_inline_text_suffix(suffix):
             continue
         prefix = ref[:end]
         try:
-            path = _resolve_ref_path(prefix)
+            path = _resolve_ref_path(prefix, root)
         except (OSError, RuntimeError, ValueError):
             continue
         if path.exists():
@@ -45,16 +45,17 @@ def _resolve_existing_ref_prefix(ref: str) -> tuple[str, Path] | None:
     return None
 
 
-def parse_file_paths(text: str) -> list[Path]:
+def parse_file_paths(text: str, *, root: Path | None = None) -> list[Path]:
+    root = root or current_workspace()
     token = re.compile(
         r"(?<![A-Za-z0-9._%+-])@(?:\{([^}]+)\}|\"([^\"]+)\"|'([^']+)'|([^\s]+))"
     )
     candidates = []
     for match in token.finditer(text):
         value = next(v for v in match.groups() if v is not None).strip()
-        path = _resolve_ref_path(value)
+        path = _resolve_ref_path(value, root)
         if not path.exists() and match.group(4):
-            recovered = _resolve_existing_ref_prefix(value)
+            recovered = _resolve_existing_ref_prefix(value, root)
             if recovered:
                 _, path = recovered
         candidates.append(path)
@@ -74,7 +75,7 @@ def parse_file_paths(text: str) -> list[Path]:
     for match in re.finditer(r'"([^"\n]+)"|\'([^\'\n]+)\'|(\S+)', token.sub(" ", text)):
         value = next(v for v in match.groups() if v is not None)
         if Path(value).suffix.lower() in media:
-            path = _resolve_ref_path(value)
+            path = _resolve_ref_path(value, root)
             if path.is_file():
                 candidates.append(path)
     unique = {}
@@ -84,9 +85,10 @@ def parse_file_paths(text: str) -> list[Path]:
 
 
 async def load_file_refs(
-    text: str, *, role: str = "coordinator"
+    text: str, *, role: str = "coordinator", workspace: WorkspaceContext | None = None
 ) -> list[ReferenceFile]:
-    paths = parse_file_paths(text)
+    workspace = workspace or WorkspaceContext.from_path(current_workspace())
+    paths = parse_file_paths(text, root=workspace.root)
     policy = ModelInputPolicy.for_role(role)
     if len(paths) > policy.max_files:
         raise ValueError(
@@ -106,14 +108,17 @@ async def load_file_refs(
     if errors:
         raise ValueError("引用文件失败：\n" + "\n".join(errors))
     policy.check(sizes)
-    store = ReferenceStore(WorkspaceContext.from_path(current_workspace()))
+    store = ReferenceStore(workspace)
+    captured = await asyncio.gather(
+        *(store.capture_file(path, policy=policy) for path in paths)
+    )
     slots = asyncio.Semaphore(4)
 
-    async def read(path):
+    async def read(reference):
         async with slots:
             try:
-                return await store.import_file(path, policy=policy)
+                return await store.parse(reference)
             except Exception as exc:
-                raise ValueError(f"引用文件 {path.name} 解析失败：{exc}") from exc
+                raise ValueError(f"引用文件 {reference.name} 解析失败：{exc}") from exc
 
-    return list(await asyncio.gather(*(read(path) for path in paths)))
+    return list(await asyncio.gather(*(read(reference) for reference in captured)))

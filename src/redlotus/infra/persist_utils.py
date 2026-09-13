@@ -10,13 +10,38 @@ from typing import Any, Iterator
 from filelock import FileLock
 
 
+async def finish_file_io(operation):
+    """Drain a file operation before cancellation releases its owning lock."""
+    import asyncio
+
+    task = asyncio.create_task(operation)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_bytes(data)
+    os.replace(temporary, path)
+
+
 @contextmanager
 def file_lock(path: Path, *, timeout: float = 30.0) -> Iterator[None]:
     """跨进程文件锁；锁文件与目标同目录。"""
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with FileLock(str(lock_path), timeout=timeout):
+    with FileLock(str(lock_path), timeout=timeout, is_singleton=True):
         yield
+
+
+def read_locked_json(path: Path):
+    """Read mutable JSON under the writer's lock, including on Windows."""
+    with file_lock(path):
+        return json.loads(path.read_text(encoding="utf-8"))
 
 
 def atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -19,13 +20,7 @@ class AgentRunPolicy:
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any]) -> "AgentRunPolicy":
-        raw = cfg.get("agent_run_policy")
-        data = raw if isinstance(raw, dict) else {}
-        return cls(
-            max_worker_concurrent=_positive_int(data.get("max_worker_concurrent"), 3),
-            max_tool_output_chars=_positive_int(data.get("max_tool_output_chars"), 20_000),
-            max_command_timeout_seconds=_positive_int(data.get("max_command_timeout_seconds"), 60),
-        )
+        return cls(**deepcopy(cfg["agent_run_policy"]))
 
     def clamp_command_timeout(self, timeout: int) -> int:
         return max(1, min(int(timeout), self.max_command_timeout_seconds))
@@ -38,14 +33,6 @@ class AgentRunPolicy:
             text[: self.max_tool_output_chars]
             + f"\n\n[tool output truncated: omitted {omitted} characters]"
         )
-
-
-def _positive_int(value: Any, default: int) -> int:
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return default
-    return n if n > 0 else default
 
 
 def current_turn_id() -> str | None:

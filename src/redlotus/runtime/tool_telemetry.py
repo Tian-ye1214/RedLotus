@@ -141,11 +141,11 @@ def _model_result(result: Any, policy: AgentRunPolicy | None) -> Any:
     ):
         return result
     import uuid
-    from redlotus.workspace.workspace import current_workspace
+    from redlotus.workspace.workspace import conversations_root
     from redlotus.infra.persist_utils import atomic_write_text
 
     path = (
-        current_workspace() / ".redlotus" / "tool_results" / f"{uuid.uuid4().hex}.txt"
+        conversations_root() / "tool_results" / f"{uuid.uuid4().hex}.txt"
     )
     atomic_write_text(path, result)
     preview = policy.truncate_text(result)

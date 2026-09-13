@@ -22,6 +22,7 @@ from redlotus.cli.cli_ui import print_startup_logo
 from redlotus.tools.memory import ChatHistory
 from redlotus.workspace.workspace import WorkspaceSnapshot, list_workspace_snapshots
 from redlotus.tools.conversation_log import read_saved_model_messages_file
+from redlotus.infra.paths import project_data_dir
 from redlotus.workspace.workspace_picker import legacy_pick_snapshot
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ class AgentCliController:
 
     EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit", "退出"}
     BUSY_SAFE_COMMANDS = {
+        "/agent",
         "/stop",
         "/cd",
         "/status",
@@ -68,6 +70,7 @@ class AgentCliController:
         ) = None
         self._legacy_repl: InteractiveRepl | None = None
         self.config_prompt = None
+        self.last_rejected_input: str | None = None
 
     def set_snapshot_picker(
         self,
@@ -91,7 +94,7 @@ class AgentCliController:
         if state is None:
             return None
         snapshots = await asyncio.to_thread(
-            list_workspace_snapshots, root=self.system.workspace.root / ".redlotus"
+            list_workspace_snapshots, root=project_data_dir(self.system.workspace)
         )
         if not snapshots:
             if force_picker:
@@ -129,6 +132,7 @@ class AgentCliController:
 
     async def reset_session(self, history: ChatHistory) -> None:
         system = self.system
+        self.last_rejected_input = None
         self._ready.clear()
         system._session.queue.discard()
         await system.cancel_current_turn()
@@ -208,6 +212,7 @@ class AgentCliController:
         *,
         wait_for_turn: bool,
         goal_mode: bool = False,
+        references,
     ) -> str:
         system = self.system
         history = state.history
@@ -217,8 +222,9 @@ class AgentCliController:
         try:
             await self._publish_context_usage(history)
             try:
-                file_refs = await load_file_refs(raw_input)
+                file_refs = await references
             except ValueError as exc:
+                self.last_rejected_input = raw_input
                 print_warning(str(exc))
                 return "continue"
             message = user_message_from_cli_input(raw_input)
@@ -285,7 +291,9 @@ class AgentCliController:
                 return "continue"
             message = user_message_from_cli_input(text)
             try:
-                message.references = await load_file_refs(text)
+                message.references = await load_file_refs(
+                    text, workspace=self.system.workspace
+                )
             except ValueError as exc:
                 print_warning(str(exc))
                 return "continue"
@@ -308,11 +316,24 @@ class AgentCliController:
             )
             return "continue"
 
+        references = asyncio.create_task(
+            load_file_refs(raw_input, workspace=self.system.workspace)
+        )
+        references.add_done_callback(
+            lambda done: None if done.cancelled() else done.exception()
+        )
         future = self.system._session.queue.submit(
             lambda: self._start_user_turn_from_raw_input(
-                raw_input, state, wait_for_turn=True, goal_mode=goal_mode
+                raw_input,
+                state,
+                wait_for_turn=True,
+                goal_mode=goal_mode,
+                references=references,
             ),
             data=raw_input,
+        )
+        future.add_done_callback(
+            lambda done: references.cancel() if done.cancelled() else None
         )
         if wait_for_turn:
             await future

@@ -11,13 +11,14 @@ from redlotus.agent_core.runner import AgentRunner
 from redlotus.config.app_config import (
     get_agent_run_policy,
     get_agent_usage_limits,
-    get_model_and_params,
 )
 from redlotus.ModelGateway.agent_factory import (
     create_agent,
     create_function_toolset,
     create_worker_toolsets_and_capabilities,
 )
+from redlotus.ModelGateway.model_factory import ModelTarget
+from redlotus.prompt import with_runtime_context
 from redlotus.prompt import get_worker_system_prompt, get_manager_system_prompt
 from redlotus.runtime.lifecycle import AgentRegistry
 from redlotus.runtime.subagents import SubagentFactory, SubagentSpec
@@ -72,6 +73,7 @@ class WorkerOrchestrator:
         if self._session_key is None:
             raise RuntimeError("Worker requires a bound session")
         owner_loop = asyncio.get_running_loop()
+        target = ModelTarget.for_role(role)
         # Snapshot before starting the thread: no mutable messages or clients cross loops.
         messages = copy.deepcopy(messages_safe_for_new_prompt(history.messages))
         memory = self._memory_injection_getter()
@@ -139,31 +141,25 @@ class WorkerOrchestrator:
                         toolkit.skills_manager, memory
                     )
                     output_type = str
-                name, params = get_model_and_params(role)
                 agent = create_agent(
-                    name,
-                    params,
+                    target,
                     instructions=instructions,
                     toolsets=toolsets,
                     capabilities=capabilities,
                     output_type=output_type,
+                    role=role,
                 )
 
                 async def save_node(run):
                     local_history.set_messages(list(run.all_messages()))
                     await log.save(local_history.messages, extra=extra)
 
-                from redlotus.ModelGateway.ModelChecker import prepare_model_request
-
                 result = await AgentRunner().run(
                     agent=agent,
-                    prompt=copy.deepcopy(prompt),
+                    prompt=with_runtime_context(copy.deepcopy(prompt)),
                     message_history=local_history.messages,
                     usage_limits=get_agent_usage_limits(),
                     on_node=save_node,
-                    before_request=lambda run, node: prepare_model_request(
-                        run, node, role=role
-                    ),
                 )
                 return result.output, list(result.all_messages())
             finally:

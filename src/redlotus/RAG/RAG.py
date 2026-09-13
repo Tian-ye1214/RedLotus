@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 
 from redlotus.infra import logger
 from redlotus.config.app_config import settings
@@ -13,24 +14,22 @@ class RAG:
     """Project-scoped chunking, embedding, vector search and optional reranking."""
 
     def __init__(self, config: dict, *, project_id: str):
-        self.config = dict(config)
+        self.config = deepcopy(config)
         self.project_id = project_id
-        self.embedding_model = settings().get("RAG_models", {}).get("embedding", "")
+        self.embedding_model = settings()["RAG_models"]["embedding"]
         space = hashlib.sha256(self.embedding_model.encode()).hexdigest()[:12]
-        table_name = (
-            str(config.get("table_name", "conversation_turns")) + "_records_v2_" + space
-        )
+        table_name = str(config["table_name"]) + "_records_v2_" + space
         self._db = EmbedDataBase(
-            str(config.get("db_path", "data/rag_lancedb/stm")),
+            str(config["db_path"]),
             table_name=table_name,
-            index_config=config.get("index"),
+            index_config=config["index"],
         )
         self.index_key = json.dumps(
             [
                 self._db.db_path,
                 table_name,
-                config.get("turn_token_limit", 8192),
-                config.get("turn_chunk_overlap_tokens", 512),
+                config["turn_token_limit"],
+                config["turn_chunk_overlap_tokens"],
             ]
         )
         self.last_error = ""
@@ -41,10 +40,10 @@ class RAG:
 
     def _chunks(self, text: str) -> list[str]:
         # A conservative multilingual budget keeps long imported episodes embeddable.
-        limit = max(256, int(self.config.get("turn_token_limit", 8192)))
-        overlap = min(
-            max(0, int(self.config.get("turn_chunk_overlap_tokens", 512))), limit // 2
-        )
+        limit = int(self.config["turn_token_limit"])
+        overlap = int(self.config["turn_chunk_overlap_tokens"])
+        if not 0 <= overlap < limit:
+            raise ValueError("RAG chunk overlap must be smaller than its chunk budget")
         chunks = []
         start = 0
         while start < len(text):
@@ -59,7 +58,7 @@ class RAG:
             chunks.append(text[start:end])
             if end == len(text):
                 break
-            start = end - overlap
+            start = max(start + 1, end - overlap)
         return chunks or [""]
 
     async def upsert_records(self, records: list[dict]) -> int:
@@ -110,16 +109,15 @@ class RAG:
             return []
         vector = (
             await embed_texts(
-                "Instruct: Retrieve related project goals, decisions and outcomes.\nQuery: "
-                + query,
+                settings()["rag_service"]["query_instruction"] + query,
                 model=self.embedding_model,
             )
         )[0]
         candidates = await self._db.vector_search(
-            vector, int(self.config.get("vector_search_limit", 30)), where=self.where
+            vector, int(self.config["vector_search_limit"]), where=self.where
         )
-        minimum = float(self.config.get("min_similarity", 0.3))
-        metric = self.config.get("index", {}).get("metric", "cosine")
+        minimum = float(self.config["min_similarity"])
+        metric = self.config["index"]["metric"]
         candidates = [
             row
             for row in candidates
@@ -129,7 +127,7 @@ class RAG:
             >= minimum
         ]
         self.last_error = ""
-        if candidates and self.config.get("use_rerank", True):
+        if candidates and self.config["use_rerank"]:
             try:
                 ranked = await rerank_documents(
                     query, [row["text"] for row in candidates], top_n=len(candidates)
@@ -155,7 +153,7 @@ class RAG:
         unique = {}
         for row in candidates:
             unique.setdefault(row["record_id"], row)
-        return list(unique.values())[: int(self.config.get("final_top_k", 8))]
+        return list(unique.values())[: int(self.config["final_top_k"])]
 
     async def row_count(self) -> int:
         return await self._db.row_count(self.where)

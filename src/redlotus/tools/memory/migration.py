@@ -65,9 +65,12 @@ async def migrate_observations(
     }
     by_turn = {event.turn_id: event.id for event in existing}
     imported, mapping = [], {}
-    for path in sorted(
-        (store.workspace.root / ".redlotus").glob("*_ModelMessages.json")
-    ):
+    source_paths = {
+        path.name: path
+        for root in (store.root.parent, store.workspace.root / ".redlotus")
+        for path in root.glob("*_ModelMessages.json")
+    }
+    for path in sorted(source_paths.values()):
         if str(path.resolve()) in covered:
             continue
         journal = path.with_name(path.name.replace("_ModelMessages.json", ".jsonl"))

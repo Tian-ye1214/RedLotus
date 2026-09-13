@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from copy import deepcopy
 from pathlib import Path
 
 import lancedb
@@ -29,7 +30,7 @@ class EmbedDataBase:
     def __init__(self, db_path, table_name, vector_dim=None, *, index_config=None):
         self.db_path = resolve_lancedb_dir(db_path, table_name=table_name)
         self.table_name, self.vector_dim = table_name, vector_dim
-        self._index_config = index_config or {}
+        self._index_config = deepcopy(index_config or {})
         self._db = None
         self._rows_since_index = 0
 
@@ -119,8 +120,12 @@ class EmbedDataBase:
             replace=True,
             config=IvfPq(
                 distance_type=self._index_config["metric"],
-                num_partitions=max(1, count // 4096),
-                num_sub_vectors=max(1, dim // 8),
+                num_partitions=max(
+                    1, count // self._index_config["rows_per_partition"]
+                ),
+                num_sub_vectors=max(
+                    1, dim // self._index_config["dimensions_per_sub_vector"]
+                ),
             ),
         )
         self._rows_since_index = 0
@@ -135,7 +140,7 @@ class EmbedDataBase:
             query = query.where(where)
         rows = (
             await query.nearest_to(query_embedding)
-            .distance_type(self._index_config.get("metric", "cosine"))
+            .distance_type(self._index_config["metric"])
             .limit(top_k)
             .to_arrow()
         )

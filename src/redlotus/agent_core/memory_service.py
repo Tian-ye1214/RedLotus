@@ -5,15 +5,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import asdict
 
 from filelock import AsyncFileLock
 from pydantic import BaseModel, Field
 from pydantic_ai import ToolReturn
-from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import TextContent
+from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
 
-from redlotus.config.app_config import get_env, settings
+from redlotus.config.app_config import settings
+from redlotus.prompt import load_prompt
+from redlotus.ModelGateway.model_factory import ModelTarget
 from redlotus.infra import logger
-from redlotus.infra.persist_utils import iso_utc_now, save_locked_json
+from redlotus.infra.persist_utils import iso_utc_now, save_locked_json, read_locked_json
 from redlotus.runtime.context import WorkspaceContext
 from redlotus.runtime.subagents import SubagentFactory
 from redlotus.references.store import ReferenceStore
@@ -47,26 +51,29 @@ class MemoryJob(BaseModel):
     records: list[str] = Field(default_factory=list)
     done: bool = False
     error: str = ""
+    blocked_recipe: str = ""
 
 
 class MemoryService:
-    def __init__(self, *, workspace=None, owner_memory_allowed=True):
+    def __init__(self, *, workspace=None, owner_memory_allowed=True, factory=None):
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
         self.owner_memory_allowed = owner_memory_allowed
         self.long_term = LongTermMemory()
         self.store = MemoryStore(self.workspace)
-        self.observations = ObservationStore(
-            self.workspace, **settings().get("memory_perception", {})
-        )
+        self.observations = ObservationStore(self.workspace)
         self.references = ReferenceStore(self.workspace)
         self.evidence = EvidenceReader(self.references)
         self.jobs_dir = self.observations.root / "jobs"
         self.state_path = self.observations.root / "processor.json"
-        self._perception_factory = SubagentFactory(1)
+        self._owns_factory = factory is None
+        self._perception_factory = factory or SubagentFactory(
+            settings()["memory_perception"]["max_concurrent"]
+        )
         self.perception = None
         self.current = None
         self._input_source = lambda: self.current.user_inputs if self.current else []
-        self._injection_snapshot = ""
+        self._injection_snapshot: str | None = None
+        self._context_notices: list = []
         self._processing = asyncio.Lock()
         self._explicit = asyncio.Lock()
         self._recovered = False
@@ -94,16 +101,21 @@ class MemoryService:
         )
 
     def injection_for_session(self):
-        return self._injection_snapshot
+        return self._injection_snapshot or ""
 
-    def reset_injection_snapshot(self):
-        self._injection_snapshot = ""
+    def reset_injection_snapshot(self, snapshot: str | None = None):
+        self._injection_snapshot = snapshot
+
+    def take_context_notices(self):
+        notices, self._context_notices = self._context_notices, []
+        return notices
 
     async def begin_turn(self, session_id, turn_id, user_text, *, references=()):
         if self.owner_memory_allowed:
-            self._injection_snapshot = await asyncio.to_thread(
-                self.long_term.get_injection
-            )
+            if self._injection_snapshot is None:
+                self._injection_snapshot = await asyncio.to_thread(
+                    self.long_term.get_injection
+                )
             self.current = self.observations.begin(
                 session_id, turn_id, user_text, [ref.id for ref in references]
             )
@@ -124,15 +136,16 @@ class MemoryService:
 
     @staticmethod
     def _read_state(path):
-        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        return read_locked_json(path) if path.exists() else {}
 
     def _route(self):
-        route = [
-            settings()["models"]["compressor"]["name"],
-            get_env("BASE_URL", warn=False),
-            get_env("API_KEY", warn=False),
-        ]
-        return hashlib.sha256(json.dumps(route).encode()).hexdigest()
+        config = settings()["memory_perception"]
+        recipe = {
+            **asdict(ModelTarget.for_role(config["model_role"])),
+            "perception": config,
+            "prompt": load_prompt("memory_perception_system.md"),
+        }
+        return hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
 
     def _paused(self):
         state = self._read_state(self.state_path)
@@ -153,7 +166,7 @@ class MemoryService:
     def _job(self, job):
         path = self._job_path(job)
         if path.exists():
-            return MemoryJob.model_validate_json(path.read_text(encoding="utf-8"))
+            return MemoryJob.model_validate(read_locked_json(path))
         self._save_job(job)
         return job
 
@@ -169,14 +182,15 @@ class MemoryService:
         return root / f"{job.id}.json"
 
     async def _produce(self, job):
+        config = settings()["memory_perception"]
         packets, job.sources, references = await self.evidence.collect(job.events)
         job.reference_ids = [ref.id for ref in references]
         query = " ".join(text for event in job.events for text in event.user_inputs)[
-            :1200
+            : config["query_max_chars"]
         ]
         candidates = [
             *(await asyncio.to_thread(self.store.all, "project", active_only=False))[
-                -12:
+                -config["existing_record_limit"] :
             ],
             *await self.store.search(query),
             *(
@@ -412,13 +426,16 @@ class MemoryService:
             job.done, job.error = True, ""
             self._save_job(job)
 
-    async def _execute(self, job):
+    async def _execute(self, job, *, retry=False):
         lock = self._job_path(job).with_suffix(".execute.lock")
         lock.parent.mkdir(parents=True, exist_ok=True)
         async with AsyncFileLock(lock, run_in_executor=False):
             latest = self._job(job)
             for name in MemoryJob.model_fields:
                 setattr(job, name, getattr(latest, name))
+            if retry and job.blocked_recipe:
+                job.blocked_recipe = ""
+                self._save_job(job)
             return await self._produce_and_apply(job)
 
     async def _produce_and_apply(self, job):
@@ -428,6 +445,10 @@ class MemoryService:
             self.last_error = self._read_state(self.state_path).get(
                 "error", "记忆服务已暂停。"
             )
+            return False
+        recipe = self._route()
+        if job.blocked_recipe == recipe:
+            self.last_error = job.error
             return False
         try:
             if job.result is None:
@@ -441,6 +462,10 @@ class MemoryService:
             if isinstance(exc, ValueError):
                 job.result = None
             job.error = self.last_error = str(exc)
+            if isinstance(exc, UnexpectedModelBehavior) and str(exc).startswith(
+                "Model token limit ("
+            ):
+                job.blocked_recipe = recipe
             self._save_job(job)
             state = dict(error=str(exc), event_count=len(self.observations.order()))
             if isinstance(exc, ModelHTTPError) and exc.status_code in (
@@ -537,11 +562,11 @@ class MemoryService:
                 ):
                     return
                 jobs = [
-                    MemoryJob.model_validate_json(path.read_text(encoding="utf-8"))
+                    MemoryJob.model_validate(read_locked_json(path))
                     for path in self.jobs_dir.glob("*.json")
                 ]
                 for job in sorted(jobs, key=lambda item: (item.created_at, item.id)):
-                    if not job.done and not await self._execute(job):
+                    if not job.done and not await self._execute(job, retry=recover):
                         return
                 await self._migrate_core()
                 while window := self.observations.window(flush=flush):
@@ -631,12 +656,16 @@ class MemoryService:
             return json.dumps(dict(id=record.id, state=record.state))
         if not include_references:
             return record.model_dump_json()
+        references = await asyncio.gather(
+            *(
+                self.references.parse(self.references.load(key))
+                for key in record.reference_ids
+            )
+        )
         return ToolReturn(
             return_value=record.model_dump_json(),
             content=[
-                part
-                for key in record.reference_ids
-                for part in self.references.load(key).to_prompt()
+                part for reference in references for part in reference.to_prompt()
             ],
         )
 
@@ -702,12 +731,20 @@ class MemoryService:
             await self.store.clear(scope)
             if scope == "global":
                 await self.long_term.clear_all()
-                self.reset_injection_snapshot()
             else:
                 save_locked_json(
                     self.observations.cursor_path,
                     dict(consumed=len(self.observations.order())),
                 )
+            self._context_notices.append(
+                [
+                    TextContent(
+                        f"[记忆操作结果] 用户已确认清空 {'全局长期记忆' if scope == 'global' else '当前项目情景记忆'}。"
+                        "该范围内的旧记忆已失效，不要从会话快照恢复；新的明确授权可重新保存。",
+                        metadata={"origin": "memory_control"},
+                    )
+                ]
+            )
 
     async def clear_long_term(self):
         await self._clear("global")
@@ -725,6 +762,7 @@ class MemoryService:
             return False
 
     async def close(self):
-        await self._perception_factory.close()
+        if self._owns_factory:
+            await self._perception_factory.close()
         self.observations.close()
         await self.store.close()

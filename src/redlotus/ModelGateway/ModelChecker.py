@@ -22,7 +22,6 @@ from redlotus.config.app_config import (
     settings,
 )
 from redlotus.prompt import (
-    format_prompt_current_time,
     load_prompt,
 )
 
@@ -31,6 +30,7 @@ from redlotus.ModelGateway.usage_accounting import latest_usage_input_tokens
 from redlotus.infra import logger
 
 from pydantic_ai.messages import (
+    TextContent,
     ModelRequest,
     ModelResponse,
     UserPromptPart,
@@ -75,7 +75,6 @@ def context_usage_breakdown(
     }
 
 
-_OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
 _OPENROUTER_LOCK = threading.Lock()
 _OPENROUTER_META_MAP = None
 
@@ -94,8 +93,9 @@ def _ensure_openrouter_maps() -> None:
             if path.exists():
                 raw = json.loads(path.read_text(encoding="utf-8"))
             else:
-                with httpx.Client(timeout=15) as client:
-                    response = client.get(_OPENROUTER_URL)
+                metadata = settings()["model_metadata"]
+                with httpx.Client(timeout=metadata["timeout"]) as client:
+                    response = client.get(metadata["url"])
                     response.raise_for_status()
                     raw = response.json()
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -132,10 +132,11 @@ def get_effective_max_context(
     model_name: str | None = None,
     *,
     role,
+    context: dict | None = None,
 ) -> int:
     """有效上下文上限：config 覆盖 > 缓存 > 多源查找 > default_context_tokens。"""
     r: str = role if role is not None else get_context_profile_roles()[0]
-    ctx = get_context_config(r)
+    ctx = get_context_config(r) if context is None else context
     # Auxiliary roles may define a model without their own context profile. Only the
     # fallback budget is shared; model metadata and explicit role limits still win.
     fallback = ctx.get("default_context_tokens")
@@ -231,13 +232,10 @@ def _call_compressor_llm(
     *,
     system_prompt: str,
     user_content: str,
-    **kwargs: Any,
 ) -> str:
     from redlotus.ModelGateway.gateway import complete_text_sync
 
-    return complete_text_sync(
-        "compressor", system_prompt, user_content, **kwargs
-    ).strip()
+    return complete_text_sync("compressor", system_prompt, user_content).strip()
 
 
 def compress_history(
@@ -247,6 +245,7 @@ def compress_history(
     force: bool,
     task_state: str | None = None,
     retain_tail: bool = True,
+    context: dict | None = None,
 ) -> bool:
     """
     压缩三步：1) 按阈值或 force 触发；2) 头尾保留，中间段展成 Markdown 摘录；
@@ -256,8 +255,8 @@ def compress_history(
     if len(messages) < 2:
         return False
 
-    ctx = get_context_config(role)
-    max_ctx = get_effective_max_context(role=role)
+    ctx = get_context_config(role) if context is None else context
+    max_ctx = get_effective_max_context(role=role, context=ctx)
     used = latest_usage_input_tokens(messages)
     threshold = max_ctx * float(ctx["auto_compress_ratio"])
 
@@ -298,9 +297,7 @@ def compress_history(
         ),
     )
 
-    system_prompt = load_prompt("context_compress_structured_system.md").format(
-        current_time=format_prompt_current_time()
-    )
+    system_prompt = load_prompt("context_compress_structured_system.md")
     user_parts: list[str] = []
     if prev_summary:
         user_parts.append(
@@ -318,7 +315,16 @@ def compress_history(
     new_body = _build_compress_user_body(summary_md)
 
     summary_msg = ModelRequest(
-        parts=[UserPromptPart(content=new_body)],
+        parts=[
+            UserPromptPart(
+                content=[
+                    TextContent(
+                        new_body,
+                        metadata={"origin": "context_summary", "summary": summary_md},
+                    )
+                ]
+            )
+        ],
         metadata={"origin": "context_summary", "summary": summary_md},
     )
     new_messages = messages[:head_end] + [summary_msg] + messages[tail_start:]
@@ -363,9 +369,10 @@ async def get_effective_max_context_async(
     model_name: str | None = None,
     *,
     role: str | None = None,
+    context: dict | None = None,
 ) -> int:
     return await asyncio.to_thread(
-        lambda: get_effective_max_context(model_name, role=role)
+        lambda: get_effective_max_context(model_name, role=role, context=context)
     )
 
 
@@ -376,6 +383,7 @@ async def compress_history_async(
     force: bool,
     task_state: str | None = None,
     retain_tail: bool = True,
+    context: dict | None = None,
 ) -> bool:
     return await asyncio.to_thread(
         compress_history,
@@ -384,6 +392,7 @@ async def compress_history_async(
         force=force,
         task_state=task_state,
         retain_tail=retain_tail,
+        context=context,
     )
 
 
@@ -403,32 +412,88 @@ def _closed_boundaries(messages: list) -> list[int]:
     return boundaries
 
 
-def estimate_context_tokens(messages: list) -> int:
+def _estimate_text_tokens(text):
+    return sum(1 if ord(char) > 127 else 0.3 for char in text)
+
+
+def estimate_context_tokens(
+    messages: list, *, tools=(), include_instructions=True
+) -> int:
     # Include full tool outputs: the display transcript deliberately elides them.
+    from pydantic_ai import TextContent
+
     tokens = 0.0
     for message in messages:
         for part in getattr(message, "parts", ()):
             value = getattr(part, "content", getattr(part, "args", ""))
             if isinstance(value, (list, tuple)):
-                texts = [item if isinstance(item, str) else "[media]" for item in value]
-                tokens += sum(1024 for item in value if not isinstance(item, str))
+                texts = [
+                    item
+                    if isinstance(item, str)
+                    else item.content
+                    if isinstance(item, TextContent)
+                    else "[media]"
+                    for item in value
+                ]
+                tokens += sum(
+                    1024 for item in value if not isinstance(item, (str, TextContent))
+                )
                 value = "\n".join(texts)
             elif not isinstance(value, str):
                 value = str(value)
-            tokens += sum(1 if ord(char) > 127 else 0.3 for char in value) + 8
+            tokens += _estimate_text_tokens(value) + 8
+    if include_instructions:
+        instructions = next(
+            (
+                m.instructions
+                for m in reversed(messages)
+                if getattr(m, "instructions", None)
+            ),
+            "",
+        )
+        tokens += _estimate_text_tokens(instructions)
+    if tools:
+        schema = [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters_json_schema,
+            }
+            for tool in tools
+        ]
+        tokens += _estimate_text_tokens(json.dumps(schema, ensure_ascii=False))
     return int(tokens + 0.999)
 
 
 async def prepare_model_request(run, node, *, role: str, task_state: str = "") -> None:
     """Check capacity before every request, including requests within one tool chain."""
+    compacted = await compact_request_messages(
+        [*run.ctx.state.message_history, node.request], role=role, task_state=task_state
+    )
+    run.ctx.state.message_history[:] = compacted[:-1]
+    node.request = compacted[-1]
+
+
+async def compact_request_messages(
+    combined, *, role: str, task_state: str = "", target=None, tools=()
+) -> list:
+    """Build the bounded model view; original trace persistence belongs to the runner."""
     from redlotus.tools.memory.chat_history import ChatHistory
 
-    messages = list(run.ctx.state.message_history)
-    combined = [*messages, node.request]
-    limit = await get_effective_max_context_async(role=role)
-    threshold = limit * float(get_context_config(role)["auto_compress_ratio"])
+    messages, request = combined[:-1], combined[-1]
+    context = target.context if target else get_context_config(role)
+    limit = await get_effective_max_context_async(
+        model_name=target.name if target else None, role=role, context=context
+    )
+    threshold = limit * float(context["auto_compress_ratio"])
+    parameters = target.settings if target else get_model_and_params(role)[1]
+    input_budget = limit - int(parameters.get("max_tokens") or 0)
+    if input_budget <= 0:
+        raise CompressionValidationError(
+            "Configured output budget leaves no input capacity; check context and max_tokens in config.json."
+        )
     # Last model usage excludes its newly generated tools and the pending tool responses.
-    recent_tokens = estimate_context_tokens(combined)
+    recent_tokens = estimate_context_tokens(combined, tools=tools)
     for index in range(len(messages) - 1, -1, -1):
         if (
             isinstance(messages[index], ModelResponse)
@@ -437,33 +502,41 @@ async def prepare_model_request(run, node, *, role: str, task_state: str = "") -
             recent_tokens = max(
                 recent_tokens,
                 messages[index].usage.input_tokens
-                + estimate_context_tokens(combined[index:]),
+                + estimate_context_tokens(combined[index:], include_instructions=False),
             )
             break
-    if recent_tokens < threshold:
-        return
+    if recent_tokens < threshold and recent_tokens < input_budget:
+        return combined
     history = ChatHistory()
     history.set_messages(combined)
     boundaries = _closed_boundaries(combined)
     last_closed = max((i for i in boundaries if i < len(combined)), default=0)
-    retain_tail = estimate_context_tokens(combined[last_closed:]) < threshold
+    retain_tail = estimate_context_tokens(combined[last_closed:], tools=tools) < min(
+        threshold, input_budget
+    )
     changed = await compress_history_async(
-        history, role=role, force=True, task_state=task_state, retain_tail=retain_tail
+        history,
+        role=role,
+        force=True,
+        task_state=task_state,
+        retain_tail=retain_tail,
+        context={**context, "max_context_tokens": limit},
     )
     if not changed:
         raise CompressionValidationError(
             "Context has no safe compaction boundary; original messages are retained."
         )
     compacted = history.messages
+    if request.instructions is not None:
+        compacted[-1].instructions = request.instructions
     if not retain_tail:
         # All calls in this batch have completed; their summary can replace the entire batch.
         latest_inputs = [
-            part for part in node.request.parts if isinstance(part, UserPromptPart)
+            part for part in request.parts if isinstance(part, UserPromptPart)
         ]
         compacted[-1].parts.extend(latest_inputs)
-        node.request = compacted[-1]
-    if estimate_context_tokens(compacted) >= limit:
+    if estimate_context_tokens(compacted, tools=tools) >= input_budget:
         raise CompressionValidationError(
             "The current input exceeds the context window; use a smaller input."
         )
-    run.ctx.state.message_history[:] = compacted[:-1]
+    return compacted

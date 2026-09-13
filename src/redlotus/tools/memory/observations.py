@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 
 from filelock import FileLock, Timeout
 
@@ -10,8 +9,11 @@ from redlotus.infra.persist_utils import (
     save_locked_json,
     atomic_write_json,
     iso_utc_now,
+    read_locked_json,
 )
 from redlotus.runtime.context import WorkspaceContext
+from redlotus.infra.paths import project_data_dir, migrate_project_data
+from redlotus.config.app_config import settings
 from redlotus.tools.memory.models import ObservedTurn, WindowManifest
 
 
@@ -20,13 +22,19 @@ class ObservationStore:
         self,
         workspace: WorkspaceContext,
         *,
-        window_turns: int = 25,
-        overlap_turns: int = 5,
+        window_turns: int | None = None,
+        overlap_turns: int | None = None,
     ):
+        config = settings()["memory_perception"]
+        window_turns = config["window_turns"] if window_turns is None else window_turns
+        overlap_turns = (
+            config["overlap_turns"] if overlap_turns is None else overlap_turns
+        )
         if not 0 <= overlap_turns < window_turns:
             raise ValueError("Memory overlap must be smaller than its window")
         self.workspace = workspace
-        self.root = workspace.root / ".redlotus" / "memory"
+        migrate_project_data(workspace)
+        self.root = project_data_dir(workspace) / "memory"
         self.turns = self.root / "turns"
         self.order_path = self.root / "event_order.json"
         self.cursor_path = self.root / "perception_state.json"
@@ -75,22 +83,16 @@ class ObservationStore:
                 atomic_write_json(self.order_path, order)
 
     def order(self) -> list[str]:
-        return (
-            json.loads(self.order_path.read_text(encoding="utf-8"))
-            if self.order_path.exists()
-            else []
-        )
+        return read_locked_json(self.order_path) if self.order_path.exists() else []
 
     def cursor(self) -> int:
         if not self.cursor_path.exists():
             return 0
-        return int(json.loads(self.cursor_path.read_text(encoding="utf-8"))["consumed"])
+        return int(read_locked_json(self.cursor_path)["consumed"])
 
     def read(self, ids: list[str]) -> list[ObservedTurn]:
         return [
-            ObservedTurn.model_validate_json(
-                (self.turns / f"{key}.json").read_text(encoding="utf-8")
-            )
+            ObservedTurn.model_validate(read_locked_json(self.turns / f"{key}.json"))
             for key in ids
         ]
 
@@ -135,17 +137,14 @@ class ObservationStore:
         known = set(self.order())
         paths = sorted(
             self.turns.glob("*.json"),
-            key=lambda path: json.loads(path.read_text(encoding="utf-8")).get(
-                "created_at", ""
-            ),
+            key=lambda path: read_locked_json(path).get("created_at", ""),
         )
         for path in paths:
             if path.stem in known:
                 continue
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            event = ObservedTurn.model_validate(raw)
             try:
-                with FileLock(self.turns / f"{event.id}.active.lock", timeout=0):
+                with FileLock(self.turns / f"{path.stem}.active.lock", timeout=0):
+                    event = ObservedTurn.model_validate(read_locked_json(path))
                     if event.status == "running":
                         event.status = "unverified"
                         event.error = "Previous process ended before the turn outcome was recorded."

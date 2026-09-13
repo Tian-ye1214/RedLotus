@@ -14,6 +14,8 @@ from pydantic_ai.messages import (
 )
 import asyncio
 
+from redlotus.ModelGateway.input_policy import InputLimitError
+
 
 class AgentRunner:
     """The inner loop: finish a tool batch, assemble steering, request the model."""
@@ -31,6 +33,8 @@ class AgentRunner:
         on_complete: Callable[[], None] | None = None,
         event_stream_handler=None,
     ):
+        original_history = list(message_history)
+        response_received = False
         async with agent.iter(
             prompt, message_history=message_history, usage_limits=usage_limits
         ) as run:
@@ -71,6 +75,8 @@ class AgentRunner:
                                 async for _ in events():
                                     pass
                     next_node = await run.next(node)
+                    if agent.is_model_request_node(node):
+                        response_received = True
                     if results and agent.is_model_request_node(next_node):
                         ids = {p.tool_call_id for p in results}
                         other = [
@@ -99,6 +105,11 @@ class AgentRunner:
                 )
                 if on_node:
                     await on_node(run)
+                if isinstance(exc, InputLimitError) and not response_received:
+                    # The rejected input remains in the journal, outside the next request's view.
+                    run.ctx.state.message_history[:] = original_history
+                    if on_node:
+                        await on_node(run)
                 raise
         return run.result
 

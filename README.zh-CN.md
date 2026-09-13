@@ -106,7 +106,7 @@ playwright install chromium
 
 ## 首次配置
 
-源码运行默认读取 `src/redlotus/config.json`。四个角色的模型名称、采样与推理参数均从这一文件读取；`/config` 显示当前实际路径。
+开发入口 `python main.py` 显式读取 `src/redlotus/config.json`。pip 安装的 `redlotus` 和 PyInstaller 程序读取当前操作系统用户的全局配置，不随启动目录变化；Windows 默认为 `%LOCALAPPDATA%\RedLotus\config.json`。`/config` 显示实际来源。
 
 可用 `REDLOTUS_CONFIG_FILE` 指定另一份配置，或用 `REDLOTUS_CONFIG_DIR` 指定包含 `config.json` 的目录。显式指定的文件不存在时，会复制随包默认配置。日志、长期记忆和引用原件仍放在用户数据目录，可用 `REDLOTUS_DATA_DIR` 指定独立位置。
 
@@ -119,9 +119,9 @@ playwright install chromium
 }
 ```
 
-RedLotus 接受 OpenAI 兼容接口。Manager、Worker、Coordinator 和 Compressor 可以分别配置模型。短期记忆的向量检索与重排使用 `SILICONFLOW_BASE`、`SILICONFLOW_KEY` 和 `RAG_models` 配置。
+网关复用 Pydantic AI 的 OpenAI Chat、OpenAI Responses、Anthropic Messages 和 Google 适配。Manager、Worker、Coordinator、Compressor 可以分别配置或选择命名预设。感知通过 `memory_perception.model_role` 选择子 Agent 配置，默认使用 Worker，与上下文压缩独立。RAG 连接、模型及请求策略由 `SILICONFLOW_BASE`、`SILICONFLOW_KEY`、`RAG_models` 和 `rag_service` 提供。
 
-服务地址和凭据也可以通过环境变量、用户配置目录或当前项目的 `.env` 提供。不要将包含真实密钥的配置文件提交到 Git。
+凭据可以使用命名环境引用或用户配置目录的 `.env`；只有开发入口显式选择仓库 `.env`，安装入口不搜索当前项目。不要将真实密钥提交到 Git。详细结构见 [全局配置、网关预设与安装说明](docs/gateway-installation.md)。
 
 ## 终端使用
 
@@ -186,9 +186,9 @@ npx clawhub --dir skills install <slug>
 
 ## 文件与数据位置
 
-- 会话轨迹追加保存在 `.redlotus/*.jsonl`，兼容快照继续可加载；压缩只改变模型视图，完整原文保留。
-- 项目情景保存在 `.redlotus/memory/episodes/`，LanceDB 按项目进行向量检索和重排；服务不可用时提供项目内文本检索。
-- 项目情景与全局长期记录保存在 LanceDB `memory_records_v3`，按 scope 和项目隔离，通过向量检索与重排召回。`MEMORY.md` 只保存用户画像、环境、行为约束与通用经验，每回合完整读取，不设固定字符上限。
+- 会话轨迹、引用快照和感知任务保存在全局用户数据目录，项目事件按 `project_id` 分区；压缩只改变模型视图，完整原文保留。
+- 项目情景与全局长期记录保存在 LanceDB `memory_records_v3`，按 scope 和项目隔离，通过向量检索与重排召回，服务不可用时保留文本检索。
+- `MEMORY.md` 保存用户画像、环境、行为约束与通用经验，不设固定字符上限。它与 system prompt 在会话开始时完整形成快照，写入记忆不重写本会话前缀；新信息通过工具结果和检索消费，新会话读取最新版本。
 - 文件和命令工具默认操作当前项目，生成产物保存在 `WorkDatabase/`。`/cd` 先取消旧会话，再切换运行上下文。
 
 普通输入逐条 FIFO 消费，`/urgent` 与当前工具批次结果合并进入后续模型请求。子 Agent 各自拥有线程、事件循环和客户端，默认最多同时运行 3 个。每个结束的回合只追加原始事件；默认 25 回合、5 回合重叠后由 LLM 聚合，收尾时补处理短窗口。主动记忆通过 remember 即时处理，失败和取消不会自动成为成功经验。

@@ -55,6 +55,8 @@ class UsageTotals:
     reasoning_tokens: int = 0
     prompt_billable_tokens: int = 0
     completion_billable_tokens: int = 0
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int = 0
 
     def add_usage(self, usage: Any, billable: BillableTokens) -> None:
         self.input_tokens += usage.input_tokens
@@ -62,6 +64,16 @@ class UsageTotals:
         self.reasoning_tokens += usage.details.get("reasoning_tokens", 0)
         self.prompt_billable_tokens += billable.prompt_tokens
         self.completion_billable_tokens += billable.completion_tokens
+        details = usage.details
+        if (
+            "prompt_cache_hit_tokens" in details
+            and "prompt_cache_miss_tokens" in details
+        ):
+            self.cache_hit_tokens += details["prompt_cache_hit_tokens"]
+            self.cache_miss_tokens += details["prompt_cache_miss_tokens"]
+        elif usage.cache_read_tokens:
+            self.cache_hit_tokens += usage.cache_read_tokens
+            self.cache_miss_tokens += usage.input_tokens - usage.cache_read_tokens
 
     def add_totals(self, other: "UsageTotals") -> None:
         for name in UsageTotals.__dataclass_fields__:

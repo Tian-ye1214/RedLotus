@@ -7,7 +7,7 @@ from pydantic_ai.capabilities import Capability
 
 from redlotus.runtime import tool_telemetry
 from redlotus.config.app_config import get_agent_run_policy
-from redlotus.ModelGateway.model_factory import create_model
+from redlotus.ModelGateway.model_factory import ModelTarget, create_model
 
 
 _TOOL_DESCRIPTIONS = {
@@ -70,19 +70,35 @@ def create_worker_toolsets_and_capabilities(tool_groups):
 
 def create_agent(
     model_name: Any,
-    parameter: dict,
+    parameter: dict | None = None,
     instructions: str | None = None,
     *,
     toolsets: list | None = None,
     capabilities: list | None = None,
     output_type: Any = str,
+    role: str | None = None,
+    follow_config: bool = False,
+    task_state=None,
 ):
     model = (
         create_model(model_name, parameter)
-        if isinstance(model_name, str)
+        if isinstance(model_name, (str, ModelTarget))
         else model_name
     )
 
+    capabilities = list(capabilities or [])
+    if role and isinstance(model_name, ModelTarget):
+        from redlotus.ModelGateway.request_policy import RequestPolicy
+
+        capabilities.append(
+            RequestPolicy(
+                role,
+                model_name,
+                model,
+                follow_config=follow_config,
+                task_state=task_state,
+            )
+        )
     return Agent(
         model,
         output_type=output_type,

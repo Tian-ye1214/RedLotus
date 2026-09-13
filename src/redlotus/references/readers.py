@@ -8,39 +8,12 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from html.parser import HTMLParser
 
 from redlotus.infra.paths import user_data_dir
-from redlotus.infra.path_sandbox import runtime_repo_root
+from redlotus.config.app_config import get_env
 from redlotus.infra.subprocess_runner import run_subprocess
+from redlotus.infra.persist_utils import finish_file_io
 from redlotus.references.models import ReferencePart
-
-
-class _HTMLTextExtractor(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self._chunks: list[str] = []
-        self._ignored_depth = 0
-
-    def handle_starttag(self, tag: str, attrs) -> None:
-        if tag in {"script", "style"}:
-            self._ignored_depth += 1
-            return
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style"}:
-            self._ignored_depth = max(0, self._ignored_depth - 1)
-            return
-
-    def handle_data(self, data: str) -> None:
-        if self._ignored_depth:
-            return
-        text = data.strip()
-        if text:
-            self._chunks.append(text)
-
-    def text(self) -> str:
-        return "\n".join(chunk for chunk in self._chunks if chunk.strip())
 
 
 class OfficeConverter:
@@ -49,7 +22,7 @@ class OfficeConverter:
     @staticmethod
     def executable() -> str:
         candidates = [
-            os.environ.get("LIBREOFFICE_PATH"),
+            get_env("LIBREOFFICE_PATH", warn=False),
             shutil.which("soffice.com"),
             shutil.which("soffice"),
             str(
@@ -57,10 +30,6 @@ class OfficeConverter:
                 / "LibreOffice/program/soffice.com"
             ),
             str(user_data_dir() / "tools/libreoffice/program/soffice.com"),
-            str(
-                runtime_repo_root().parent.parent
-                / "WorkDatabase/tools/libreoffice/program/soffice.com"
-            ),
         ]
         for value in candidates:
             if value and Path(value).is_file():
@@ -133,8 +102,8 @@ class DocumentReader:
             ".html": self.html,
             ".htm": self.html,
         }
-        return await asyncio.to_thread(
-            readers.get(extension, self.text), source, directory
+        return await finish_file_io(
+            asyncio.to_thread(readers.get(extension, self.text), source, directory)
         )
 
     @staticmethod
@@ -156,14 +125,53 @@ class DocumentReader:
         return [ReferencePart.from_text(text)]
 
     def csv(self, source: Path, directory: Path) -> list[ReferencePart]:
-        rows = list(csv.reader(io.StringIO(self.decode(source.read_bytes()))))
+        text = self.decode(source.read_bytes())
+        try:
+            dialect = csv.Sniffer().sniff(text[:65536], delimiters=",;\t|")
+        except csv.Error:
+            dialect = csv.excel
+        rows = list(csv.reader(io.StringIO(text), dialect))
         return [ReferencePart.from_text(rows, locator="CSV 行列")]
 
     def html(self, source: Path, directory: Path) -> list[ReferencePart]:
-        parser = _HTMLTextExtractor()
-        parser.feed(self.decode(source.read_bytes()))
-        parser.close()
-        return [ReferencePart.from_text(parser.text())]
+        from lxml import html, etree
+
+        root = html.fromstring(
+            self.decode(source.read_bytes()).encode("utf-8"),
+            parser=html.HTMLParser(encoding="utf-8"),
+        )
+        etree.strip_elements(root, "script", "style", with_tail=False)
+        tables = []
+        for number, table in enumerate(root.xpath("self::table | .//table"), 1):
+            rows = [
+                [cell.text_content().strip() for cell in row.xpath("./th | ./td")]
+                for row in table.xpath("./tr | ./thead/tr | ./tbody/tr | ./tfoot/tr")
+            ]
+            tables.append(ReferencePart.from_text(rows, locator=f"HTML 表格 {number}"))
+            table.drop_tree()
+        for link in root.xpath(".//a[@href]"):
+            link.tail = f" ({link.get('href')})" + (link.tail or "")
+        for element in root.iter():
+            if element.tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+                element.text = "#" * int(element.tag[1]) + " " + (element.text or "")
+            if element.tag in (
+                "p",
+                "div",
+                "section",
+                "li",
+                "br",
+                "h1",
+                "h2",
+                "h3",
+                "h4",
+                "h5",
+                "h6",
+            ):
+                element.tail = "\n" + (element.tail or "")
+        return [
+            ReferencePart.from_text(root.text_content().strip(), locator="HTML 正文"),
+            *tables,
+        ]
 
     def pdf(self, source: Path, directory: Path) -> list[ReferencePart]:
         import fitz
@@ -285,7 +293,7 @@ class DocumentReader:
         for number, slide in enumerate(Presentation(source).slides, 1):
 
             def read_shapes(shapes):
-                for index, shape in enumerate(shapes):
+                for shape in shapes:
                     locator = f"幻灯片 {number} / 形状 {shape.shape_id}"
                     if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
                         read_shapes(shape.shapes)
@@ -314,7 +322,7 @@ class DocumentReader:
                     if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                         target = (
                             directory
-                            / f"slide-{number}-image-{index}.{shape.image.ext}"
+                            / f"slide-{number}-image-{shape.shape_id}.{shape.image.ext}"
                         )
                         target.write_bytes(shape.image.blob)
                         parts.append(

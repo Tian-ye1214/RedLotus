@@ -83,9 +83,9 @@ async def test_bot_fifo_stop_and_owner_channel_binding(tmp_path, monkeypatch):
     started, hold = asyncio.Event(), asyncio.Event()
     seen, sent = [], []
 
-    async def create(*args):
+    async def create(*args, **kwargs):
         async def model(messages, info):
-            text = messages[-1].parts[0].content
+            text = messages[-1].parts[0].content[0]
             seen.append(text)
             if text == "first":
                 started.set()
@@ -128,9 +128,9 @@ async def test_tui_accepts_fifo_input_while_preparing(tmp_path, monkeypatch):
     started, release = asyncio.Event(), asyncio.Event()
     inputs = []
 
-    async def create(*args):
+    async def create(*args, **kwargs):
         async def model(messages, info):
-            text = messages[-1].parts[0].content
+            text = messages[-1].parts[0].content[0]
             inputs.append(text)
             if len(inputs) == 1:
                 started.set()
@@ -157,7 +157,7 @@ async def test_tui_urgent_and_stop_do_not_answer_pending_question(
     system = configured_system(tmp_path, monkeypatch)
     configure_cli_hooks(system, monkeypatch, preparer="system", enter_workspace=True)
 
-    async def create(*args):
+    async def create(*args, **kwargs):
         async def model(messages, info):
             if any(isinstance(p, ToolReturnPart) for p in messages[-1].parts):
                 yield "done"
@@ -195,9 +195,9 @@ async def test_goal_iterations_form_one_episode_from_original_user(
     system = configured_system(tmp_path, monkeypatch)
     prompts = []
 
-    async def create(*args):
+    async def create(*args, **kwargs):
         async def model(messages, info):
-            prompts.append(messages[-1].parts[0].content)
+            prompts.append(messages[-1].parts[0].content[0])
             marker = "CONTINUE" if len(prompts) == 1 else "DONE"
             yield "检查结果<!-- REDLOTUS_GOAL: " + marker + " -->"
 
@@ -282,9 +282,9 @@ async def test_urgent_after_final_response_is_queued_instead_of_lost(
     entered, release = asyncio.Event(), asyncio.Event()
     inputs = []
 
-    async def create(*args):
+    async def create(*args, **kwargs):
         async def model(messages, info):
-            inputs.append(messages[-1].parts[0].content)
+            inputs.append(messages[-1].parts[0].content[0])
             yield "done"
 
         return Agent(FunctionModel(stream_function=model))
@@ -324,7 +324,12 @@ async def test_clear_cancels_input_preparation_before_it_can_start_old_task(
     monkeypatch.setattr(system, "generate_task_title", title)
     monkeypatch.setattr(cli, "_publish_context_usage", noop)
     task = asyncio.create_task(
-        cli._start_user_turn_from_raw_input("old input", state, wait_for_turn=False)
+        cli._start_user_turn_from_raw_input(
+            "old input",
+            state,
+            wait_for_turn=False,
+            references=asyncio.sleep(0, result=[]),
+        )
     )
     await asyncio.wait_for(started.wait(), 5)
     await cli.reset_session(state.history)
@@ -345,9 +350,9 @@ async def test_legacy_cli_keeps_reading_while_model_waits(tmp_path, monkeypatch)
     )
     inputs = []
 
-    async def create(*args):
+    async def create(*args, **kwargs):
         async def model(messages, info):
-            text = messages[-1].parts[0].content
+            text = messages[-1].parts[0].content[0]
             inputs.append(text)
             if text == "first":
                 started.set()

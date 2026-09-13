@@ -8,8 +8,12 @@ from redlotus.workspace.workspace import current_workspace
 
 from prompt_toolkit.completion import Completer, Completion
 
-from redlotus.cli.completion import completion_for_input, COMMANDS, EFFORT_VALUES
-from redlotus.config.app_config import get_agent_roles, role_supported_thinking_efforts
+from redlotus.cli.completion import completion_for_input, COMMANDS
+from redlotus.config.app_config import (
+    get_agent_roles,
+    role_supported_thinking_efforts,
+    supported_thinking_efforts,
+)
 
 _COMPLETION_LIMIT = 50
 
@@ -37,7 +41,7 @@ def input_completions(text):
         values = (
             ("off", *role_supported_thinking_efforts(context.role))
             if context.role in get_agent_roles()
-            else EFFORT_VALUES
+            else ("off", *supported_thinking_efforts(None))
         )
     else:
         values = choices[context.kind]

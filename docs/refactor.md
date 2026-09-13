@@ -6,16 +6,16 @@
 
 自动感知默认消费 25 个已结束回合，重叠 5 回合：1–25、21–45。工具及子 Agent 不单独计回合。退出、清空会话和切换项目时补提炼新增的短窗口；没有新事件时不调用 LLM。
 
-`MemoryPerception` 使用现有 compressor 配置，复用子 Agent 工厂实现，以单独的 1 个感知执行槽运行。任务子 Agent 的既有并发上限保持不变，避免所有任务子 Agent 等待主动记忆时占满同一个工厂而死锁。每窗重新消费关联的原始图片；视频识别本轮按用户要求排除，不作为通过项。大窗口先分批读取，再由 LLM 统一归纳；分批结果不会独立成为记忆。
+`MemoryPerception` 是独立的子 Agent 任务，通过 `memory_perception.model_role` 选择配置，默认复用 Worker。上下文压缩只使用 Compressor。感知共用一个由配置限制并发的工厂；旧项目感知保持原上下文在后台完成，目录切换不等待它，结果不进入新项目会话。任务子 Agent 使用自己的工厂，避免全部任务在等待主动记忆时占满感知执行槽。每窗重新消费关联的原始图片；视频本轮排除。大窗口分批读取后再统一归纳，中间结果不独立入库。
 
 | 数据 | 位置与作用 |
 |---|---|
-| 原始观察 | 项目 `.redlotus/memory/turns/*.json`；`event_order.json` 保存稳定完成顺序，`perception_state.json` 保存消费游标 |
-| 原始轨迹 | `.redlotus/*.jsonl`；`*_ModelMessages.json` 是可加载的上下文快照，不是正式记忆库 |
+| 原始观察 | 用户数据目录 `projects/<project_id>/memory/turns/*.json`；`event_order.json` 保存完成顺序，`perception_state.json` 保存消费游标 |
+| 原始轨迹 | 用户数据目录 `projects/<project_id>/*.jsonl`；`*_ModelMessages.json` 是可加载的上下文视图 |
 | 引用清单与快照 | 用户数据目录 `references/manifests/*.json` 和 `references/blobs/`，保留来源、校验和、原件快照及格式解析结果 |
-| jobs 与处理状态 | `.redlotus/memory/jobs/*.json`、`processor.json`；迁移任务备份在 `LongTermMemory/migration_backup/jobs/` |
+| jobs 与处理状态 | `projects/<project_id>/memory/jobs/*.json`、`processor.json`；迁移任务备份在 `LongTermMemory/migration_backup/jobs/` |
 | 正式记忆 | LanceDB 表 `memory_records_v3`，同一张表按 `project` / `global` scope 隔离；完整记录由此表拥有 |
-| 核心文档 | `LongTermMemory/MEMORY.md`，每轮完整注入用户画像、环境、约束及通用经验，不设固定字符上限 |
+| 核心文档 | `LongTermMemory/MEMORY.md`，会话开始时完整注入并固定快照，不设字符硬限制；后续更新通过结果与检索消费 |
 
 `remember` 使用 LLM 处理真实用户主动要求，不等自动窗口。返回记录 ID、scope 和实际保存状态；失败请求保留并明确报错。`search_memory` / `read_memory` 消费当前项目及本人全局资料；`search_episodes` / `read_episode` 保留为项目情景专用入口。
 
@@ -33,13 +33,13 @@
 
 ## 配置与资源
 
-源码运行时默认读取 `src/redlotus/config.json`；用户可以通过 `REDLOTUS_CONFIG_FILE` 或 `REDLOTUS_CONFIG_DIR` 指定配置位置。`REDLOTUS_DATA_DIR` 只改变全局可写数据根，不改变项目原始观察的位置。
+开发入口 `main.py` 显式读取项目配置，pip 与冻结程序使用本机用户全局配置。可用 `REDLOTUS_CONFIG_FILE` 或 `REDLOTUS_CONFIG_DIR` 覆盖来源。`REDLOTUS_DATA_DIR` 改变包括项目观察在内的全局数据根，项目产物仍属于当前项目的 `WorkDatabase`。
 
-模型、服务、采样/推理参数、上下文阈值、embedding 和 reranker 配置保持原样。新感知使用既有 compressor 角色，不增设模型配置项。辅助角色没有独立 context 段时，采用 coordinator 的 default_context_tokens 作为预算兜底；实际调用的模型仍取 compressor 配置。
+模型、服务、采样/推理、输入预算与 RAG 参数由 JSON 配置提供，运行时使用独立深拷贝。感知的模型、输出上限、上下文和引用预算均来自 `memory_perception.model_role` 所选角色；压缩配置不影响感知。完整参数结构与预设示例见 [网关与安装说明](gateway-installation.md)。
 
 ```json
 {
-  "memory_perception": {"window_turns": 25, "overlap_turns": 5},
+  "memory_perception": {"window_turns": 25, "overlap_turns": 5, "model_role": "worker", "max_concurrent": 1},
   "input_limits": {"defaults": {"max_file_bytes": 20000000}},
   "long_term_memory": {"table_name": "semantic_memories"}
 }
@@ -57,11 +57,11 @@ RAG 向量索引表使用 `<table_name>_records_v2_<embedding模型哈希>` 命�
 
 支持 `@路径`、`@"含空格路径"`、`@{路径}` 和明确的图片/视频路径。只解析用户原始输入，不扫描引用文件正文中的其他路径。每次最多 20 个规范路径去重后的文件；网关未声明大小时单文件上限为 20,000,000 字节。
 
-文档读取保留页码、表格、工作表、行列关系、公式、幻灯片、图片和备注等信息。旧 DOC/PPT/XLS 通过 LibreOffice 无界面转换；图片和视频可以按原生多模态内容交给网关。引用内容始终带“引用文件”及来源标识，不冒充用户指令。
+文档读取保留页码、表格、工作表、行列关系、公式、幻灯片、图片和备注。旧 DOC/PPT 使用 LibreOffice 无界面转换，XLS 使用文档读取器。图片按 SDK 原生多模态内容传递；视频尚未完成真实协议验收。引用内容带“引用文件”和来源标识，不冒充用户指令。
 
 超数量、大小、缺失或格式错误明确返回失败，不能偷偷丢文件。视频识别本轮按用户要求排除，不能把视频协议编码、本地容器检查或文本描述当作视频识别通过。
 
-LibreOffice 可使用系统安装，也可设置 `LIBREOFFICE_PATH` 指向 `soffice.com` / `soffice`。开发目录支持 `WorkDatabase/tools/libreoffice/program/soffice.com`。转换使用独立配置目录、禁用宏和可取消的进程树，不修改用户 Office 配置。
+LibreOffice 可使用系统安装，或设置 `LIBREOFFICE_PATH` 指向 `soffice.com` / `soffice`；不依赖开发仓库中的工具路径。转换使用独立配置目录、禁用宏和可取消的进程树，不修改用户 Office 配置。
 
 ## 迁移
 
@@ -79,7 +79,7 @@ uv run playwright install chromium
 uv run python scripts/real_acceptance.py --root <全新的NTFS测试目录>
 ```
 
-运行前需准备 LibreOffice；可使用系统安装，或设置 `LIBREOFFICE_PATH` 指向 `soffice.com` / `soffice`（开发目录也支持 `WorkDatabase/tools/libreoffice/program/soffice.com`）。上述命令验收实际 CLI 控制器、Textual 界面、模型和工具；模型配置只读，测试存储隔离，请求审计只记录元数据，不伪造响应。视频用例默认关闭，本轮不使用 `--include-video`，不报告视频识别通过。
+运行前需准备 LibreOffice；可使用系统安装，或设置 `LIBREOFFICE_PATH` 指向 `soffice.com` / `soffice`。上述命令验收实际 CLI 控制器、Textual 界面、模型和工具；模型配置只读，测试存储隔离，请求审计记录真实用量与元数据，不伪造响应。视频用例默认关闭，本轮不使用 `--include-video`，不报告视频识别通过。
 
 ```powershell
 uv run python scripts/check_references.py --root WorkDatabase/reference-validation

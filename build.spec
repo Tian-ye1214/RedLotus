@@ -1,20 +1,47 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller onedir：与 main.py 同目录执行
-#   pyinstaller main.spec
+#   pyinstaller build.spec
 
 import os
+from pathlib import Path
 
 from PyInstaller.utils.hooks import copy_metadata
 
-block_cipher = None
 project = os.path.dirname(os.path.abspath(SPEC))
+source_root = Path(project, "src", "redlotus")
+bundle_mode = os.environ.get("REDLOTUS_PYINSTALLER_MODE", "onedir")
+
+
+def resource_files(source: Path, destination: str):
+    """Collect only the files beneath an explicitly approved resource root."""
+    return [
+        (str(path), str(Path(destination, path.relative_to(source).parent)))
+        for path in source.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.relative_to(source).parts
+        and path.name != ".env"
+        and path.suffix not in {".pyc", ".pyo"}
+        and not path.name.endswith(".log")
+        and ".log." not in path.name
+    ]
+
+
+datas = [
+    (str(source_root / "config.default.json"), "redlotus"),
+    (str(source_root / "API" / "config.yaml.example"), "redlotus/API"),
+    *resource_files(source_root / "skills", "redlotus/skills"),
+    *[
+        (str(path), "redlotus/prompts")
+        for path in (source_root / "prompts").glob("*.md")
+    ],
+]
 
 a = Analysis(
     [os.path.join(project, "main.py")],
     pathex=[project, os.path.join(project, "src")],
     binaries=[],
     datas=[
-        (os.path.join(project, "src", "redlotus"), "redlotus"),
+        *datas,
         *copy_metadata("genai_prices"),
         *copy_metadata("pydantic_ai_slim"),
     ],
@@ -23,39 +50,47 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
+    optimize=0,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="Agent",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    console=True,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
+if bundle_mode == "onefile":
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        name="Agent",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=True,
+        disable_windowed_traceback=False,
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="Agent",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=True,
+        disable_windowed_traceback=False,
+    )
 
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="Agent",
-)
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="Agent",
+    )

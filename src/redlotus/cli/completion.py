@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from redlotus.config.app_config import (
-    THINKING_EFFORTS,
+    settings,
 )
 
 COMMAND_HELP = {
@@ -24,7 +24,7 @@ COMMAND_HELP = {
     "/pwd": "查看当前项目目录",
     "/cd": "/cd <path>：切换项目并加载该项目对话",
     "/skills": "查看已加载 Skills",
-    "/agent": "/agent <role> <模型名>：查看或切换角色模型",
+    "/agent": "/agent <role> <预设或模型名>：下一次请求切换模型，保留会话",
     "/effort": "/effort <role> off 或支持的级别：查看或设置思考",
     "/api": "查看配置对话；/api embedding 配置 embedding/rerank 接口",
     "/compress": "压缩 Manager / Coordinator 上下文",
@@ -36,8 +36,6 @@ COMMAND_HELP = {
     "/tasks": "查看任务状态与依赖",
 }
 COMMANDS = tuple(COMMAND_HELP)
-
-EFFORT_VALUES: tuple[str, ...] = ("off", *THINKING_EFFORTS)
 
 CompletionKind = Literal[
     "command", "agent_role", "effort_value", "literal_choice", "file_path"
@@ -71,6 +69,14 @@ def completion_for_input(text: str) -> InputCompletion | None:
         prefix = text[len("/agent ") :]
         if " " not in prefix:
             return InputCompletion(kind="agent_role", prefix=prefix)
+        role, selected = prefix.split(" ", 1)
+        if " " not in selected:
+            return InputCompletion(
+                kind="literal_choice",
+                prefix=selected,
+                choices=tuple(settings().get("model_presets", {})),
+                role=role,
+            )
         return None
 
     if text.startswith("/effort "):

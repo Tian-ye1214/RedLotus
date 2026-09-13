@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
+import hashlib
 from copy import deepcopy
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from redlotus.infra.persist_utils import save_locked_json
-from redlotus.workspace.workspace import current_workspace
+from redlotus.infra.persist_utils import save_locked_json, file_lock, atomic_write_json
 
 if TYPE_CHECKING:
     from pydantic_ai.usage import UsageLimits as _UsageLimits
@@ -19,27 +17,75 @@ from redlotus.infra.paths import config_file, default_config_file, dotenv_file
 from pydantic_ai.usage import UsageLimits
 from redlotus.runtime.runtime_state import AgentRunPolicy
 
-CONFIG_FILE, DOTENV_FILE = config_file(), dotenv_file()
-
-_CONFIG: dict[str, Any] | None = None
+_CONFIG: tuple[tuple, dict[str, Any]] | None = None
 _DOTENV_CACHE: dict[tuple, dict[str, str]] | None = None
 _API_CONFIG_KEYS = {"BASE_URL", "API_KEY", "SILICONFLOW_BASE", "SILICONFLOW_KEY"}
-THINKING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
 
 
-def _seed_config_if_missing() -> None:
-    if CONFIG_FILE.exists():
-        return
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(default_config_file(), CONFIG_FILE)
+def _copy_missing_defaults(config, defaults, section=""):
+    for key, value in defaults.items():
+        if key not in config:
+            config[key] = deepcopy(value)
+        elif (
+            isinstance(value, dict)
+            and isinstance(config[key], dict)
+            and section != "models"
+            and key not in ("gateways", "model_presets")
+        ):
+            if key == "context":
+                contexts = config[key]
+                roles = set(defaults["models"]) & set(value)
+                if (
+                    not roles.intersection(contexts)
+                    and "default_context_tokens" in contexts
+                ):
+                    _copy_missing_defaults(contexts, value["coordinator"])
+                    _copy_missing_defaults(
+                        contexts, {"compression": value["compression"]}
+                    )
+                    continue
+                value = deepcopy(value)
+                for role in roles:
+                    value[role] = {
+                        k: v
+                        for k, v in value[role].items()
+                        if k not in contexts.get("defaults", {})
+                    }
+            _copy_missing_defaults(config[key], value, key)
+
+
+def initialize_config() -> None:
+    path = config_file()
+    with file_lock(path):
+        defaults = json.loads(default_config_file().read_text(encoding="utf-8"))
+        if not path.exists():
+            atomic_write_json(path, defaults)
+            return
+        raw = path.read_bytes()
+        current = json.loads(raw)
+        updated = deepcopy(current)
+        _copy_missing_defaults(updated, defaults)
+        if updated != current:
+            backup = (
+                path.parent
+                / "config-backups"
+                / (hashlib.sha256(raw).hexdigest() + ".json")
+            )
+            if not backup.exists():
+                atomic_write_json(backup, current)
+            atomic_write_json(path, updated)
 
 
 def load_config() -> dict[str, Any]:
     global _CONFIG
-    _seed_config_if_missing()
-    with open(CONFIG_FILE, encoding="utf-8") as f:
-        _CONFIG = json.load(f)
-    return _CONFIG
+    initialize_config()
+    path = config_file()
+    with file_lock(path):
+        with open(path, encoding="utf-8") as f:
+            value = json.load(f)
+            version = (path, os.fstat(f.fileno()).st_mtime_ns)
+    _CONFIG = (version, value)
+    return deepcopy(value)
 
 
 def reload_config() -> dict[str, Any]:
@@ -50,24 +96,18 @@ def reload_config() -> dict[str, Any]:
 
 
 def settings() -> dict[str, Any]:
-    if _CONFIG is None:
-        load_config()
-    return _CONFIG  # type: ignore[return-value]
-
-
-def _dotenv_files() -> list[Path]:
-    """.env 来源：用户配置目录优先，当前工作目录（项目本地）覆盖之。"""
-    out: list[Path] = []
-    for p in (DOTENV_FILE, current_workspace() / ".env"):
-        if p not in out:
-            out.append(p)
-    return out
+    path = config_file()
+    version = (path, path.stat().st_mtime_ns) if path.exists() else None
+    cached = _CONFIG
+    if cached is None or version != cached[0]:
+        return load_config()
+    return deepcopy(cached[1])
 
 
 def _dotenv_values() -> dict[str, str]:
-    """解析并缓存 .env（进程内静态）：键值均 strip，空值丢弃；cwd/.env 覆盖用户目录 .env。"""
+    """Read only the selected credential file, never an arbitrary project's .env."""
     global _DOTENV_CACHE
-    files = _dotenv_files()
+    files = [dotenv_file()]
     key = tuple(
         (str(path), path.stat().st_mtime_ns if path.is_file() else None)
         for path in files
@@ -89,18 +129,18 @@ def _dotenv_values() -> dict[str, str]:
     return _DOTENV_CACHE[key]
 
 
-def _config_scalar(key: str) -> str:
-    raw = settings().get(key)
+def _config_scalar(key: str, cfg=None) -> str:
+    raw = (settings() if cfg is None else cfg).get(key)
     if raw is not None and not isinstance(raw, (dict, list)):
         return raw.strip() if isinstance(raw, str) else str(raw).strip()
     return ""
 
 
-def get_env(key: str, *, warn: bool = True, default: str = "") -> str:
+def get_env(key: str, *, warn: bool = True, default: str = "", cfg=None) -> str:
     """配置读取唯一入口；/api 管理的 key 让 config.json 优先于 .env。"""
     if env_val := (os.environ.get(key) or "").strip():
         return env_val
-    configured, dotenv = _config_scalar(key), _dotenv_values().get(key, "")
+    configured, dotenv = _config_scalar(key, cfg), _dotenv_values().get(key, "")
     value = (
         (configured or dotenv) if key in _API_CONFIG_KEYS else (dotenv or configured)
     )
@@ -114,6 +154,12 @@ def _missing_keys(keys: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def missing_main_api_keys() -> tuple[str, ...]:
+    _, params = get_model_and_params("coordinator")
+    if params.get("gateway"):
+        from redlotus.ModelGateway.model_factory import ModelTarget
+
+        target = ModelTarget.for_role("coordinator")
+        return () if target.api_key else (f"gateways.{params['gateway']}.api_key",)
     return _missing_keys(("BASE_URL", "API_KEY"))
 
 
@@ -122,10 +168,20 @@ def missing_rag_api_keys() -> tuple[str, ...]:
 
 
 def save_config(cfg: dict[str, Any] | None = None) -> None:
-    global _CONFIG
     cfg = settings() if cfg is None else cfg
-    _CONFIG = cfg
-    save_locked_json(CONFIG_FILE, cfg)
+    save_locked_json(config_file(), cfg)
+    reload_config()
+
+
+def update_config(change) -> None:
+    """Apply a local edit to the latest document under the cross-process lock."""
+    path = config_file()
+    initialize_config()
+    with file_lock(path):
+        config = json.loads(path.read_text(encoding="utf-8"))
+        change(config)
+        atomic_write_json(path, config)
+    reload_config()
 
 
 def get_agent_usage_limits() -> "_UsageLimits":
@@ -145,12 +201,13 @@ def supported_thinking_efforts(model_name: str | None) -> tuple[str, ...]:
     from redlotus.ModelGateway.ModelChecker import _lookup_openrouter_meta
 
     meta = _lookup_openrouter_meta(model_name) if model_name else None
-    available = (meta or {}).get("supported_efforts") or THINKING_EFFORTS
-    return tuple(value for value in THINKING_EFFORTS if value in available)
+    configured = settings()["model_metadata"]["supported_thinking_efforts"]
+    available = (meta or {}).get("supported_efforts") or configured
+    return tuple(value for value in configured if value in available)
 
 
 def role_supported_thinking_efforts(role: str) -> tuple[str, ...]:
-    return supported_thinking_efforts(settings()["models"][role]["name"])
+    return supported_thinking_efforts(get_model_and_params(role)[0])
 
 
 def apply_thinking_config(model_params, *, model_name=None):
@@ -159,28 +216,41 @@ def apply_thinking_config(model_params, *, model_name=None):
     thinking = str(params.pop("thinking", "")).strip().lower()
     effort = str(params.pop("reasoning_effort", "")).strip().lower()
     if thinking in ("disabled", "off", "false"):
-        params["extra_body"] = {
-            **params.get("extra_body", {}),
-            "thinking": {"type": "disabled"},
-        }
+        params["thinking"] = False
+        if model_name and "deepseek" in model_name.lower():
+            params["extra_body"] = {
+                **params.get("extra_body", {}),
+                "thinking": {"type": "disabled"},
+            }
     elif thinking == "enabled":
-        supported = supported_thinking_efforts(model_name)
-        if supported:
-            params["thinking"] = effort if effort in supported else supported[-1]
+        params["thinking"] = "xhigh" if effort == "max" else effort or True
     return params
 
 
-def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]:
-    raw: dict[str, Any] = deepcopy(settings()["models"][role])
+def get_model_and_params(role: str, *, cfg=None) -> tuple[str, dict[str, Any]]:
+    cfg = settings() if cfg is None else cfg
+    raw = deepcopy(cfg["models"][role])
+    if isinstance(raw, str):
+        raw = {"preset": raw}
+    if preset := raw.pop("preset", None):
+        base = deepcopy(cfg["model_presets"][preset])
+        raw = {**base.pop("settings", {}), **base, **raw.pop("settings", {}), **raw}
     name = str(raw.pop("name")).strip()
-    raw.update(deepcopy(kwargs))
+    raw = {**raw.pop("settings", {}), **raw}
     return name, raw
 
 
 def set_model_name(role: str, model_name: str) -> None:
-    cfg = settings()
-    cfg["models"][role]["name"] = model_name.strip()
-    save_config(cfg)
+    selection = model_name.strip()
+
+    def change(cfg):
+        if selection in cfg.get("model_presets", {}):
+            cfg["models"][role] = {"preset": selection}
+        else:
+            _, parameters = get_model_and_params(role, cfg=cfg)
+            cfg["models"][role] = {"name": selection, **parameters}
+
+    update_config(change)
 
 
 def set_api(
@@ -198,11 +268,11 @@ def set_api(
     }
     if all(v is None for v in values.values()):
         return
-    cfg = settings()
-    for key, value in values.items():
-        if value is not None:
-            cfg[key] = value.strip()
-    save_config(cfg)
+    update_config(
+        lambda cfg: cfg.update(
+            {k: v.strip() for k, v in values.items() if v is not None}
+        )
+    )
 
 
 def get_agent_roles(*, cfg=None) -> tuple[str, ...]:
@@ -210,13 +280,16 @@ def get_agent_roles(*, cfg=None) -> tuple[str, ...]:
 
 
 def get_context_profile_roles() -> tuple[str, ...]:
-    return tuple(role for role in get_agent_roles() if role in settings()["context"])
+    roles = get_agent_roles()
+    return tuple(role for role in roles if role in settings()["context"]) or roles
 
 
-def get_context_config(role: str) -> dict[str, Any]:
-    raw = settings()["context"]
-    if role not in get_agent_roles():
+def get_context_config(role: str, *, cfg=None) -> dict[str, Any]:
+    cfg = settings() if cfg is None else cfg
+    raw = cfg.get("context", {})
+    roles = get_agent_roles(cfg=cfg)
+    if role not in roles:
         raise ValueError(f"Unknown Agent role: {role}")
-    if not any(key in raw for key in get_agent_roles()):
+    if not any(key in raw for key in roles):
         return dict(raw)  # Legacy shared context configuration.
     return {**raw.get("defaults", {}), **raw.get(role, {})}

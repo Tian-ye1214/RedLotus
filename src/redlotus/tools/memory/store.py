@@ -30,9 +30,7 @@ class MemoryStore:
             "global": RAG(
                 {
                     **config["short_term_memory"],
-                    "table_name": config.get("long_term_memory", {}).get(
-                        "table_name", "semantic_memories"
-                    ),
+                    "table_name": config["long_term_memory"]["table_name"],
                 },
                 project_id="__global__",
             ),
@@ -180,7 +178,7 @@ class MemoryStore:
             records, key=lambda row: len(tokens & self.tokens(row.text())), reverse=True
         )
         ranked.extend(row.id for row in matches if tokens & self.tokens(row.text()))
-        limit = int(self.indexes["project"].config.get("final_top_k", 8))
+        limit = int(self.indexes["project"].config["final_top_k"])
         return [by_id[key] for key in dict.fromkeys(ranked)][:limit]
 
     async def reconcile(self):
@@ -201,8 +199,9 @@ class MemoryStore:
                         if row["indexed"] != row["body_hash"] + index.index_key
                         or row["id"] not in indexed
                     ]
-                    for start in range(0, len(pending), 32):
-                        batch = pending[start : start + 32]
+                    batch_size = int(settings()["rag_service"]["index_batch_size"])
+                    for start in range(0, len(pending), batch_size):
+                        batch = pending[start : start + batch_size]
                         await index.upsert_records(
                             [
                                 dict(

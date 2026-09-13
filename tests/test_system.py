@@ -24,25 +24,26 @@ def configured_system(tmp_path, monkeypatch):
     system._context_prewarmed = True
     monkeypatch.setattr(system, "_sync_skills_for_user_turn", noop)
     monkeypatch.setattr(system._memory, "process_pending", noop)
-    monkeypatch.setattr("redlotus.agent_core.system.prepare_model_request", noop)
     return system
 
 
-async def test_system_serializes_turns_refreshes_memory_and_records_raw(
+async def test_system_serializes_turns_freezes_session_memory_and_records_raw(
     tmp_path, monkeypatch
 ):
     system = configured_system(tmp_path, monkeypatch)
     inputs, injections = [], []
     active = 0
 
-    async def create(skills, memory, routing, tools):
+    async def create(
+        skills, memory, routing, tools, task_state=None, *, instructions=None
+    ):
         injections.append(memory)
 
         async def model(messages, info):
             nonlocal active
             active += 1
             assert active == 1
-            inputs.append(messages[-1].parts[0].content)
+            inputs.append(messages[-1].parts[0].content[0])
             await asyncio.sleep(0.02)
             if len(inputs) == 1:
                 system._memory.long_term.path.write_text(
@@ -62,19 +63,73 @@ async def test_system_serializes_turns_refreshes_memory_and_records_raw(
         )
     )
     assert inputs == ["第一条", "第二条", "第三条"]
-    assert "偏好中文" not in injections[0] and "偏好中文" in injections[1]
+    assert len(injections) == 1
+    assert "偏好中文" not in injections[0]
+    assert system._memory.injection_for_session() == injections[0]
     assert len(system._memory.observations.order()) == 3
-    journals = list((tmp_path / ".redlotus").glob("*.jsonl"))
+    journals = list(system._memory.observations.root.parent.glob("*.jsonl"))
     rows = [
         json.loads(line)
         for line in journals[0].read_text(encoding="utf-8").splitlines()
     ]
     assert [
-        p["content"]
+        p["content"][0]
         for row in rows
         for p in row["message"]["parts"]
         if p["part_kind"] == "user-prompt"
     ] == inputs
+    await system._cli_controller.reset_session(history)
+    await system.run_agent_system(UserMessage(text="新会话"), history)
+    assert len(injections) == 2 and "偏好中文" in injections[1]
+    await system.shutdown()
+
+
+async def test_shutdown_drains_resources_when_the_first_waiter_is_cancelled(
+    tmp_path, monkeypatch
+):
+    import pytest
+    from redlotus.runtime.subagents import SubagentSpec
+
+    system = configured_system(tmp_path, monkeypatch)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def pending(*args, **kwargs):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(system._memory, "process_pending", pending)
+    first = asyncio.create_task(system.shutdown())
+    await asyncio.wait_for(started.wait(), 3)
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+    release.set()
+    await system.shutdown()
+    with pytest.raises(asyncio.CancelledError):
+        await system._orchestrator.factory.run(
+            SubagentSpec("closed", None, system.workspace), noop
+        )
+
+
+async def test_display_transformation_preserves_the_model_response_for_replay(
+    tmp_path, monkeypatch
+):
+    system = configured_system(tmp_path, monkeypatch)
+    raw = "verified answer\n[internal completion marker]"
+
+    async def create(*args, **kwargs):
+        async def model(messages, info):
+            yield raw
+
+        return Agent(FunctionModel(stream_function=model))
+
+    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    history, shown = await system.run_agent_system(
+        UserMessage(text="Complete this task"),
+        ChatHistory(),
+        output_transform=lambda output: output.splitlines()[0],
+    )
+    assert shown == "verified answer"
+    assert history.messages[-1].parts[0].content == raw
     await system.shutdown()
 
 
@@ -98,7 +153,7 @@ async def test_subagent_creation_and_model_run_are_inside_child_thread(
             )
         }
 
-    def create(name, params, **kwargs):
+    def create(name, params=None, **kwargs):
         assert threading.get_ident() != parent_thread
         return Agent(
             FunctionModel(stream_function=model), output_type=kwargs["output_type"]
@@ -188,7 +243,7 @@ async def test_loading_session_restores_completed_tasks_and_dependencies(
     system._task_manager.mark_task_complete("a", "verified artifact")
     system._task_manager.tasks["b"].status = TaskStatus.IN_PROGRESS
 
-    async def create(*args):
+    async def create(*args, **kwargs):
         async def model(messages, info):
             yield "saved"
 
@@ -205,3 +260,71 @@ async def test_loading_session_restores_completed_tasks_and_dependencies(
     assert [task.id for task in system._task_manager.get_all_ready_tasks()] == ["b"]
     assert messages
     await system.shutdown()
+
+
+async def test_rejected_first_request_keeps_trace_but_does_not_poison_next_turn(
+    tmp_path, monkeypatch
+):
+    import pytest
+    from pydantic_ai.capabilities import AbstractCapability
+    from redlotus.ModelGateway.input_policy import InputLimitError
+
+    system = configured_system(tmp_path, monkeypatch)
+    seen = []
+
+    class Budget(AbstractCapability):
+        async def before_model_request(self, ctx, request_context):
+            if any("OVERSIZED" in str(m.parts) for m in request_context.messages):
+                raise InputLimitError("Reference exceeds request budget")
+            return request_context
+
+    async def create(*args, **kwargs):
+        async def model(messages, info):
+            seen.append(messages[-1].parts[0].content[0])
+            yield "accepted"
+
+        return Agent(FunctionModel(stream_function=model), capabilities=[Budget()])
+
+    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    history = ChatHistory()
+    try:
+        with pytest.raises(InputLimitError):
+            await system.run_agent_system(UserMessage(text="OVERSIZED"), history)
+        assert not history.messages
+        await system.run_agent_system(
+            UserMessage(text="smaller corrected input"), history
+        )
+        assert seen == ["smaller corrected input"]
+        journals = list(system._memory.observations.root.parent.glob("*.jsonl"))
+        assert any("OVERSIZED" in path.read_text(encoding="utf-8") for path in journals)
+    finally:
+        await system.shutdown()
+
+
+async def test_project_switch_does_not_wait_for_scoped_memory_production(
+    tmp_path, monkeypatch
+):
+    system = configured_system(tmp_path, monkeypatch)
+    previous = system._memory
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def produce(**kwargs):
+        started.set()
+        await finish.wait()
+
+    monkeypatch.setattr(previous, "process_pending", produce)
+    target = tmp_path / "next-project"
+    target.mkdir()
+    switching = asyncio.create_task(system.switch_workspace(target))
+    try:
+        await started.wait()
+        await asyncio.sleep(0.05)
+        assert switching.done(), "Directory switching is blocked by background memory"
+        await switching
+        assert system.workspace.root == target.resolve()
+        assert previous.workspace.root == tmp_path.resolve()
+        assert system._memory._perception_factory is previous._perception_factory
+    finally:
+        finish.set()
+        await asyncio.gather(switching, return_exceptions=True)
+        await system.shutdown()

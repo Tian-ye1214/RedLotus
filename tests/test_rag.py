@@ -4,11 +4,17 @@ import importlib
 
 from redlotus.RAG.DataBase import EmbedDataBase
 from redlotus.RAG.RAG import RAG
+from redlotus.config.app_config import settings
 
 
 async def test_lancedb_scoped_upsert_search_count_and_clear(tmp_path):
-    first = EmbedDataBase(str(tmp_path), table_name="test", vector_dim=4)
-    second = EmbedDataBase(str(tmp_path), table_name="test", vector_dim=4)
+    index = settings()["short_term_memory"]["index"]
+    first = EmbedDataBase(
+        str(tmp_path), table_name="test", vector_dim=4, index_config=index
+    )
+    second = EmbedDataBase(
+        str(tmp_path), table_name="test", vector_dim=4, index_config=index
+    )
     a = dict(
         id="a:1",
         record_id="a",
@@ -53,7 +59,8 @@ async def test_rag_chunking_rerank_dedup_and_fallback(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module, "embed_texts", embed)
     monkeypatch.setattr(module, "rerank_documents", rerank)
-    config = dict(
+    config = settings()["short_term_memory"]
+    config.update(
         db_path=str(tmp_path),
         use_rerank=True,
         turn_token_limit=256,
@@ -117,7 +124,11 @@ async def test_missing_vectors_recovered_despite_old_checkpoint(tmp_path, monkey
 
     config = {
         **settings(),
-        "short_term_memory": {"db_path": str(tmp_path / "db"), "use_rerank": False},
+        "short_term_memory": {
+            **settings()["short_term_memory"],
+            "db_path": str(tmp_path / "db"),
+            "use_rerank": False,
+        },
     }
     monkeypatch.setattr("redlotus.tools.memory.store.settings", lambda: config)
     memory = MemoryStore(WorkspaceContext.from_path(tmp_path / "project"))
@@ -157,7 +168,7 @@ async def test_index_settings_build_acceleration_at_threshold(tmp_path):
         str(tmp_path),
         table_name="accelerated",
         vector_dim=8,
-        index_config=dict(min_rows=256, metric="cosine", rebuild_every_n_adds=100),
+        index_config=settings()["short_term_memory"]["index"],
     )
 
     def row(i):

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import signal
 
-from redlotus.agent_core.system import AgentSystem
 from redlotus.infra.shared_http import close_all_clients
 
 
@@ -23,6 +22,10 @@ def install_stop_handlers(stop_event: asyncio.Event) -> None:
 
 async def run_cli() -> None:
     """Run the interactive RedLotus CLI/TUI."""
+    from redlotus.config.app_config import initialize_config
+    from redlotus.agent_core.system import AgentSystem
+
+    initialize_config()
     system = AgentSystem()
     stop_event = asyncio.Event()
     install_stop_handlers(stop_event)

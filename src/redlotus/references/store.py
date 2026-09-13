@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import mimetypes
 import os
 from pathlib import Path
@@ -9,7 +10,11 @@ from pathlib import Path
 from filelock import AsyncFileLock
 
 from redlotus.infra.paths import user_data_dir
-from redlotus.infra.persist_utils import atomic_write_json
+from redlotus.infra.persist_utils import (
+    atomic_write_json,
+    atomic_write_bytes,
+    finish_file_io,
+)
 from redlotus.ModelGateway.input_policy import ModelInputPolicy
 from redlotus.references.models import ReferenceFile, ReferencePart
 from redlotus.references.readers import DocumentReader
@@ -17,6 +22,8 @@ from redlotus.runtime.context import WorkspaceContext
 
 
 class ReferenceStore:
+    PARSER_VERSION = 2
+
     def __init__(self, workspace: WorkspaceContext, root: Path | None = None):
         self.workspace = workspace
         self.root = root or user_data_dir() / "references"
@@ -57,14 +64,19 @@ class ReferenceStore:
         policy.check([ref.byte_size for ref in references])
         message.references, message.attachments = references, []
 
-    async def import_file(
+    async def capture_file(
         self, path: Path, *, policy: ModelInputPolicy
     ) -> ReferenceFile:
         policy.check([path.stat().st_size])
         data = await asyncio.to_thread(path.read_bytes)
-        return await self.import_bytes(
+        return await self.capture_bytes(
             data, name=path.name, source=str(path), policy=policy
         )
+
+    async def import_file(
+        self, path: Path, *, policy: ModelInputPolicy
+    ) -> ReferenceFile:
+        return await self.parse(await self.capture_file(path, policy=policy))
 
     async def import_url(
         self, url: str, *, policy: ModelInputPolicy, media_type: str = ""
@@ -96,96 +108,105 @@ class ReferenceStore:
     async def import_bytes(
         self, data: bytes, *, name: str, source: str, policy: ModelInputPolicy
     ) -> ReferenceFile:
+        reference = await self.capture_bytes(
+            data, name=name, source=source, policy=policy
+        )
+        return await self.parse(reference)
+
+    async def capture_bytes(
+        self, data: bytes, *, name: str, source: str, policy: ModelInputPolicy
+    ) -> ReferenceFile:
         policy.check([len(data)])
         digest = hashlib.sha256(data).hexdigest()
         identity = hashlib.sha256(
             f"{self.workspace.project_id}\0{os.path.normcase(source)}\0{digest}".encode()
         ).hexdigest()[:32]
-        manifest = self.root / "manifests" / f"{identity}.json"
+        directory = self.root / "blobs" / digest[:32]
+        directory.mkdir(parents=True, exist_ok=True)
+        snapshot = directory / ("source" + Path(name).suffix.lower())
+        async with AsyncFileLock(directory / ".build.lock", run_in_executor=False):
+            if not snapshot.exists():
+                await finish_file_io(
+                    asyncio.to_thread(atomic_write_bytes, snapshot, data)
+                )
+        return ReferenceFile(
+            id=identity,
+            project_id=self.workspace.project_id,
+            name=name,
+            source=source,
+            media_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
+            byte_size=len(data),
+            sha256=digest,
+            snapshot=snapshot,
+        )
+
+    async def parse(self, reference: ReferenceFile) -> ReferenceFile:
+        manifest = self.root / "manifests" / f"{reference.id}.json"
         manifest.parent.mkdir(parents=True, exist_ok=True)
         async with AsyncFileLock(str(manifest) + ".lock", run_in_executor=False):
             if manifest.is_file():
-                return ReferenceFile.model_validate_json(
+                cached = ReferenceFile.model_validate_json(
                     manifest.read_text(encoding="utf-8")
                 )
-            directory = self.root / "blobs" / digest[:32]
-            directory.mkdir(parents=True, exist_ok=True)
-            snapshot = directory / ("source" + Path(name).suffix.lower())
-            media_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+                if cached.parser_version == self.PARSER_VERSION:
+                    return cached
+            snapshot = reference.snapshot
+            directory = snapshot.parent
+            parts_path = directory / (
+                f"parts-v{self.PARSER_VERSION}" + snapshot.suffix + ".json"
+            )
             async with AsyncFileLock(directory / ".build.lock", run_in_executor=False):
-                if not snapshot.exists():
-                    await asyncio.to_thread(snapshot.write_bytes, data)
-                parts_path = directory / ("parts" + snapshot.suffix + ".json")
                 if parts_path.is_file():
-                    import json
-
                     parts = [
                         ReferencePart.model_validate(item)
                         for item in json.loads(parts_path.read_text(encoding="utf-8"))
                     ]
-                elif media_type.startswith(("image/", "video/", "audio/")):
-                    kind = media_type.split("/")[0]
-                    native_path, native_type = snapshot, media_type
-                    if kind == "image":
-                        from PIL import Image
-
-                        with Image.open(snapshot) as picture:
-                            picture.verify()
-                        if media_type not in (
-                            "image/png",
-                            "image/jpeg",
-                            "image/webp",
-                            "image/gif",
-                        ):
-                            native_path, native_type = (
-                                directory / "image.png",
-                                "image/png",
-                            )
-                            with Image.open(snapshot) as picture:
-                                picture.save(native_path)
-                    elif kind == "video":
-                        header = data[:16]
-                        if not (
-                            header[4:8] == b"ftyp"
-                            or header.startswith((b"RIFF", b"\x1aE\xdf\xa3"))
-                        ):
-                            raise ValueError(
-                                "视频容器无效或未识别，不能作为原生视频提交。"
-                            )
-                    parts = [
-                        ReferencePart(
-                            kind=kind,
-                            path=native_path,
-                            media_type=native_type,
-                            locator="原件",
-                        )
-                    ]
-                    await asyncio.to_thread(
-                        atomic_write_json,
-                        parts_path,
-                        [p.model_dump(mode="json") for p in parts],
-                    )
                 else:
-                    parts = await DocumentReader().read(snapshot, directory)
-                    await asyncio.to_thread(
-                        atomic_write_json,
-                        parts_path,
-                        [p.model_dump(mode="json") for p in parts],
+                    if reference.media_type.startswith(("image/", "video/", "audio/")):
+                        parts = await finish_file_io(
+                            asyncio.to_thread(self._media_parts, reference)
+                        )
+                    else:
+                        parts = await DocumentReader().read(snapshot, directory)
+                    await finish_file_io(
+                        asyncio.to_thread(
+                            atomic_write_json,
+                            parts_path,
+                            [part.model_dump(mode="json") for part in parts],
+                        )
                     )
-            reference = ReferenceFile(
-                id=identity,
-                project_id=self.workspace.project_id,
-                name=name,
-                source=source,
-                media_type=media_type,
-                byte_size=len(data),
-                sha256=digest,
-                snapshot=snapshot,
-                parts=parts,
+            prepared = reference.model_copy(
+                update={"parts": parts, "parser_version": self.PARSER_VERSION}
             )
-            # The claim is already held on this path; write through a separate atomic operation.
-            await asyncio.to_thread(atomic_write_json, manifest, reference.manifest())
-            return reference
+            await finish_file_io(
+                asyncio.to_thread(atomic_write_json, manifest, prepared.manifest())
+            )
+            return prepared
+
+    @staticmethod
+    def _media_parts(reference: ReferenceFile) -> list[ReferencePart]:
+        kind = reference.media_type.split("/")[0]
+        path, media_type = reference.snapshot, reference.media_type
+        if kind == "image":
+            from PIL import Image
+
+            with Image.open(path) as picture:
+                picture.verify()
+            if media_type not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
+                with Image.open(path) as picture:
+                    path = path.parent / "image.png"
+                    picture.save(path)
+                media_type = "image/png"
+        elif kind == "video":
+            with path.open("rb") as stream:
+                header = stream.read(16)
+            if not (
+                header[4:8] == b"ftyp" or header.startswith((b"RIFF", b"\x1aE\xdf\xa3"))
+            ):
+                raise ValueError("视频容器无效或未识别，不能作为原生视频提交。")
+        return [
+            ReferencePart(kind=kind, path=path, media_type=media_type, locator="原件")
+        ]
 
     def load(self, reference_id: str) -> ReferenceFile:
         if len(reference_id) != 32 or any(
@@ -202,6 +223,7 @@ class ReferenceStore:
         reference = await asyncio.to_thread(self.load, reference_id)
         if reference.project_id != self.workspace.project_id:
             return "Error: Reference belongs to another project; retrieve its authorized memory record instead."
+        reference = await self.parse(reference)
         return ToolReturn(
             return_value=f"Read reference {reference.name} ({reference.id})",
             content=await asyncio.to_thread(reference.to_prompt),

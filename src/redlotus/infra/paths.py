@@ -48,18 +48,52 @@ def user_config_dir() -> Path:
 def config_file() -> Path:
     if path := os.environ.get("REDLOTUS_CONFIG_FILE"):
         return Path(path).resolve()
-    if directory := os.environ.get("REDLOTUS_CONFIG_DIR"):
-        return Path(directory).resolve() / "config.json"
-    return resource_root() / "config.json"
+    return user_config_dir().resolve() / "config.json"
 
 
 def default_config_file() -> Path:
     """随包默认 config.json（首次运行 seed 用）。"""
-    return resource_root() / "config.json"
+    return resource_root() / "config.default.json"
 
 
 def dotenv_file() -> Path:
+    if path := os.environ.get("REDLOTUS_DOTENV_FILE"):
+        return Path(path).resolve()
     return user_config_dir() / ".env"
+
+
+def project_data_dir(workspace) -> Path:
+    """Project identity is independent of the interpreter or installation directory."""
+    return user_data_dir() / "projects" / workspace.project_id
+
+
+def migrate_project_data(workspace) -> None:
+    """Copy legacy state once, preserving both the source and any newer destination."""
+    import shutil
+    from redlotus.infra.persist_utils import atomic_write_json, file_lock
+
+    source = workspace.root / ".redlotus"
+    target = project_data_dir(workspace)
+    marker = target / "legacy_import.json"
+    if not source.is_dir() or marker.exists():
+        return
+    with file_lock(marker):
+        if marker.exists():
+            return
+        copied = []
+        for path in source.rglob("*"):
+            if not path.is_file() or path.suffix in (".lock", ".tmp"):
+                continue
+            relative = path.relative_to(source)
+            destination = target / relative
+            if not destination.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                temporary = destination.with_suffix(destination.suffix + ".tmp")
+                with file_lock(path):
+                    shutil.copy2(path, temporary)
+                os.replace(temporary, destination)
+                copied.append(str(relative))
+        atomic_write_json(marker, {"source": str(source), "files": copied})
 
 
 # ---- 只读随包资源 ----

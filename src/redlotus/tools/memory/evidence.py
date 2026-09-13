@@ -11,6 +11,8 @@ from redlotus.ModelGateway.input_policy import ModelInputPolicy
 from redlotus.references.store import ReferenceStore
 from redlotus.runtime.tool_telemetry import tool_result_succeeded
 from redlotus.tools.memory.models import ObservedTurn
+from redlotus.infra.paths import project_data_dir
+from redlotus.config.app_config import settings
 
 
 class EvidenceReader:
@@ -32,7 +34,7 @@ class EvidenceReader:
         }
         sources = {}
         refs = {
-            key: self.references.load(key)
+            key: await self.references.parse(self.references.load(key))
             for event in events
             for key in event.reference_ids
         }
@@ -40,6 +42,11 @@ class EvidenceReader:
         for event in events:
             for path in event.evidence_paths:
                 journal = Path(path.replace("_ModelMessages.json", ".jsonl"))
+                legacy = self.references.workspace.root / ".redlotus"
+                if not journal.is_file() and journal.is_relative_to(legacy):
+                    journal = project_data_dir(
+                        self.references.workspace
+                    ) / journal.relative_to(legacy)
                 if journal.suffix == ".jsonl" and journal.is_file():
                     paths.add(journal)
             for index, text in enumerate(event.user_inputs):
@@ -96,7 +103,7 @@ class EvidenceReader:
                             except (ValueError, FileNotFoundError):
                                 registered = None
                             if registered is not None:
-                                reference = registered
+                                reference = await self.references.parse(registered)
                             else:
                                 extension = (
                                     mimetypes.guess_extension(item.media_type) or ".bin"
@@ -105,7 +112,9 @@ class EvidenceReader:
                                     item.data,
                                     name="media" + extension,
                                     source=f"trace:{source_id}:{asset_index}",
-                                    policy=ModelInputPolicy.for_role("compressor"),
+                                    policy=ModelInputPolicy.for_role(
+                                        settings()["memory_perception"]["model_role"]
+                                    ),
                                 )
                             refs[reference.id] = reference
                             packets[event.id]["reference_ids"] = list(

@@ -35,7 +35,10 @@ def set_workspace(path: Path | str) -> Path:
 
 
 def conversations_root() -> Path:
-    return current_workspace() / ".redlotus"
+    from redlotus.infra.paths import project_data_dir
+    from redlotus.runtime.context import WorkspaceContext
+
+    return project_data_dir(WorkspaceContext.from_path(current_workspace()))
 
 
 def snapshot_basename(

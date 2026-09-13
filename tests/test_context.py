@@ -1,8 +1,15 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 from pydantic_ai import Agent
-from pydantic_ai.messages import ToolReturnPart
+from pydantic_ai.messages import (
+    ToolReturnPart,
+    ModelRequest,
+    UserPromptPart,
+    ModelResponse,
+    TextPart,
+)
 from pydantic_ai.models.function import FunctionModel, DeltaToolCall
 from pydantic_ai.usage import UsageLimits
 
@@ -14,6 +21,7 @@ from redlotus.tools.conversation_log import (
     read_saved_model_messages_file,
 )
 from redlotus.tools.memory.chat_history import messages_safe_for_new_prompt
+from redlotus.tools.memory.chat_history import ChatHistory
 from redlotus.runtime.runtime_state import AgentRunPolicy
 from redlotus.runtime.tool_telemetry import _model_result, tool_result_succeeded
 
@@ -33,6 +41,9 @@ async def test_large_tool_batch_compacts_before_request_and_retains_original(
 
     monkeypatch.setattr(checker, "get_effective_max_context_async", limit)
     monkeypatch.setattr(checker, "get_effective_max_context", lambda **kwargs: 700)
+    monkeypatch.setattr(
+        checker, "get_model_and_params", lambda role: ("auxiliary", {"max_tokens": 100})
+    )
     monkeypatch.setattr(
         checker,
         "get_context_config",
@@ -77,12 +88,26 @@ async def test_large_tool_batch_compacts_before_request_and_retains_original(
         assert result.output == "done"
         assert checker.estimate_context_tokens(requests[1]) < 700
         assert messages_safe_for_new_prompt(requests[1]) == requests[1]
-        journal = next((tmp_path / ".redlotus").glob("*.jsonl")).read_text(
+        journal = next(log.model_messages_path().parent.glob("*.jsonl")).read_text(
             encoding="utf-8"
         )
         assert "原始工具结果" * 600 in journal
         messages, _ = read_saved_model_messages_file(log.model_messages_path())
         assert messages_safe_for_new_prompt(messages) == messages
+        restored = ChatHistory()
+        restored.set_messages(messages)
+        assert "保留当前目标与失败证据" in (restored.compress_summary_state or "")
+        summary = next(
+            m for m in messages if (m.metadata or {}).get("origin") == "context_summary"
+        )
+        from pydantic_ai._agent_graph import _clean_message_history
+
+        continued = _clean_message_history(
+            [summary, ModelRequest(parts=[UserPromptPart("继续任务")])]
+        )
+        restored = ChatHistory()
+        restored.set_messages(continued)
+        assert "保留当前目标与失败证据" in (restored.compress_summary_state or "")
 
 
 async def test_cancel_closes_outstanding_call_and_saves_partial_results():
@@ -116,12 +141,72 @@ async def test_cancel_closes_outstanding_call_and_saves_partial_results():
     assert returns[0].content["status"] == "cancelled"
 
 
+async def test_request_reserves_configured_output_without_lowering_it(monkeypatch):
+    from types import SimpleNamespace
+    from pydantic_ai.usage import RequestUsage
+
+    target = SimpleNamespace(
+        name="test",
+        settings={"max_tokens": 700},
+        context={
+            "max_context_tokens": 1000,
+            "auto_compress_ratio": 0.8,
+            "default_context_tokens": 1000,
+            "head_turns": 1,
+            "tail_turns": 1,
+        },
+    )
+    messages = [
+        ModelRequest(parts=[UserPromptPart("old facts")]),
+        ModelResponse(parts=[TextPart("done")], usage=RequestUsage(input_tokens=500)),
+        ModelRequest(parts=[UserPromptPart("继续")]),
+    ]
+    calls = []
+
+    async def limit(**kwargs):
+        return 1000
+
+    async def compress(history, **kwargs):
+        calls.append(kwargs)
+        history.set_messages(
+            [ModelRequest(parts=[UserPromptPart("summary")]), messages[-1]]
+        )
+        return True
+
+    monkeypatch.setattr(checker, "get_effective_max_context_async", limit)
+    monkeypatch.setattr(checker, "compress_history_async", compress)
+    result = await checker.compact_request_messages(
+        messages, role="coordinator", target=target
+    )
+    assert len(calls) == 1
+    assert result[-1].parts[0].content == "继续"
+    assert target.settings["max_tokens"] == 700
+    assert target.context["auto_compress_ratio"] == 0.8
+
+
+def test_request_budget_includes_system_and_tool_schema():
+    from pydantic_ai.tools import ToolDefinition
+
+    messages = [
+        ModelRequest(parts=[UserPromptPart("x")], instructions="长期系统规则" * 2000)
+    ]
+    tool = ToolDefinition(
+        name="large",
+        description="工具说明" * 2000,
+        parameters_json_schema={"type": "object"},
+    )
+    assert checker.estimate_context_tokens(messages) >= 12000
+    assert checker.estimate_context_tokens(
+        messages, tools=[tool]
+    ) > checker.estimate_context_tokens(messages)
+
+
 def test_full_tool_output_is_retained_and_failure_survives_preview(tmp_path):
     with workspace_context(WorkspaceContext.from_path(tmp_path)):
         original = "x" * 1000 + "\nExit code: 1"
         preview = _model_result(original, AgentRunPolicy(3, 100, 60))
         assert not tool_result_succeeded(preview)
-        path = next((tmp_path / ".redlotus" / "tool_results").glob("*.txt"))
+        path = Path(preview.rsplit("Full original tool result: ", 1)[1])
         assert path.read_text(encoding="utf-8") == original
 
 

@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 
 from redlotus.references.models import ReferenceFile
+from redlotus.prompt import with_runtime_context
 
 
 @dataclass
@@ -18,7 +19,7 @@ class UserMessage:
         for reference in self.references:
             parts.extend(reference.to_prompt())
         parts.extend(self.attachments)
-        return parts if len(parts) > 1 else self.text
+        return with_runtime_context(parts)
 
 
 def user_message_from_cli_input(raw_input: str) -> UserMessage:

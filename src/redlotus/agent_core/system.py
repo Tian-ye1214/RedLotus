@@ -14,7 +14,7 @@ from redlotus.tools.conversation_log import SessionConversationLogs
 from redlotus.ModelGateway.ModelChecker import (
     prewarm_effective_max_contexts_by_role_async,
 )
-from redlotus.config.app_config import get_agent_usage_limits
+from redlotus.config.app_config import get_agent_usage_limits, settings
 from redlotus.cli.output import supports_model_stream
 from redlotus.cli.render import (
     TextEventStreamHandler,
@@ -32,7 +32,6 @@ import asyncio
 import uuid
 from contextlib import asynccontextmanager, nullcontext
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Any, Coroutine, Tuple
 
 from pydantic_ai.exceptions import ModelHTTPError
@@ -49,8 +48,8 @@ from redlotus.agent_core.roles import create_coordinator_agent
 from redlotus.agent_core.runner import AgentRunner
 from redlotus.runtime.context import WorkspaceContext, workspace_context
 from redlotus.runtime.session import SessionController
+from redlotus.runtime.subagents import SubagentFactory
 from redlotus.workspace.workspace import current_workspace
-from redlotus.ModelGateway.ModelChecker import prepare_model_request
 
 
 def _make_coordinator_stream_handler() -> TextEventStreamHandler | None:
@@ -61,25 +60,6 @@ def _make_coordinator_stream_handler() -> TextEventStreamHandler | None:
 
 def _prompt_for_role(text: str, attachments: list):
     return [text, *attachments] if attachments else text
-
-
-def _messages_with_replaced_output(result: Any, output: str) -> list[Any]:
-    """Return result messages with the last assistant text part replaced."""
-    messages = list(result.all_messages())
-    for message_index in range(len(messages) - 1, -1, -1):
-        message = messages[message_index]
-        parts = getattr(message, "parts", None)
-        if not parts:
-            continue
-        new_parts = list(parts)
-        for part_index in range(len(new_parts) - 1, -1, -1):
-            part = new_parts[part_index]
-            if getattr(part, "part_kind", None) != "text":
-                continue
-            new_parts[part_index] = replace(part, content=output)
-            messages[message_index] = replace(message, parts=new_parts)
-            return messages
-    return messages
 
 
 class AgentSystem:
@@ -97,13 +77,19 @@ class AgentSystem:
         self._registry = AgentRegistry()
         self._background_tasks: set[asyncio.Task] = set()
         self._shutdown_done = False
+        self._shutdown_task: asyncio.Task | None = None
         self.last_turn_error: Exception | None = None
         self._cancel_lock = asyncio.Lock()
         self._skills_manager = SkillsManager()
         self._manager_history = ChatHistory()
         self._current_attachments: list = []
+        self._memory_factory = SubagentFactory(
+            settings()["memory_perception"]["max_concurrent"]
+        )
         self._memory = MemoryService(
-            workspace=self.workspace, owner_memory_allowed=owner_memory_allowed
+            workspace=self.workspace,
+            owner_memory_allowed=owner_memory_allowed,
+            factory=self._memory_factory,
         )
         self._toolkit = BasicToolkit(
             self._skills_manager,
@@ -126,12 +112,16 @@ class AgentSystem:
             on_reset=self._orchestrator.clear_conversation_session,
         )
         self._context_prewarmed = False
+        self._coordinator_agent = None
         self._current_turn: dict[str, Any] | None = None
         self._cli_turn_id: str | None = None
         self._session_key: str | None = None
         self._cli_controller = AgentCliController(self)
 
     async def bind_session(self, session_key: str) -> None:
+        if self._session_key is not None and self._session_key != session_key:
+            self._coordinator_agent = None
+            self._memory.reset_injection_snapshot()
         self._session_key = session_key
         await self._registry.ensure_agent(session_key, "coordinator")
         await self._registry.ensure_agent(session_key, "manager")
@@ -144,6 +134,8 @@ class AgentSystem:
         await self._registry.remove_session(session_key)
         if self._session_key == session_key:
             self._session_key = None
+            self._coordinator_agent = None
+            self._memory.reset_injection_snapshot()
             self._orchestrator.set_session_key(None)
 
     @property
@@ -188,9 +180,12 @@ class AgentSystem:
             )
 
     async def shutdown(self) -> None:
-        if self._shutdown_done:
-            return
-        self._shutdown_done = True
+        if self._shutdown_task is None:
+            self._shutdown_done = True
+            self._shutdown_task = asyncio.create_task(self._release_resources())
+        await asyncio.shield(self._shutdown_task)
+
+    async def _release_resources(self) -> None:
         self._session.queue.discard()
         await self.cancel_current_turn()
         self._spawn_background(self._memory.process_pending(flush=True))
@@ -202,6 +197,7 @@ class AgentSystem:
             await asyncio.gather(*pending, return_exceptions=True)
         await self._registry.cancel_all()
         await self._orchestrator.factory.close()
+        await self._memory_factory.close()
         await self._memory.close()
         await self._toolkit.close()
         logger.info("[lifecycle] shutdown complete")
@@ -258,6 +254,11 @@ class AgentSystem:
 
     def _handle_turn_error(self, e: Exception) -> None:
         self.last_turn_error = e
+        from redlotus.ModelGateway.input_policy import InputLimitError
+
+        if isinstance(e, InputLimitError):
+            print_warning(str(e))
+            return
         if isinstance(e, ModelHTTPError):
             body = e.body or {}
             code = body.get("code", "") if isinstance(body, dict) else ""
@@ -385,22 +386,20 @@ class AgentSystem:
 
     async def switch_workspace(self, path) -> None:
         """Dispose the old session before publishing the new immutable workspace."""
+        previous_memory = self._memory
         await self.cancel_current_turn()
-        await self._memory.process_pending(flush=True)
         if self._session_key:
             await self.end_session_agents(self._session_key)
-        pending = list(self._background_tasks)
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
         await self._orchestrator.factory.cancel_all()
-        await self._memory.close()
         await self._toolkit.close()
         handler = self._toolkit._ask_user_handler
         review_store = self.review_store
         self.workspace = WorkspaceContext.from_path(path)
+        self._coordinator_agent = None
         self._memory = MemoryService(
-            workspace=self.workspace, owner_memory_allowed=self._owner_memory_allowed
+            workspace=self.workspace,
+            owner_memory_allowed=self._owner_memory_allowed,
+            factory=self._memory_factory,
         )
         self._memory.bind_runner(
             self._registry, input_source=lambda: self._session.user_inputs
@@ -421,7 +420,14 @@ class AgentSystem:
         from redlotus.workspace.workspace import set_workspace
 
         set_workspace(path)
+        self._spawn_background(self._retire_memory(previous_memory))
         self._spawn_background(self._memory.process_pending())
+
+    async def _retire_memory(self, memory):
+        try:
+            await memory.process_pending(flush=True)
+        finally:
+            await memory.close()
 
     @asynccontextmanager
     async def _outer_turn(self, message: UserMessage, turn_id: str):
@@ -433,7 +439,6 @@ class AgentSystem:
                 if self._session_key is None:
                     await self.bind_session(uuid.uuid4().hex)
                 self._session_logs.ensure(message.text or "session")
-                self._memory.reset_injection_snapshot()
                 job = await self._memory.begin_turn(
                     self._session_key,
                     turn_id,
@@ -596,17 +601,28 @@ class AgentSystem:
                 self.execute_task_with_manager,
                 self.execute_task_with_worker,
             ]
-            mem_inj = self._memory.injection_for_session()
-            agent = await create_coordinator_agent(
-                self._skills_manager,
-                mem_inj,
-                routing_tools if self._owner_memory_allowed else [],
-                self._toolkit.worker_tools(
-                    include_browser=True,
+            if self._coordinator_agent is None:
+                from redlotus.prompt import (
+                    session_prompt_from_history,
+                    memory_from_session_prompt,
                 )
-                if self._owner_memory_allowed
-                else [],
-            )
+
+                restored = session_prompt_from_history(history.messages)
+                if restored is not None:
+                    self._memory.reset_injection_snapshot(
+                        memory_from_session_prompt(restored)
+                    )
+                self._coordinator_agent = await create_coordinator_agent(
+                    self._skills_manager,
+                    self._memory.injection_for_session(),
+                    routing_tools if self._owner_memory_allowed else [],
+                    self._toolkit.worker_tools(include_browser=True)
+                    if self._owner_memory_allowed
+                    else [],
+                    self.structured_task_status,
+                    instructions=restored,
+                )
+            agent = self._coordinator_agent
 
             start_time = time.time()
             coord_aid = await self._registry.ensure_agent(
@@ -645,14 +661,11 @@ class AgentSystem:
                         usage_limits=get_agent_usage_limits(),
                         event_stream_handler=stream_handler,
                         on_node=_save_coordinator_node,
-                        take_urgent=self._session.take_urgent,
+                        take_urgent=lambda: [
+                            *self._session.take_urgent(),
+                            *self._memory.take_context_notices(),
+                        ],
                         on_complete=self._session.close_inbox,
-                        before_request=lambda run, node: prepare_model_request(
-                            run,
-                            node,
-                            role="coordinator",
-                            task_state=self.structured_task_status(),
-                        ),
                     ),
                     agent_id=coord_aid,
                     turn_id=turn_id,
@@ -671,10 +684,7 @@ class AgentSystem:
                 finish_model_stream(output, title="Coordinator")
             else:
                 show_model_output(output, title="Coordinator")
-            if output != raw_output:
-                history.set_messages(_messages_with_replaced_output(result, output))
-            else:
-                history.update(result)
+            history.update(result)
             elapsed = time.time() - start_time
 
             logger.debug("run_agent_system 完成，耗时 %.2f 秒", elapsed)

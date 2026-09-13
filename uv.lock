@@ -2373,6 +2373,7 @@ source = { editable = "." }
 dependencies = [
     { name = "ddgs" },
     { name = "filelock" },
+    { name = "genai-prices" },
     { name = "httpx", extra = ["http2"] },
     { name = "json-repair" },
     { name = "lancedb" },
@@ -2430,6 +2431,7 @@ viz = [
 requires-dist = [
     { name = "ddgs", specifier = ">=9.14.1" },
     { name = "filelock", specifier = ">=3.29.0" },
+    { name = "genai-prices", specifier = "==0.0.67" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
     { name = "json-repair", specifier = ">=0.59.5" },
     { name = "lancedb", specifier = ">=0.30.2" },

@@ -599,6 +599,12 @@ class RedLotusTui(App[None]):
 
     def refresh_status(self) -> None:
         self.query_one("#status", Static).update(self._status_text())
+        controller = self.system._cli_controller
+        if controller.last_rejected_input and self._ask_future is None:
+            input_box = self.query_one("#input", AgentInput)
+            if not input_box.value:
+                input_box.value = controller.last_rejected_input
+                controller.last_rejected_input = None
 
     def _is_working(self) -> bool:
         if self._ask_future is not None and not self._ask_future.done():

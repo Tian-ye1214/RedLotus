@@ -9,6 +9,33 @@ from redlotus.tools.memory.ltm import LongTermMemory
 from redlotus.agent_core.memory_service import MemoryService, MemoryJob
 
 
+async def test_output_budget_failure_does_not_repeat_until_explicit_retry(
+    tmp_path, monkeypatch
+):
+    from pydantic_ai.exceptions import UnexpectedModelBehavior
+
+    memory = MemoryService(workspace=WorkspaceContext.from_path(tmp_path))
+    attempts = []
+
+    async def produce(job):
+        attempts.append(job.id)
+        raise UnexpectedModelBehavior(
+            "Model token limit (4096) exceeded before any response was generated."
+        )
+
+    monkeypatch.setattr(memory, "_produce", produce)
+    event = memory.observations.begin("session", "turn", "store a verified result", [])
+    event.status = "success"
+    memory.observations.finish(event)
+    job = memory._job(MemoryJob(id="budget-failure", events=[event]))
+    assert not await memory._execute(job)
+    assert not await memory._execute(job)
+    assert attempts == ["budget-failure"]
+    assert not await memory._execute(job, retry=True)
+    assert attempts == ["budget-failure", "budget-failure"]
+    await memory.close()
+
+
 def test_window_boundary_overlap_flush_and_restart(tmp_path):
     workspace = WorkspaceContext.from_path(tmp_path)
     store = ObservationStore(workspace)

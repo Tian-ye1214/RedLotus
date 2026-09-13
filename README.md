@@ -105,7 +105,7 @@ playwright install chromium
 
 ## Initial configuration
 
-Source checkouts read `src/redlotus/config.json` by default. Model names, sampling and reasoning settings for all four roles come from that file; `/config` shows the selected path.
+The development launcher `python main.py` explicitly selects `src/redlotus/config.json`. The installed `redlotus` command and frozen executables use the current OS user's global configuration, independent of the working directory. On Windows this is `%LOCALAPPDATA%/RedLotus/config.json`; `/config` shows the actual source.
 
 Set `REDLOTUS_CONFIG_FILE` to select another file, or `REDLOTUS_CONFIG_DIR` to select a directory containing `config.json`. A missing explicitly selected file is initialized from the bundled defaults. Logs, persistent memory and immutable references remain in the user data directory, configurable through `REDLOTUS_DATA_DIR`.
 
@@ -118,9 +118,9 @@ At minimum, configure the model API endpoint and key:
 }
 ```
 
-RedLotus accepts OpenAI-compatible APIs. Manager, Worker, Coordinator, and Compressor models can be configured independently. Vector retrieval and reranking use `SILICONFLOW_BASE`, `SILICONFLOW_KEY`, and `RAG_models`.
+Gateways support Pydantic AI's OpenAI Chat, OpenAI Responses, Anthropic Messages and Google adapters. Manager, Worker, Coordinator and Compressor models can be configured independently or select named presets. Memory perception uses the role selected by `memory_perception.model_role` (Worker by default), independently of context compression. Vector retrieval and reranking use `SILICONFLOW_BASE`, `SILICONFLOW_KEY`, `RAG_models` and `rag_service`.
 
-Endpoint and credential values can also come from environment variables or `.env` in the user configuration directory or current project. Do not commit configuration files that contain real API keys.
+Credentials may be supplied by named environment references or the global configuration directory's `.env`. Only the development launcher explicitly selects the repository's `.env`; installed entry points do not search the working directory. Do not commit credentials. See [configuration and gateway examples](docs/gateway-installation.md).
 
 ## Terminal usage
 
@@ -140,7 +140,7 @@ Common shortcuts:
 | `Ctrl+R` | Open the pending-change review |
 | `Ctrl+C` | Stop the current turn |
 | `Ctrl+Q` | Exit |
-| `@path` | Reference documents, images or videos, with Tab completion; up to 20 files |
+| `@path` | Reference documents and images, with Tab completion; up to 20 files. Video validation is deferred. |
 
 <details>
 <summary>Common slash commands</summary>
@@ -185,14 +185,14 @@ New skills are discovered automatically on subsequent user turns.
 
 ## Files and data
 
-- Session traces are appended to `.redlotus/*.jsonl`; loadable snapshots remain available, and context compression preserves the original trace.
-- Project episodes live in `.redlotus/memory/episodes/`. LanceDB provides project-filtered vector search and reranking, with text fallback when the service is unavailable.
-- Project episodes and global records are stored in LanceDB `memory_records_v3`, isolated by scope and project, and recalled using vector search and reranking. `MEMORY.md` contains the core profile, environment, constraints and general experience, and is read fully each turn without a fixed character cap.
+- Session traces, reference snapshots and perception jobs are stored under the global user data directory, with project-specific data partitioned by project ID. Compression changes the model view while retaining the original trace.
+- Project episodes and global records are stored in LanceDB `memory_records_v3`, isolated by scope and project, with vector search, reranking and text fallback.
+- `MEMORY.md` contains the core profile, environment, constraints and general experience without a fixed character cap. Its complete contents and the system prompt are snapshotted for the session; memory writes do not rewrite that prefix. New confirmed information is consumed through tool results and retrieval, and a new session loads a fresh snapshot.
 - File and command tools use the current project. Generated artifacts go to `WorkDatabase/`. `/cd` cancels the old session before switching context.
 
 Ordinary input is consumed as separate FIFO turns. `/urgent` joins the active inner loop together with the completed tool batch. Child Agents use dedicated threads, event loops, and clients, with three active children by default. Finished turns append observations. LLM perception processes 25 turns with a 5-turn overlap, plus short windows at session end. Explicit remember requests are handled immediately; failed production remains pending.
 
-The embedding, reranking, chunking, similarity, candidate-count, and vector-index settings remain configurable. See [architecture, migration, and the RAG parameter mapping](docs/refactor.md) for the parameters replaced by per-turn processing and local semantic edits.
+Model parameters, retrieval settings and runtime limits are declared in JSON and read as independent copies. See [architecture and migration](docs/refactor.md) for window-based production and the retained RAG parameters.
 
 ## QQ and WeChat bots
 

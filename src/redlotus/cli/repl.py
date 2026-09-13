@@ -15,10 +15,11 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from redlotus.cli.completer import AgentCompleter
 from redlotus.cli.render import print_success, print_warning
+from redlotus.infra.paths import user_data_dir
 
 
 def _history_path() -> Path:
-    base = Path.home() / ".redlotus"
+    base = user_data_dir()
     base.mkdir(parents=True, exist_ok=True)
     return base / "history"
 

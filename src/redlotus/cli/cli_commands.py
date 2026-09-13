@@ -11,17 +11,18 @@ from redlotus.workspace.workspace import current_workspace
 from typing import Any
 
 from redlotus.config.app_config import (
-    CONFIG_FILE,
     get_agent_roles,
     get_env,
     get_model_and_params,
     role_supported_thinking_efforts,
-    save_config,
+    update_config,
     set_api,
     set_model_name,
     settings,
 )
 from redlotus.runtime.lifecycle import AgentInvocationState
+from redlotus.infra.paths import config_file
+from redlotus.ModelGateway.model_factory import ModelTarget
 from redlotus.runtime.runtime_state import TRACE_STORE
 from redlotus.ModelGateway.ModelChecker import (
     _lookup_openrouter_meta,
@@ -29,7 +30,6 @@ from redlotus.ModelGateway.ModelChecker import (
     context_usage_breakdown,
     lookup_model_context,
     lookup_model_max_output_tokens,
-    prewarm_effective_max_contexts_by_role_async,
 )
 from redlotus.ModelGateway.usage_accounting import (
     UsageReport,
@@ -127,9 +127,11 @@ def print_agent_models() -> None:
         name, p = get_model_and_params(role)
         lines.append(f"• {labels.get(role, role)}")
         lines.append(f"  模型名: {name}")
-        th_s = f"  reasoning→thinking: {p['thinking']}"
+        target = ModelTarget.for_role(role)
+        lines.append(f"  协议: {target.protocol}")
+        th_s = f"  thinking: {p.get('thinking', 'default')}"
         lines.append(
-            f"  temperature: {p['temperature']}  max_tokens: {p['max_tokens']}{th_s}"
+            f"  temperature: {p.get('temperature', 'default')}  max_tokens: {p.get('max_tokens', 'default')}{th_s}"
         )
         for meta_line in _openrouter_agent_meta_lines(name):
             lines.append(f"  {meta_line}")
@@ -208,7 +210,7 @@ def print_config_summary() -> None:
     base = (get_env("BASE_URL", warn=False) or "").strip()
     key_set = bool((get_env("API_KEY", warn=False) or "").strip())
     lines = [
-        f"配置文件: {CONFIG_FILE}",
+        f"配置文件: {config_file()}",
         f"BASE_URL: {base or '(空)'}",
         f"API_KEY: {'已填写' if key_set else '(空)'}",
         f"工作目录: {current_workspace()}",
@@ -236,8 +238,14 @@ def _format_usage_report(report: UsageReport) -> str:
     lines = [
         f"Responses: {totals.responses}; missing usage: {totals.missing_usage_responses}",
         f"Tokens: input={totals.input_tokens}, output={totals.output_tokens}, reasoning={totals.reasoning_tokens}",
+        f"Input cache: hit={totals.cache_hit_tokens}, miss={totals.cache_miss_tokens}, unreported={totals.input_tokens - totals.cache_hit_tokens - totals.cache_miss_tokens}",
         f"Billable: prompt={totals.prompt_billable_tokens}, completion={totals.completion_billable_tokens}",
     ]
+    reported = totals.cache_hit_tokens + totals.cache_miss_tokens
+    if reported:
+        lines.append(
+            f"Reported cache hit rate: {totals.cache_hit_tokens / reported:.2%}"
+        )
     costs = [summary.price for summary in report.by_model.values() if summary.price]
     missing = sum(
         summary.price_unavailable_responses for summary in report.by_model.values()
@@ -542,7 +550,23 @@ class SlashCommands:
         role_text = "|".join(roles)
         if len(self.parts) == 1:
             print_agent_models()
-            _out(f"切换模型: /agent <{role_text}> <模型名称>")
+            latest = next(
+                (
+                    m
+                    for m in reversed(self.state.history.messages)
+                    if getattr(m, "model_name", None)
+                ),
+                None,
+            )
+            if latest:
+                target = (latest.metadata or {}).get("model_target", {})
+                if target:
+                    _out(f"最近请求使用的配置模型: {target['name']}")
+                _out(f"服务返回的模型标识: {latest.model_name}")
+            _out(f"切换模型: /agent <{role_text}> <预设或模型名称>")
+            presets = settings().get("model_presets", {})
+            if presets:
+                _out("可用预设: " + "、".join(presets))
             return None
         if len(self.parts) < 3:
             print_error(f"用法: /agent <{role_text}> <模型名称>")
@@ -554,10 +578,12 @@ class SlashCommands:
         model_name = self.parts[2].strip()
         try:
             set_model_name(role, model_name)
-            print_success(f"已设置 [{role}] 模型为: {model_name}（已写入 config.json）")
-            await prewarm_effective_max_contexts_by_role_async(
-                reason=f"切换模型 {role}={model_name!r}"
+            when = (
+                "当前请求和工具批次结束后，下一次模型请求生效"
+                if role == "coordinator"
+                else "新启动的任务生效，已启动任务保持原配置"
             )
+            print_success(f"已选择 [{role}] {model_name}；{when}。")
         except ValueError as e:
             print_error(str(e))
         return None
@@ -575,11 +601,16 @@ class SlashCommands:
         if value != "off" and value not in supported:
             print_error(f"{role} 模型不支持 {value}（可选: off|{'|'.join(supported)}）")
             return
-        config = settings()
-        config["models"][role]["thinking"] = "disabled" if value == "off" else "enabled"
-        if value != "off":
-            config["models"][role]["reasoning_effort"] = value
-        save_config(config)
+
+        def change(config):
+            selected = config["models"][role]
+            if isinstance(selected, str):
+                selected = config["models"][role] = {"preset": selected}
+            selected["thinking"] = "disabled" if value == "off" else "enabled"
+            if value != "off":
+                selected["reasoning_effort"] = value
+
+        update_config(change)
         print_success(f"已设置 [{role}] 思考为 {value}（已写入 config.json）")
 
     async def api(self):

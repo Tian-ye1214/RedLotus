@@ -37,35 +37,30 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def isolate_environment(root: Path) -> dict:
+def isolate_environment(root: Path, *, config_mode="global") -> dict:
     import platformdirs
-    from dotenv import dotenv_values
 
-    config = Path(
-        os.environ.get("REDLOTUS_CONFIG_FILE")
-        or Path(__file__).resolve().parents[1] / "src/redlotus/config.json"
-    )
     config_dir = Path(platformdirs.user_config_dir("RedLotus", appauthor=False))
+    development_root = Path(__file__).resolve().parents[1]
+    config = (
+        config_dir / "config.json"
+        if config_mode == "global"
+        else development_root / "src/redlotus/config.json"
+    )
+    for key in ("REDLOTUS_CONFIG_FILE", "REDLOTUS_CONFIG_DIR", "REDLOTUS_DOTENV_FILE"):
+        os.environ.pop(key, None)
+    if config_mode == "source":
+        os.environ["REDLOTUS_CONFIG_FILE"] = str(config)
+        os.environ["REDLOTUS_DOTENV_FILE"] = str(development_root / ".env")
+    from redlotus.config.app_config import initialize_config
+
+    initialize_config()
     data_dir = Path(
         os.environ.get("REDLOTUS_DATA_DIR")
         or platformdirs.user_data_dir("RedLotus", appauthor=False)
     )
     raw = config.read_bytes()
     values = json.loads(raw)
-    dotenv = {
-        **dotenv_values(config_dir / ".env"),
-        **dotenv_values(Path.cwd() / ".env"),
-    }
-    for key in (
-        "BASE_URL",
-        "API_KEY",
-        "SILICONFLOW_BASE",
-        "SILICONFLOW_KEY",
-        "MODEL_HTTP_TIMEOUT",
-    ):
-        value = os.environ.get(key) or values.get(key) or dotenv.get(key)
-        if value is not None:
-            os.environ[key] = str(value)
     test_data = root / "state"
     cached = data_dir / "logs" / "cache" / "openrouter_models.json"
     if cached.is_file():
@@ -73,11 +68,11 @@ def isolate_environment(root: Path) -> dict:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(cached, destination)
     os.environ["REDLOTUS_DATA_DIR"] = str(test_data)
-    os.environ["REDLOTUS_CONFIG_FILE"] = str(config)
     os.environ["PATH"] = (
         str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]
     )
     frozen = dict(
+        config_mode=config_mode,
         config_path=str(config),
         config_hash=hashlib.sha256(raw).hexdigest(),
         models=values["models"],
@@ -93,6 +88,12 @@ class WireAudit:
 
     def __init__(self, path):
         self.path, self.lock = path, threading.Lock()
+        self.sequence = 0
+
+    def write(self, row):
+        with self.lock:
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def install(self):
         import httpx
@@ -114,20 +115,56 @@ class WireAudit:
             time=time.time(),
             path=response.request.url.path,
             status=response.status_code,
+            request_id=response.request.extensions.get("audit_id"),
         )
-        if response.request.url.path.endswith(("/embeddings", "/rerank")):
+        if "text/event-stream" in response.headers.get("content-type", ""):
+            import httpx
+
+            original_stream, audit = response.stream, self
+
+            class ObservedStream(httpx.AsyncByteStream):
+                async def __aiter__(self):
+                    buffer, usage = b"", {}
+                    try:
+                        async for chunk in original_stream:
+                            buffer += chunk
+                            while b"\n" in buffer:
+                                line, buffer = buffer.split(b"\n", 1)
+                                if not line.startswith(b"data:"):
+                                    continue
+                                try:
+                                    event = json.loads(line[5:].strip())
+                                except ValueError:
+                                    continue
+                                found = (
+                                    event.get("usage")
+                                    or event.get("response", {}).get("usage")
+                                    or event.get("message", {}).get("usage")
+                                )
+                                if found:
+                                    usage.update(found)
+                            yield chunk
+                    finally:
+                        audit.write({**row, "kind": "usage", "usage": usage or None})
+
+                async def aclose(self):
+                    await original_stream.aclose()
+
+            response.stream = ObservedStream()
+        else:
             await response.aread()
             if response.is_success:
                 row["usage"] = response.json().get("usage")
-        with self.lock:
-            with self.path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(row) + "\n")
+        self.write(row)
 
     async def request(self, request):
         try:
             payload = json.loads(request.content)
         except (ValueError, UnicodeDecodeError):
             return
+        with self.lock:
+            self.sequence += 1
+            request.extensions["audit_id"] = self.sequence
         native = []
 
         def inspect(value):
@@ -151,9 +188,29 @@ class WireAudit:
         inspect(payload)
         row = dict(
             time=time.time(),
+            request_id=request.extensions["audit_id"],
             path=request.url.path,
             model=payload.get("model"),
             native=native,
+            encoded_bytes=len(request.content),
+            output_format=payload.get("response_format", {}).get("type"),
+            tools_count=len(payload.get("tools", [])),
+            system_sha=hashlib.sha256(
+                json.dumps(
+                    [
+                        m
+                        for m in payload.get("messages", [])
+                        if m.get("role") == "system"
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest(),
+            tools_sha=hashlib.sha256(
+                json.dumps(
+                    payload.get("tools", []), ensure_ascii=False, sort_keys=True
+                ).encode()
+            ).hexdigest(),
             input_count=len(payload["input"])
             if isinstance(payload.get("input"), list)
             else None,
@@ -171,9 +228,7 @@ class WireAudit:
                 if k in payload
             },
         )
-        with self.lock:
-            with self.path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        self.write(row)
 
 
 class ApplicationDriver:
@@ -651,7 +706,7 @@ class AcceptanceSuite:
                 )
                 await pilot.press("escape")
                 await send("/api")
-                await until(lambda: not app._ask_future is None, timeout=30)
+                await until(lambda: app._ask_future is not None, timeout=30)
                 await pilot.press("escape")
                 await pilot.pause()
                 assert (
@@ -817,6 +872,7 @@ def main():
         "--root", type=Path, required=True, help="Fresh isolated NTFS test directory"
     )
     parser.add_argument("--only", nargs="*")
+    parser.add_argument("--config-mode", choices=("global", "source"), default="global")
     parser.add_argument(
         "--include-video",
         action="store_true",
@@ -825,7 +881,7 @@ def main():
     args = parser.parse_args()
     args.root = args.root.resolve()
     args.root.mkdir(parents=True, exist_ok=True)
-    frozen = isolate_environment(args.root)
+    frozen = isolate_environment(args.root, config_mode=args.config_mode)
     WireAudit(args.root / "wire.jsonl").install()
     raise SystemExit(0 if asyncio.run(AcceptanceSuite(args, frozen).run()) else 1)
 

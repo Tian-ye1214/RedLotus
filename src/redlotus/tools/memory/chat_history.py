@@ -60,11 +60,18 @@ class ChatHistory:
     def set_messages(self, messages: list) -> None:
         """直接替换消息列表（供上下文压缩等使用）。"""
         self._messages = list(messages)
+        self._compress_summary_state = None
         for message in reversed(self._messages):
-            metadata = getattr(message, "metadata", None) or {}
-            if metadata.get("origin") == "context_summary":
-                self._compress_summary_state = metadata.get("summary")
-                break
+            candidates = [getattr(message, "metadata", None) or {}]
+            for part in message.parts:
+                if _part_kind(part) == "user-prompt" and isinstance(part.content, list):
+                    candidates.extend(
+                        getattr(item, "metadata", None) or {} for item in part.content
+                    )
+            for metadata in candidates:
+                if metadata.get("origin") == "context_summary":
+                    self._compress_summary_state = metadata["summary"]
+                    return
 
     @property
     def compress_summary_state(self) -> str | None:

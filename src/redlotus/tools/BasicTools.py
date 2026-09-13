@@ -129,8 +129,6 @@ class BasicToolkit:
             safe_name = "default_task"
 
         task_dir = self._WORK_DATABASE_ROOT / safe_name
-        task_dir.mkdir(parents=True, exist_ok=True)
-
         self._artifact_dir = task_dir
         logger.info(f"📁 任务工作目录已设置: {task_dir}")
 

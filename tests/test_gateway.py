@@ -106,7 +106,8 @@ async def test_anthropic_parallel_mapping(monkeypatch):
     client = configure_gateway(monkeypatch, respond, "https://native.example")
 
     model = create_model(
-        "claude-sonnet-4-5", {"thinking": "disabled", "max_tokens": 64}
+        "claude-sonnet-4-5",
+        {"thinking": "disabled", "max_tokens": 64, "provider": "anthropic"},
     )
     result = await Agent(model, tools=[read_a]).run("test")
     assert result.output == "done"
@@ -147,18 +148,21 @@ async def test_embedding_rerank_wire_and_prefix(base, monkeypatch):
             "SILICONFLOW_KEY": "test-only",
         }.get(key, ""),
     )
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(respond), **embedding._client_kwargs(60)
-    )
-    monkeypatch.setattr(embedding, "get_client", lambda key, make: client)
-    monkeypatch.setattr(embedding.app_config, "missing_rag_api_keys", lambda: ())
+    original_client = httpx.AsyncClient
     monkeypatch.setattr(
-        embedding,
-        "settings",
-        lambda: {
-            "RAG_models": {"embedding": "embed-model", "reranker": "rerank-model"}
-        },
+        embedding.httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(
+            transport=httpx.MockTransport(respond), **kwargs
+        ),
     )
+    monkeypatch.setattr(embedding.app_config, "missing_rag_api_keys", lambda: ())
+    config = embedding.settings()
+    config["RAG_models"] = {"embedding": "embed-model", "reranker": "rerank-model"}
+    config["rag_service"]["timeout"] = 13
+    monkeypatch.setattr(embedding, "settings", lambda: config)
+    client = embedding._get_shared_client()
+    assert client.timeout.read == 13
     assert await embedding.embed_texts(["a", "b"]) == [[1.0, 0.0], [0.0, 1.0]]
     assert (await embedding.rerank_documents("query", ["a", "b"], top_n=1))[0][
         "index"

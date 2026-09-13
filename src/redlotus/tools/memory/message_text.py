@@ -11,6 +11,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     RetryPromptPart,
     UserPromptPart,
+    TextContent,
 )
 
 
@@ -24,15 +25,25 @@ def pydantic_messages_to_text(messages: list, *, tool_args_max_chars=300) -> str
     for message in messages:
         for part in message.parts:
             if isinstance(part, UserPromptPart):
-                content = part.content
-                if not isinstance(content, str):
-                    content = "\n".join(
-                        value
-                        if isinstance(value, str)
+                items = (
+                    [part.content] if isinstance(part.content, str) else part.content
+                )
+                for item in items:
+                    origin = (getattr(item, "metadata", None) or {}).get("origin")
+                    if origin == "runtime_context":
+                        continue
+                    label = {
+                        "context_summary": "CONTEXT SUMMARY",
+                        "memory_control": "MEMORY CONTROL",
+                    }.get(origin, "USER")
+                    text = (
+                        item.content
+                        if isinstance(item, TextContent)
+                        else item
+                        if isinstance(item, str)
                         else "[original media reference]"
-                        for value in content
                     )
-                lines.append(f"[USER]: {content}")
+                    lines.append(f"[{label}]: {text}")
             elif isinstance(part, TextPart):
                 lines.append(f"[ASSISTANT]: {part.content}")
             elif isinstance(part, ToolCallPart):
