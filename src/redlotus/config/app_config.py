@@ -81,9 +81,9 @@ def load_config() -> dict[str, Any]:
     initialize_config()
     path = config_file()
     with file_lock(path):
-        with open(path, encoding="utf-8") as f:
-            value = json.load(f)
-            version = (path, os.fstat(f.fileno()).st_mtime_ns)
+        raw = path.read_bytes()
+        value = json.loads(raw)
+        version = (path, raw)
     _CONFIG = (version, value)
     return deepcopy(value)
 
@@ -97,7 +97,8 @@ def reload_config() -> dict[str, Any]:
 
 def settings() -> dict[str, Any]:
     path = config_file()
-    version = (path, path.stat().st_mtime_ns) if path.exists() else None
+    with file_lock(path):
+        version = (path, path.read_bytes()) if path.exists() else None
     cached = _CONFIG
     if cached is None or version != cached[0]:
         return load_config()

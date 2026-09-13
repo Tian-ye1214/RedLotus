@@ -28,11 +28,20 @@ def resource_root() -> Path:
 
 
 def user_data_dir() -> Path:
-    """全局可写状态根：日志 / 向量库 / 长期记忆 / 运行时技能 overlay。"""
-    return Path(
-        os.environ.get("REDLOTUS_DATA_DIR")
-        or platformdirs.user_data_dir(APP_NAME, appauthor=False)
+    """Persistent memory state; the explicit environment override remains supported."""
+    if override := os.environ.get("REDLOTUS_DATA_DIR"):
+        return Path(override)
+    return _storage_path(
+        "state_dir", Path(platformdirs.user_data_dir(APP_NAME, appauthor=False))
     )
+
+
+def _storage_path(name: str, default: Path) -> Path:
+    # Config discovery uses user_config_dir(), so it never depends on these data paths.
+    from redlotus.config.app_config import settings
+
+    configured = settings()["storage"][name]
+    return Path(configured).expanduser().resolve() if configured else default
 
 
 def user_config_dir() -> Path:
@@ -65,6 +74,25 @@ def dotenv_file() -> Path:
 def project_data_dir(workspace) -> Path:
     """Project identity is independent of the interpreter or installation directory."""
     return user_data_dir() / "projects" / workspace.project_id
+
+
+def session_data_dir(workspace) -> Path:
+    return (
+        _storage_path("sessions_dir", user_data_dir() / "projects")
+        / workspace.project_id
+    )
+
+
+def references_dir() -> Path:
+    return _storage_path("references_dir", user_data_dir() / "references")
+
+
+def runtime_dir() -> Path:
+    return _storage_path("runtime_dir", user_data_dir())
+
+
+def compression_dir() -> Path:
+    return _storage_path("compression_dir", logs_dir() / "context_compress_debug")
 
 
 def migrate_project_data(workspace) -> None:
@@ -118,4 +146,4 @@ def memory_dir() -> Path:
 
 def user_skills_dir() -> Path:
     """运行时安装的技能 overlay（可写）；与随包基线技能合并加载。"""
-    return user_data_dir() / "skills"
+    return runtime_dir() / "skills"

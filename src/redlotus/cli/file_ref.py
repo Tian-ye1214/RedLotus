@@ -8,11 +8,11 @@ import re
 from pathlib import Path
 
 from redlotus.cli.reference_syntax import iter_reference_spans, resolve_ref_path
-from redlotus.workspace.workspace import current_workspace
-from redlotus.runtime.context import WorkspaceContext
 from redlotus.ModelGateway.input_policy import ModelInputPolicy
 from redlotus.references.models import ReferenceFile
 from redlotus.references.store import ReferenceStore
+from redlotus.runtime.context import WorkspaceContext
+from redlotus.workspace.workspace import current_workspace
 
 
 def parse_file_paths(text: str, *, root: Path | None = None) -> list[Path]:
@@ -20,6 +20,11 @@ def parse_file_paths(text: str, *, root: Path | None = None) -> list[Path]:
     candidates = []
     remaining = list(text)
     for reference in iter_reference_spans(text, root=root):
+        if reference.alternatives:
+            raise ValueError(
+                "引用路径存在歧义，请用引号或花括号指定："
+                + "、".join(reference.alternatives)
+            )
         if not reference.closed:
             raise ValueError(f"引用路径未闭合：{text[reference.start :]}")
         if value := reference.value.strip():

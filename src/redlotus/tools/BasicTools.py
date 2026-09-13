@@ -18,8 +18,8 @@ from redlotus.skills.SkillsManager import SkillsManager
 from redlotus.infra.path_sandbox import resolve_readable_path
 from redlotus.runtime.context import WorkspaceContext
 from redlotus.workspace.workspace import current_workspace
-from redlotus.infra.paths import user_data_dir, user_skills_dir
-from redlotus.infra.subprocess_runner import run_subprocess
+from redlotus.infra.paths import runtime_dir, user_skills_dir
+from redlotus.infra.subprocess_runner import run_subprocess, has_background_shell_command
 from redlotus.tools.browser_session import PlaywrightBrowserSession
 from redlotus.cli.render import show_file_diff
 from redlotus.cli.pending_review import PendingReviewStore
@@ -35,7 +35,7 @@ class BasicToolkit:
         workspace: WorkspaceContext | None = None,
     ):
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
-        self._clawhub_cwd = user_data_dir()
+        self._clawhub_cwd = runtime_dir()
         self._skills_overlay = user_skills_dir()
         self._WORK_DATABASE_ROOT = self.workspace.root / "WorkDatabase"
         self._artifact_dir = self._WORK_DATABASE_ROOT
@@ -405,9 +405,7 @@ class BasicToolkit:
                 use_shell = any(
                     c in command for c in ["|", ">", "<", "&&", "||", ";", "*", "?"]
                 )
-                if use_shell and re.search(
-                    r"\b(start|nohup|setsid)\b|&\s*$", command, re.I
-                ):
+                if use_shell and has_background_shell_command(command):
                     return "Security error: background shell processes are not allowed"
                 cwd = str(self._base_dir.resolve())
                 env = None

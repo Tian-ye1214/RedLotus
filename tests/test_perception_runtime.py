@@ -39,6 +39,35 @@ async def test_perception_uses_worker_target_in_owned_child_thread(
     monkeypatch.setattr("pydantic_ai.models.ALLOW_MODEL_REQUESTS", True)
     parent = threading.get_ident()
     requests = []
+    preference = dict(
+        scope="global",
+        kind="requested",
+        goal="Code style preference",
+        source_turn_ids=["turn"],
+    )
+    unrelated = dict(
+        scope="project",
+        kind="requested",
+        goal="Project-specific rule",
+        source_turn_ids=["turn"],
+    )
+    outputs = iter(
+        [
+            dict(records=[], reason="No new event"),
+            dict(
+                records=[preference, unrelated],
+                reason="Mixed user requirements",
+                request_authorized=True,
+            ),
+            dict(
+                records=[preference],
+                reason="Only the requested global preference",
+                request_authorized=True,
+            ),
+            dict(records=[], reason="The preference is already saved", request_authorized=True),
+            dict(records=[{**preference, "action": "update", "target_id": "preference"}], reason="Confirm existing memory with this source", request_authorized=True),
+        ]
+    )
 
     async def context(*args, **kwargs):
         return 1000000
@@ -61,7 +90,7 @@ async def test_perception_uses_worker_target_in_owned_child_thread(
                         "finish_reason": "stop",
                         "message": {
                             "role": "assistant",
-                            "content": '{"records":[],"reason":"No new event"}',
+                            "content": json.dumps(next(outputs)),
                         },
                     }
                 ],
@@ -99,6 +128,36 @@ async def test_perception_uses_worker_target_in_owned_child_thread(
         assert requests[0][1]["max_tokens"] == 393216
         assert not factory.handles
         assert ModelTarget.for_role("compressor").settings["max_tokens"] == 16384
+
+        scoped = await perception.produce(
+            "scoped-job",
+            dict(
+                mode="explicit_request",
+                explicit_request="Remember the global code preference only",
+                requested_scope="global",
+                new_turn_ids=["turn"],
+                events=[
+                    dict(
+                        id="turn",
+                        user_inputs=[
+                            "Remember my code preference and the separate project rule"
+                        ],
+                        operations=[],
+                    )
+                ],
+            ),
+            [],
+        )
+        assert [row.scope for row in scoped.records] == ["global"]
+        assert len(requests) == 3, "Wrong scope must be corrected during production"
+        repeated = await perception.produce(
+            "repeat-job",
+            dict(mode="explicit_request", explicit_request="Remember the same code preference", requested_scope="global", new_turn_ids=["turn"], existing_records=[{**preference, "id": "preference", "project_id": workspace.project_id, "origin": "explicit"}], events=[dict(id="turn", user_inputs=["Remember my code preference"], operations=[])]),
+            [],
+        )
+        assert repeated.records[0].target_id == "preference"
+        assert repeated.records[0].action == "update"
+        assert len(requests) == 5
 
         memory = MemoryService(workspace=workspace)
         initial = memory._route()

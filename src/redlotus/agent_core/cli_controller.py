@@ -22,7 +22,7 @@ from redlotus.cli.cli_ui import print_startup_logo
 from redlotus.tools.memory import ChatHistory
 from redlotus.workspace.workspace import WorkspaceSnapshot, list_workspace_snapshots
 from redlotus.tools.conversation_log import read_saved_model_messages_file
-from redlotus.infra.paths import project_data_dir
+from redlotus.infra.paths import project_data_dir, session_data_dir
 from redlotus.workspace.workspace_picker import legacy_pick_snapshot
 
 if TYPE_CHECKING:
@@ -94,7 +94,9 @@ class AgentCliController:
         if state is None:
             return None
         snapshots = await asyncio.to_thread(
-            list_workspace_snapshots, root=project_data_dir(self.system.workspace)
+            list_workspace_snapshots,
+            root=session_data_dir(self.system.workspace),
+            legacy_root=project_data_dir(self.system.workspace),
         )
         if not snapshots:
             if force_picker:

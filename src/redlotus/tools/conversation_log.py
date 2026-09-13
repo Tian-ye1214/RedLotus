@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic_ai.messages import ModelMessagesTypeAdapter
-from redlotus.infra.paths import project_data_dir
+from redlotus.infra.paths import session_data_dir
 
 from redlotus.infra.persist_utils import (
     atomic_write_json,
@@ -60,7 +60,7 @@ class ConversationLog:
         self._topic = safe_segment(topic or "", 80)
         self._sub_id = safe_segment(sub_id, 60) if sub_id else None
         self._root = (
-            project_data_dir(workspace)
+            session_data_dir(workspace)
             if workspace is not None
             else conversations_root()
         )

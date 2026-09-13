@@ -9,7 +9,7 @@ from pathlib import Path
 
 from filelock import AsyncFileLock
 
-from redlotus.infra.paths import user_data_dir
+from redlotus.infra.paths import references_dir
 from redlotus.infra.persist_utils import (
     atomic_write_json,
     atomic_write_bytes,
@@ -26,7 +26,7 @@ class ReferenceStore:
 
     def __init__(self, workspace: WorkspaceContext, root: Path | None = None):
         self.workspace = workspace
-        self.root = root or user_data_dir() / "references"
+        self.root = root or references_dir()
 
     async def prepare_message(self, message):
         import base64

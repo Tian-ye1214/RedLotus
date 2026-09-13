@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """可取消的子进程执行原语。
 
 被 tools/ 与 skills/ 共用的叶子模块：只依赖标准库，不依赖任何项目模块，
@@ -8,9 +7,56 @@ execute_skill_script 共用同一套 杀进程树 / 超时 / 取消 语义。
 
 import asyncio
 import os
+import platform as _platform
+import shlex
 import signal
 import subprocess
-import platform as _platform
+
+
+def _unquote_shell_word(word: str) -> str:
+    return (
+        word[1:-1]
+        if len(word) >= 2 and word[0] in "\"'" and word[-1] == word[0]
+        else word
+    )
+
+
+def has_background_shell_command(command: str) -> bool:
+    """Recognize shell commands without inspecting quoted program source as shell."""
+    lexer = shlex.shlex(command, posix=False, punctuation_chars=";&|\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    tokens = list(lexer)
+    if tokens and tokens[-1] == "&":
+        return True
+    at_command = True
+    executable = ""
+    for index, token in enumerate(tokens):
+        if token in (";", "&", "&&", "|", "||", "\n"):
+            at_command = True
+            continue
+        value = _unquote_shell_word(token)
+        if at_command:
+            executable = value.replace("\\", "/").rsplit("/", 1)[-1].lower()
+            if executable in ("start", "nohup", "setsid", "start-process"):
+                return True
+            at_command = False
+        if executable in (
+            "cmd",
+            "cmd.exe",
+            "powershell",
+            "powershell.exe",
+            "pwsh",
+            "pwsh.exe",
+            "sh",
+            "bash",
+            "zsh",
+        ) and value.lower() in ("/c", "/k", "-c", "-command"):
+            return has_background_shell_command(
+                _unquote_shell_word(" ".join(tokens[index + 1 :]))
+            )
+    return False
 
 
 async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
@@ -53,9 +99,12 @@ async def run_subprocess(
     取代 asyncio.to_thread(subprocess.run, ...)——后者在任务被取消时既不中断阻塞线程、
     也不杀子进程，会留下孤儿进程与卡死的线程池槽位。
     """
-    kwargs: dict = dict(
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=cwd, env=env
-    )
+    kwargs = {
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+        "cwd": cwd,
+        "env": env,
+    }
     if _platform.system() == "Windows":
         kwargs["creationflags"] = (
             subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
@@ -70,7 +119,7 @@ async def run_subprocess(
 
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         await _terminate_process_tree(proc)
         raise subprocess.TimeoutExpired(args, timeout)
     except asyncio.CancelledError:

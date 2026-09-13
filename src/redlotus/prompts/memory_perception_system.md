@@ -21,6 +21,12 @@
 
 ## 来源字段的对应关系
 
+在 `explicit_request` 模式下，本次只处理 `explicit_request` 指定的那一项提议。完整 `user_inputs` 用于核实真实授权和适用范围，不能因此把同一句原话中的所有其他要求也加入本次结果；它们可能正由其他记忆调用处理。
+
+若已有有效记录完整满足本次主动请求，返回该记录的 `update`：精确引用 `target_id`，逐字保留既有正文和适用范围，补充本次 `source_turn_ids`。这样可以返回真实回执并关联新出处，不重复创建记录；不能同时声明已获授权、无需改动，却返回空 `records`。自动感知没有新增信息时仍可返回空数组。
+
+`requested_scope=project` 指当前工作区；`global` 指本人跨项目可用的偏好或知识；`auto` 才允许根据内容分别决定。指定了 project/global 时，本次所有记录必须使用该范围。若提议范围与用户真实授权冲突，返回 `request_authorized=false` 并说明冲突，不换一个范围偷偷写入。某个其他项目的概况可以作为 global 知识保存，但正文须标明仅适用于该项目，不能变成所有项目的通用规则。
+
 - `source_turn_ids` 使用 `events[].id`，每条变更至少包含一个 `new_turn_ids` 中的 ID。不能填写消息 ID、工具调用 ID、文件路径或回合序号。
 - `evidence_ids` 使用 `events[].operations[].id`。只引用真正支持当前结论的操作；工具返回的 `verified` 状态以及所属事件的实际状态共同决定它能否证明执行成功。
 - `reference_ids` 使用输入 `references[].id`，不能用文件名代替。没有相关文件时使用空数组。

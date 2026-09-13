@@ -8,12 +8,18 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from redlotus.tools.memory.chat_history import ChatHistory
 
 import httpx
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextContent,
+    UserPromptPart,
+)
 
 from redlotus.config.app_config import (
     get_context_config,
@@ -21,19 +27,10 @@ from redlotus.config.app_config import (
     get_model_and_params,
     settings,
 )
+from redlotus.infra import logger
+from redlotus.ModelGateway.usage_accounting import latest_usage_input_tokens
 from redlotus.prompt import (
     load_prompt,
-)
-
-from redlotus.ModelGateway.usage_accounting import latest_usage_input_tokens
-
-from redlotus.infra import logger
-
-from pydantic_ai.messages import (
-    TextContent,
-    ModelRequest,
-    ModelResponse,
-    UserPromptPart,
 )
 
 _COMPRESS_PREFIX = "[CONTEXT_COMPRESSION_SUMMARY]"
@@ -167,9 +164,10 @@ def _save_compress_debug_artifacts(
     head_end: int,
     tail_start: int,
 ) -> None:
+    from redlotus.infra.paths import compression_dir
     from redlotus.tools.memory.message_text import pydantic_messages_to_text
 
-    root = logger.get_log_dir() / "context_compress_debug"
+    root = compression_dir()
     root.mkdir(parents=True, exist_ok=True)
     run_dir = root / f"{int(time.time() * 1000)}_{role}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -206,7 +204,7 @@ def _lint_compression_summary(summary_md: str) -> str:
         errors.append("压缩摘要为空")
     if "```" in body:
         errors.append("压缩摘要不能包含 Markdown code fence")
-    if body.startswith("{") or body.startswith("["):
+    if body.startswith(("{", "[")):
         errors.append("压缩摘要必须是 Markdown，不得输出 JSON")
 
     pieces = re.split(r"(?m)^[ \t]*(## [^\n]+?)[ \t]*$", body)
@@ -217,11 +215,9 @@ def _lint_compression_summary(summary_md: str) -> str:
     if missing:
         errors.append(f"压缩摘要缺少必需标题: missing={missing!r} actual={headings!r}")
     else:
-        bodies = sections
-        if not bodies["## 原始目标与当前目标"].strip():
-            errors.append("`原始目标与当前目标` 不能为空")
-        if not (bodies["## 已完成节点"].strip() or bodies["## 待完成节点"].strip()):
-            errors.append("`已完成节点` / `待完成节点` 至少一个不能为空")
+        for heading in required:
+            if not sections[heading].strip(" \t\r\n-*#>"):
+                errors.append(f"{heading} 缺少正文；摘要可能被截断")
 
     if errors:
         raise CompressionValidationError("; ".join(errors))
@@ -233,9 +229,44 @@ def _call_compressor_llm(
     system_prompt: str,
     user_content: str,
 ) -> str:
+    from pydantic_ai import ModelRetry
+
     from redlotus.ModelGateway.gateway import complete_text_sync
 
-    return complete_text_sync("compressor", system_prompt, user_content).strip()
+    def validate(output):
+        try:
+            return _lint_compression_summary(output)
+        except CompressionValidationError as exc:
+            raise ModelRetry(str(exc)) from exc
+
+    return complete_text_sync(
+        "compressor", system_prompt, user_content, output_validator=validate
+    )
+
+
+def _compression_bounds(messages, context, *, retain_tail=True):
+    """Choose complete message groups to retain around the summary."""
+    if not retain_tail:
+        return 0, len(messages)
+    starts = [
+        index
+        for index, message in enumerate(messages)
+        if any(isinstance(part, UserPromptPart) for part in message.parts)
+    ]
+    starts.append(len(messages))
+    head_end = (
+        starts[min(int(context["head_turns"]), len(starts) - 1)] if starts[:-1] else 0
+    )
+    tail_start = starts[max(0, len(starts) - 1 - int(context["tail_turns"]))]
+    boundaries = _closed_boundaries(messages)
+    head_end = max(index for index in boundaries if index <= head_end)
+    tail_start = next(
+        (index for index in boundaries if index >= tail_start), len(messages)
+    )
+    if head_end >= tail_start:
+        candidates = [index for index in boundaries if 0 < index < len(messages)]
+        return (0, candidates[-1]) if candidates else None
+    return head_end, tail_start
 
 
 def compress_history(
@@ -263,35 +294,17 @@ def compress_history(
     if not force and (used is None or used < threshold):
         return False
 
-    starts = [
-        index
-        for index, message in enumerate(messages)
-        if any(isinstance(part, UserPromptPart) for part in message.parts)
-    ]
-    starts.append(len(messages))
-    head_end = (
-        starts[min(int(ctx["head_turns"]), len(starts) - 1)] if starts[:-1] else 0
-    )
-    tail_start = starts[max(0, len(starts) - 1 - int(ctx["tail_turns"]))]
-
-    boundaries = _closed_boundaries(messages)
-    head_end = max(index for index in boundaries if index <= head_end)
-    tail_start = next(
-        (index for index in boundaries if index >= tail_start), len(messages)
-    )
-    if not retain_tail:
-        head_end, tail_start = 0, len(messages)
-    elif head_end >= tail_start:
-        candidates = [index for index in boundaries if 0 < index < len(messages)]
-        if not candidates:
-            return False
-        head_end, tail_start = 0, candidates[-1]
+    bounds = _compression_bounds(messages, ctx, retain_tail=retain_tail)
+    if bounds is None:
+        return False
+    head_end, tail_start = bounds
 
     prev_summary = history.compress_summary_state
     from redlotus.tools.memory.message_text import pydantic_messages_to_text
 
     excerpt = pydantic_messages_to_text(
         messages[head_end:tail_start],
+        include_reference_content=False,
         tool_args_max_chars=int(
             settings()["context"]["compression"]["middle_tool_args_max_chars"]
         ),
@@ -413,7 +426,9 @@ def _closed_boundaries(messages: list) -> list[int]:
 
 
 def _estimate_text_tokens(text):
-    return sum(1 if ord(char) > 127 else 0.3 for char in text)
+    # Dense decimal data can tokenize digit by digit. Keep the prose estimate
+    # for ASCII punctuation/spacing so ordinary documents are not overcounted.
+    return sum(1 if ord(char) > 127 or char.isdigit() else 0.3 for char in text)
 
 
 def estimate_context_tokens(
@@ -509,9 +524,9 @@ async def compact_request_messages(
         return combined
     history = ChatHistory()
     history.set_messages(combined)
-    boundaries = _closed_boundaries(combined)
-    last_closed = max((i for i in boundaries if i < len(combined)), default=0)
-    retain_tail = estimate_context_tokens(combined[last_closed:], tools=tools) < min(
+    bounds = _compression_bounds(combined, context)
+    retained = [*combined[: bounds[0]], *combined[bounds[1] :]] if bounds else combined
+    retain_tail = estimate_context_tokens(retained, tools=tools) < min(
         threshold, input_budget
     )
     changed = await compress_history_async(

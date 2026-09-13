@@ -35,10 +35,10 @@ def set_workspace(path: Path | str) -> Path:
 
 
 def conversations_root() -> Path:
-    from redlotus.infra.paths import project_data_dir
+    from redlotus.infra.paths import session_data_dir
     from redlotus.runtime.context import WorkspaceContext
 
-    return project_data_dir(WorkspaceContext.from_path(current_workspace()))
+    return session_data_dir(WorkspaceContext.from_path(current_workspace()))
 
 
 def snapshot_basename(
@@ -141,14 +141,15 @@ def _snapshot_from_path(path: Path) -> WorkspaceSnapshot | None:
     )
 
 
-def list_workspace_snapshots(*, root: Path | None = None) -> list[WorkspaceSnapshot]:
+def list_workspace_snapshots(
+    *, root: Path | None = None, legacy_root: Path | None = None
+) -> list[WorkspaceSnapshot]:
     conv_root = root or conversations_root()
-    if not conv_root.is_dir():
-        return []
     snapshots: list[WorkspaceSnapshot] = []
-    for fp in conv_root.glob(MODEL_MESSAGES_GLOB):
-        item = _snapshot_from_path(fp)
-        if item is not None:
-            snapshots.append(item)
+    for location in dict.fromkeys(path for path in (conv_root, legacy_root) if path):
+        for fp in location.glob(MODEL_MESSAGES_GLOB):
+            item = _snapshot_from_path(fp)
+            if item is not None:
+                snapshots.append(item)
     snapshots.sort(key=lambda s: (s.saved_at, str(s.path)), reverse=True)
     return snapshots

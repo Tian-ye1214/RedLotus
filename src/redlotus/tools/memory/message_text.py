@@ -1,26 +1,29 @@
 from __future__ import annotations
 
-import re
 import json
+import re
 from typing import Any
+
 from pydantic_ai.messages import (
     BaseToolReturnPart,
     ModelRequest,
     ModelResponse,
+    RetryPromptPart,
+    TextContent,
     TextPart,
     ToolCallPart,
-    RetryPromptPart,
     UserPromptPart,
-    TextContent,
 )
 
 
-def pydantic_messages_to_text(messages: list, *, tool_args_max_chars=300) -> str:
+def pydantic_messages_to_text(
+    messages: list, *, tool_args_max_chars=300, include_reference_content=True
+) -> str:
     """Readable transcript for compaction/debugging; immutable originals remain in the journal."""
     lines = []
     important = re.compile(
         r"exit.code|return.code|status.code|error|failed|exception|stderr|path|artifact",
-        re.I,
+        re.IGNORECASE,
     )
     for message in messages:
         for part in message.parts:
@@ -28,7 +31,7 @@ def pydantic_messages_to_text(messages: list, *, tool_args_max_chars=300) -> str
                 items = (
                     [part.content] if isinstance(part.content, str) else part.content
                 )
-                for item in items:
+                for index, item in enumerate(items):
                     origin = (getattr(item, "metadata", None) or {}).get("origin")
                     if origin == "runtime_context":
                         continue
@@ -43,6 +46,12 @@ def pydantic_messages_to_text(messages: list, *, tool_args_max_chars=300) -> str
                         if isinstance(item, str)
                         else "[original media reference]"
                     )
+                    # UserMessage keeps original user text first, then emits labelled
+                    # reference parts. The full originals remain in snapshots/journals.
+                    if index > 0 and text.startswith("【引用文件 "):
+                        label = "REFERENCE FILE"
+                        if not include_reference_content and "\n" in text:
+                            text = text.split("\n", 1)[0] + "（原始正文见引用快照）"
                     lines.append(f"[{label}]: {text}")
             elif isinstance(part, TextPart):
                 lines.append(f"[ASSISTANT]: {part.content}")

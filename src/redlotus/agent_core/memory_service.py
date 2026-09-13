@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import asdict
+from typing import Literal
 
 from filelock import AsyncFileLock
 from pydantic import BaseModel, Field
@@ -282,8 +283,7 @@ class MemoryService:
             draft.projection != "none" and draft.scope != "global"
         ):
             raise ValueError("Invalid memory scope")
-        if job.scope != "auto" and draft.scope != job.scope:
-            raise ValueError("The requested memory scope was not honored")
+        draft.validated_scope(job.scope)
         identity = (
             draft.target_id
             or hashlib.sha256(f"{job.id}:{index}".encode()).hexdigest()[:32]
@@ -294,9 +294,8 @@ class MemoryService:
             previous = None
         if previous and previous.last_change_id == f"{job.id}:{index}":
             return previous
-        if previous and (
-            previous.scope != draft.scope
-            or (previous.origin == "explicit" and not explicit)
+        if previous and not explicit and (
+            previous.scope != draft.scope or previous.origin == "explicit"
         ):
             return None
         source_time = max(events[key].created_at for key in draft.source_turn_ids)
@@ -374,6 +373,7 @@ class MemoryService:
             )
         )
         body.update(
+            project_id=self.workspace.project_id if draft.scope == "project" else record.project_id,
             kind="requested" if explicit else draft.kind,
             origin="explicit" if explicit else "automatic",
             state="deleted" if draft.action == "delete" else "active",
@@ -397,7 +397,7 @@ class MemoryService:
             ]
             committed = []
             for record, draft in changes:
-                if record.scope == "global" and not await asyncio.to_thread(
+                if not await asyncio.to_thread(
                     self.long_term.apply_record,
                     record,
                     job.bases.get(record.id),
@@ -479,8 +479,15 @@ class MemoryService:
             logger.error("记忆生产未完成，原始事件已保留：%s", exc)
             return False
 
-    async def remember(self, request: str, scope: str = "auto") -> str:
-        """Save, correct or forget memory explicitly requested by the current user. Only claim success from a saved receipt."""
+    async def remember(
+        self, request: str, scope: Literal["auto", "project", "global"] = "auto"
+    ) -> str:
+        """Save, correct or forget an explicitly requested memory; report the actual receipt.
+
+        project means this current workspace, not any named project in the text.
+        Use global for cross-project preferences or knowledge ABOUT another project,
+        naming its applicability in the request. Each call handles only its stated proposal.
+        """
         if not self.owner_memory_allowed or self.current is None:
             return "Error: Explicit memory requires an authenticated current user turn."
         async with self._explicit:

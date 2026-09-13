@@ -128,9 +128,16 @@ class MemoryPerception:
                 ):
                     result.request_authorized = False
                     result.reason = "凭据不会进入持久记忆。"
+                if payload["mode"] == "explicit_request" and result.request_authorized and not result.records:
+                    raise ModelRetry(
+                        "已授权的主动请求必须返回记录。若已有记录完全满足请求，请 update 对应 target_id，"
+                        "逐字保留既有正文和适用范围，仅补充本次 source_turn_ids；不要重复 create，也不要返回空 records。"
+                    )
                 try:
                     result.records = [
-                        row.validated_sources(
+                        row.validated_scope(
+                            payload.get("requested_scope", "auto")
+                        ).validated_sources(
                             current_ids,
                             payload["new_turn_ids"],
                             [ref.id for ref in references],

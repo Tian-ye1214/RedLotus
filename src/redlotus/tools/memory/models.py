@@ -64,6 +64,13 @@ class MemoryDraft(MemoryContent):
     source_turn_ids: list[str] = Field(min_length=1)
     evidence_ids: list[str] = Field(default_factory=list)
 
+    def validated_scope(self, requested_scope):
+        if requested_scope != "auto" and self.scope != requested_scope:
+            raise ValueError(
+                f"本次请求只允许 scope={requested_scope}；不要混入其他范围或其他记忆提议。"
+            )
+        return self
+
     def validated_sources(self, current_ids, new_ids, reference_ids, previous=None):
         historical = set(previous.source_turn_ids) if previous else set()
         if set(self.source_turn_ids) - set(current_ids) - historical or not set(

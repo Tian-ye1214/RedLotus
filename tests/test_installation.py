@@ -152,14 +152,16 @@ def test_config_reader_holds_writer_lock_until_parse_finishes(tmp_path, monkeypa
     monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(path))
     app_config.initialize_config()
     entered, release, written = threading.Event(), threading.Event(), threading.Event()
-    original = json.load
+    original = json.loads
     errors = []
 
-    def read(stream, *args, **kwargs):
-        if threading.current_thread().name == "config-reader":
+    def read(data, *args, **kwargs):
+        if threading.current_thread().name == "config-reader" and isinstance(
+            data, bytes
+        ):
             entered.set()
             release.wait(5)
-        return original(stream, *args, **kwargs)
+        return original(data, *args, **kwargs)
 
     def write():
         try:
@@ -169,7 +171,7 @@ def test_config_reader_holds_writer_lock_until_parse_finishes(tmp_path, monkeypa
         finally:
             written.set()
 
-    monkeypatch.setattr(json, "load", read)
+    monkeypatch.setattr(json, "loads", read)
     reader = threading.Thread(target=app_config.load_config, name="config-reader")
     writer = threading.Thread(target=write)
     reader.start()
@@ -180,6 +182,7 @@ def test_config_reader_holds_writer_lock_until_parse_finishes(tmp_path, monkeypa
     finally:
         release.set()
         reader.join(5)
-        writer.join(5)
+        if writer.ident is not None:
+            writer.join(5)
     assert not errors
     assert app_config.settings()["marker"] == "updated"

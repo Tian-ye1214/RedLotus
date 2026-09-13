@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 
 import lancedb
 import pytest
@@ -20,7 +21,7 @@ from redlotus.tools.memory.observations import ObservationStore
 
 
 async def test_legacy_migration_is_idempotent_and_excludes_unknown_projects(tmp_path):
-    project, db_path = tmp_path / "project", tmp_path / "db"
+    project, db_path = tmp_path / "project", Path(os.environ["RAG_DB_PATH"])
     root = project / ".redlotus"
     root.mkdir(parents=True)
     for role in ("coordinator", "manager", "worker"):

@@ -3,6 +3,13 @@
   "API_KEY": "",
   "SILICONFLOW_BASE": "",
   "SILICONFLOW_KEY": "",
+  "storage": {
+    "state_dir": null,
+    "sessions_dir": null,
+    "references_dir": null,
+    "compression_dir": null,
+    "runtime_dir": null
+  },
   "model_gateway": {
     "protocol": "openai-chat",
     "connect_timeout": 10,

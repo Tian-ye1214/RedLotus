@@ -27,13 +27,27 @@ def read_json(path):
 
 
 class TerminalSession:
-    def __init__(self, executable, project, state, evidence, *, python, tui):
+    def __init__(
+        self,
+        executable,
+        project,
+        state,
+        evidence,
+        *,
+        python,
+        tui,
+        environment=None,
+        transcript_root=None,
+    ):
         self.project, self.state, self.evidence = project.resolve(), state, evidence
         evidence.mkdir(parents=True, exist_ok=True)
         identity = hashlib.sha256(
             os.path.normcase(str(self.project)).encode()
         ).hexdigest()[:24]
         self.storage = state / "projects" / identity
+        self.conversations = (
+            (transcript_root / identity) if transcript_root else self.storage
+        )
         self.screen = pyte.Screen(140, 44)
         self.stream = pyte.Stream(self.screen)
         self.text, self.lock = "", threading.Lock()
@@ -50,8 +64,14 @@ class TerminalSession:
             TERM="xterm-256color",
         )
         env["PATH"] = str(python.parent) + os.pathsep + env["PATH"]
+        env.update(environment or {})
+        arguments = (
+            [str(arg) for arg in executable]
+            if isinstance(executable, (list, tuple))
+            else [str(executable)]
+        )
         self.process = PtyProcess.spawn(
-            [str(executable)], cwd=str(self.project), env=env, dimensions=(44, 140)
+            arguments, cwd=str(self.project), env=env, dimensions=(44, 140)
         )
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
@@ -95,6 +115,11 @@ class TerminalSession:
         self.snapshot("startup")
 
     def send(self, text):
+        with (self.evidence / "submitted.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps({"time": time.time(), "text": text}, ensure_ascii=False)
+                + "\n"
+            )
         self.process.write(text + "\r")
 
     def snapshot(self, name):
@@ -112,15 +137,19 @@ class TerminalSession:
             encoding="utf-8",
         )
 
-    def _event(self, prompt):
+    def _event(self, prompt, previous=()):
         for path in (self.storage / "memory/turns").glob("*.json"):
             value = read_json(path)
-            if value.get("finished_at") and value["user_inputs"][0] == prompt:
+            if (
+                value["id"] not in previous
+                and value.get("finished_at")
+                and value["user_inputs"][0] == prompt
+            ):
                 return value
         return None
 
     def _messages(self):
-        paths = list(self.storage.glob("coordinator*_ModelMessages.json"))
+        paths = list(self.conversations.glob("coordinator*_ModelMessages.json"))
         return (
             read_json(max(paths, key=lambda p: p.stat().st_mtime_ns))["model_messages"]
             if paths
@@ -128,8 +157,11 @@ class TerminalSession:
         )
 
     def say(self, prompt):
+        previous = {
+            path.stem for path in (self.storage / "memory/turns").glob("*.json")
+        }
         self.send(prompt)
-        event = self.wait(lambda: self._event(prompt))
+        event = self.wait(lambda: self._event(prompt, previous))
         assert event["status"] == "success", event
         responses = [m for m in self._messages() if m["kind"] == "response"]
         response = responses[-1]
