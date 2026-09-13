@@ -93,7 +93,9 @@
     "index": {
       "min_rows": 256,
       "metric": "cosine",
-      "rebuild_every_n_adds": 100
+      "rebuild_every_n_adds": 100,
+      "rows_per_partition": 4096,
+      "dimensions_per_sub_vector": 8
     }
   },
   "long_term_memory": {
@@ -103,11 +105,50 @@
   "MODEL_HTTP_TIMEOUT": 300,
   "memory_perception": {
     "window_turns": 25,
-    "overlap_turns": 5
+    "overlap_turns": 5,
+    "model_role": "worker",
+    "max_concurrent": 1,
+    "input_context_ratio": 0.65,
+    "existing_record_limit": 12,
+    "query_max_chars": 1200,
+    "fragment_min_chars": 1000
   },
   "input_limits": {
     "defaults": {
-      "max_file_bytes": 20000000
+      "max_file_bytes": 20000000,
+      "max_files": 20,
+      "max_request_bytes": null
     }
+  },
+  "model_gateway": {
+    "protocol": "openai-chat",
+    "connect_timeout": 10,
+    "settings": {
+      "parallel_tool_calls": true
+    }
+  },
+  "model_metadata": {
+    "url": "https://openrouter.ai/api/v1/models",
+    "timeout": 15,
+    "supported_thinking_efforts": [
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ]
+  },
+  "rag_service": {
+    "timeout": 60,
+    "http2": true,
+    "embedding_batch_size": 32,
+    "index_batch_size": 32,
+    "query_instruction": "Instruct: Retrieve related project goals, decisions and outcomes.\nQuery: "
+  },
+  "agent_run_policy": {
+    "max_worker_concurrent": 3,
+    "max_tool_output_chars": 20000,
+    "max_command_timeout_seconds": 60
   }
 }

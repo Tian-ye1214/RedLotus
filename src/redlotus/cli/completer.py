@@ -9,6 +9,7 @@ from redlotus.workspace.workspace import current_workspace
 from prompt_toolkit.completion import Completer, Completion
 
 from redlotus.cli.completion import completion_for_input, COMMANDS
+from redlotus.cli.reference_syntax import quote_reference_path
 from redlotus.config.app_config import (
     get_agent_roles,
     role_supported_thinking_efforts,
@@ -88,10 +89,9 @@ def _iter_file_completions(fragment: str, *, at_mode: bool):
             candidate = child.as_posix()
         if child.is_dir():
             candidate += "/"
-        quote = opener or ('"' if any(char.isspace() for char in candidate) else "")
-        if quote:
-            closing = "}" if quote == "{" else quote
-            candidate = quote + candidate + ("" if child.is_dir() else closing)
+        candidate = quote_reference_path(
+            candidate, opener=opener, directory=child.is_dir()
+        )
         display = ("@" if at_mode else "") + candidate
         yield Completion(
             candidate,

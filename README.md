@@ -142,6 +142,8 @@ Common shortcuts:
 | `Ctrl+Q` | Exit |
 | `@path` | Reference documents and images, with Tab completion; up to 20 files. Video validation is deferred. |
 
+References can be adjacent or separated by punctuation, for example `@review.md,@image.png`. Tab completes the current reference and automatically quotes paths containing spaces or delimiters; `@"path"`, `@'path'`, and `@{path}` also work. Files are deduplicated in first-appearance order. More than 20 distinct files produces an error instead of a partial upload.
+
 <details>
 <summary>Common slash commands</summary>
 

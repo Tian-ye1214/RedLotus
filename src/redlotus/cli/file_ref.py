@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import unicodedata
 from pathlib import Path
 
+from redlotus.cli.reference_syntax import iter_reference_spans, resolve_ref_path
 from redlotus.workspace.workspace import current_workspace
 from redlotus.runtime.context import WorkspaceContext
 from redlotus.ModelGateway.input_policy import ModelInputPolicy
@@ -15,50 +15,18 @@ from redlotus.references.models import ReferenceFile
 from redlotus.references.store import ReferenceStore
 
 
-def _resolve_ref_path(ref: str, root: Path) -> Path:
-    return (root / Path(ref).expanduser()).resolve()
-
-
-def _looks_like_inline_text_suffix(suffix: str) -> bool:
-    return bool(
-        suffix
-        and suffix[0] not in ".-_/\\"
-        and (
-            re.match(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", suffix)
-            or unicodedata.category(suffix[0]).startswith("P")
-        )
-    )
-
-
-def _resolve_existing_ref_prefix(ref: str, root: Path) -> tuple[str, Path] | None:
-    for end in range(len(ref) - 1, 0, -1):
-        suffix = ref[end:]
-        if not _looks_like_inline_text_suffix(suffix):
-            continue
-        prefix = ref[:end]
-        try:
-            path = _resolve_ref_path(prefix, root)
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if path.exists():
-            return prefix, path
-    return None
-
-
 def parse_file_paths(text: str, *, root: Path | None = None) -> list[Path]:
     root = root or current_workspace()
-    token = re.compile(
-        r"(?<![A-Za-z0-9._%+-])@(?:\{([^}]+)\}|\"([^\"]+)\"|'([^']+)'|([^\s]+))"
-    )
     candidates = []
-    for match in token.finditer(text):
-        value = next(v for v in match.groups() if v is not None).strip()
-        path = _resolve_ref_path(value, root)
-        if not path.exists() and match.group(4):
-            recovered = _resolve_existing_ref_prefix(value, root)
-            if recovered:
-                _, path = recovered
-        candidates.append(path)
+    remaining = list(text)
+    for reference in iter_reference_spans(text, root=root):
+        if not reference.closed:
+            raise ValueError(f"引用路径未闭合：{text[reference.start :]}")
+        if value := reference.value.strip():
+            candidates.append((reference.start, resolve_ref_path(value, root)))
+        remaining[reference.start : reference.end] = " " * (
+            reference.end - reference.start
+        )
     media = {
         ".png",
         ".jpg",
@@ -72,14 +40,14 @@ def parse_file_paths(text: str, *, root: Path | None = None) -> list[Path]:
         ".avi",
         ".webm",
     }
-    for match in re.finditer(r'"([^"\n]+)"|\'([^\'\n]+)\'|(\S+)', token.sub(" ", text)):
+    for match in re.finditer(r'"([^"\n]+)"|\'([^\'\n]+)\'|(\S+)', "".join(remaining)):
         value = next(v for v in match.groups() if v is not None)
         if Path(value).suffix.lower() in media:
-            path = _resolve_ref_path(value, root)
+            path = resolve_ref_path(value, root)
             if path.is_file():
-                candidates.append(path)
+                candidates.append((match.start(), path))
     unique = {}
-    for path in candidates:
+    for _, path in sorted(candidates, key=lambda item: item[0]):
         unique.setdefault(os.path.normcase(str(path)), path)
     return list(unique.values())
 

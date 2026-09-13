@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from redlotus.cli.reference_syntax import iter_reference_spans
+from redlotus.workspace.workspace import current_workspace
 from redlotus.config.app_config import (
     settings,
 )
@@ -103,22 +105,12 @@ def completion_for_input(text: str) -> InputCompletion | None:
                 )
             return None
 
-    at_index = text.rfind("@")
-    if at_index != -1:
-        if (
-            at_index
-            and text[at_index - 1].isascii()
-            and (text[at_index - 1].isalnum() or text[at_index - 1] in "._%+-")
-        ):
-            return None
-        fragment = text[at_index + 1 :]
-        if fragment[:1] in ('"', "'", "{"):
-            closing = "}" if fragment[0] == "{" else fragment[0]
-            if closing in fragment[1:]:
-                return None
-            return InputCompletion(kind="file_path", prefix=fragment, at_mode=True)
-        if any(char.isspace() for char in fragment):
-            return None
-        return InputCompletion(kind="file_path", prefix=fragment, at_mode=True)
+    references = list(iter_reference_spans(text, root=current_workspace()))
+    if references:
+        reference = references[-1]
+        if reference.end == len(text) and not (reference.opener and reference.closed):
+            return InputCompletion(
+                kind="file_path", prefix=text[reference.start + 1 :], at_mode=True
+            )
 
     return None
