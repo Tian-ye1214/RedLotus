@@ -69,16 +69,10 @@ def _runtime_path(template: str, *, runtime: Path, project_id: str) -> Path:
     return path if path.is_absolute() else runtime / path
 
 
-def _runtime_root(config: dict) -> Path:
+def _runtime_root() -> Path:
     from redlotus.infra.paths import runtime_dir
 
-    templates = (
-        str(config.get("environment_dir", "")),
-        str(config.get("cache_dir", "")),
-    )
-    if any("{runtime}" in value for value in templates):
-        return runtime_dir().resolve()
-    return Path.cwd().resolve()
+    return runtime_dir().resolve()
 
 
 def _configured_base_python(
@@ -128,47 +122,31 @@ def _build_execution_variables(
     cache: Path,
     project_id: str,
     overrides: dict[str, str] | None,
+    use_python: bool = True,
 ) -> dict[str, str]:
     inherited_names = tuple(config.get("inherit_env") or ())
     variables = {
         name: os.environ[name] for name in inherited_names if name in os.environ
     }
     bin_dir = root / ("Scripts" if _platform.system() == "Windows" else "bin")
-    variables["PATH"] = os.pathsep.join(
-        value for value in (str(bin_dir), variables.get("PATH", "")) if value
+    replacements = dict(
+        runtime=_runtime_root(),
+        environment=root,
+        cache=cache,
+        project_id=project_id,
     )
-    variables["VIRTUAL_ENV"] = str(root)
-
-    project_cache = cache / project_id
-    variables.update(
-        {
-            "PIP_CACHE_DIR": str(project_cache / "pip"),
-            "XDG_CACHE_HOME": str(project_cache / "xdg"),
-            "TEMP": str(project_cache / "tmp"),
-            "TMP": str(project_cache / "tmp"),
-            "TMPDIR": str(project_cache / "tmp"),
-            "HOME": str(project_cache / "home"),
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONUTF8": "1",
-            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-        }
-    )
-    if _platform.system() == "Windows":
-        home = project_cache / "home"
-        variables.update(
-            {
-                "USERPROFILE": str(home),
-                "APPDATA": str(home / "AppData" / "Roaming"),
-                "LOCALAPPDATA": str(home / "AppData" / "Local"),
-            }
-        )
-
+    for name, template in config.get("variables", {}).items():
+        value = str(template)
+        for token, replacement in replacements.items():
+            value = value.replace("{" + token + "}", str(replacement))
+        variables[name] = value
     for name, value in (overrides or {}).items():
         if name in inherited_names or name in _EXPLICIT_ENV_OVERRIDES:
             variables[name] = str(value)
-    if overrides and "PATH" in overrides:
+    if use_python:
+        variables["VIRTUAL_ENV"] = str(root)
         variables["PATH"] = os.pathsep.join(
-            value for value in (str(bin_dir), str(overrides["PATH"])) if value
+            value for value in (str(bin_dir), variables.get("PATH", "")) if value
         )
     return variables
 
@@ -178,6 +156,7 @@ def get_execution_environment(
     cwd: str | Path | None = None,
     workspace=None,
     overrides: dict[str, str] | None = None,
+    python_required: bool = True,
 ) -> ExecutionEnvironment:
     """Resolve configuration and paths without starting an interpreter."""
     config = _execution_config()
@@ -198,15 +177,17 @@ def get_execution_environment(
             (str(Path(sys.executable).resolve()),),
         )
 
-    runtime = _runtime_root(config)
+    runtime = _runtime_root()
     root = _runtime_path(
         config["environment_dir"], runtime=runtime, project_id=active.project_id
     ).resolve()
     cache = _runtime_path(
         config["cache_dir"], runtime=runtime, project_id=active.project_id
     ).resolve()
-    base_command = _configured_base_python(
-        config, runtime=runtime, project_id=active.project_id
+    base_command = (
+        _configured_base_python(config, runtime=runtime, project_id=active.project_id)
+        if python_required
+        else ()
     )
     python = (
         root
@@ -225,6 +206,7 @@ def get_execution_environment(
             cache=cache,
             project_id=active.project_id,
             overrides=overrides,
+            use_python=python_required,
         ),
         base_command,
     )
@@ -242,6 +224,7 @@ async def ensure_execution_environment(environment: ExecutionEnvironment) -> Non
     environment.root.parent.mkdir(parents=True, exist_ok=True)
     lock = environment.root.with_name(environment.root.name + ".create.lock")
     async with AsyncFileLock(lock, timeout=timeout, run_in_executor=False):
+        identity = await asyncio.to_thread(_python_identity, environment.base_command)
         state = "creating"
         if environment.python.is_file() and not marker.is_file():
             raise RuntimeError(
@@ -256,11 +239,23 @@ async def ensure_execution_environment(environment: ExecutionEnvironment) -> Non
                 raise RuntimeError(
                     "项目 Python 环境来源标记损坏，拒绝复用；请清理该项目环境后重试。"
                 ) from exc
-            if not _same_commands(recorded, environment.base_command):
+            recorded_identity = marker_data.get("identity")
+            if recorded_identity is None:
+                recorded_identity = await asyncio.to_thread(_python_identity, recorded)
+            if recorded_identity != identity:
                 raise RuntimeError(
                     "项目 Python 环境由其他基础解释器创建，请修改配置或清理该项目环境后重试。"
                 )
             if environment.python.is_file() and state == "ready":
+                actual = await asyncio.to_thread(
+                    _python_identity, (str(environment.python),)
+                )
+                if actual != identity:
+                    raise RuntimeError(
+                        "项目 Python 环境解释器与来源记录不一致，拒绝复用。"
+                    )
+                if "identity" not in marker_data:
+                    atomic_write_json(marker, {**marker_data, "identity": identity})
                 _prepare_runtime_dirs(environment)
                 return
         _prepare_runtime_dirs(environment)
@@ -268,6 +263,7 @@ async def ensure_execution_environment(environment: ExecutionEnvironment) -> Non
             "project_id": environment.project_id,
             "python": str(environment.python),
             "base_command": list(environment.base_command),
+            "identity": identity,
             "state": state,
         }
         atomic_write_json(marker, source)
@@ -331,25 +327,55 @@ def _provision_timeout() -> int:
     return get_agent_run_policy().max_command_timeout_seconds
 
 
-def _same_commands(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
-    return len(left) == len(right) and all(
-        os.path.normcase(str(Path(a).resolve()))
-        == os.path.normcase(str(Path(b).resolve()))
-        if index == 0
-        else a == b
-        for index, (a, b) in enumerate(zip(left, right))
+def _python_identity(command: tuple[str, ...]) -> dict:
+    """Ask the interpreter itself, rather than comparing venv launcher paths."""
+    probe = (
+        "import json,os,sys,struct; print(json.dumps(dict("
+        "base=os.path.normcase(os.path.realpath(sys._base_executable)),"
+        "implementation=sys.implementation.name,version=list(sys.version_info[:2]),"
+        "bits=struct.calcsize('P')*8)))"
     )
+    config = _execution_config()
+    env = {
+        name: os.environ[name]
+        for name in config.get("inherit_env", [])
+        if name in os.environ
+    }
+    kwargs = (
+        {"creationflags": subprocess.CREATE_NO_WINDOW}
+        if _platform.system() == "Windows"
+        else {}
+    )
+    try:
+        result = subprocess.run(
+            [*command, "-c", probe],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            timeout=_provision_timeout(),
+            **kwargs,
+        )
+        if result.returncode:
+            raise ValueError(result.stderr.strip())
+        return json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"无法验证基础解释器 {command}: {exc}") from exc
 
 
 def _prepare_runtime_dirs(environment: ExecutionEnvironment) -> None:
     paths = {
         environment.cache / environment.project_id,
-        Path(environment.variables["PIP_CACHE_DIR"]),
-        Path(environment.variables["XDG_CACHE_HOME"]),
-        Path(environment.variables["TEMP"]),
-        Path(environment.variables["HOME"]),
     }
-    for name in ("APPDATA", "LOCALAPPDATA", "USERPROFILE"):
+    for name in (
+        "PIP_CACHE_DIR",
+        "XDG_CACHE_HOME",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "npm_config_cache",
+        "UV_CACHE_DIR",
+    ):
         if name in environment.variables:
             paths.add(Path(environment.variables[name]))
     for path in paths:
@@ -360,17 +386,51 @@ def describe_execution_environment(
     *, cwd: str | Path | None = None, workspace=None
 ) -> str:
     """Return the selected interpreter and paths without guessing host state."""
-    environment = get_execution_environment(cwd=cwd, workspace=workspace)
+    try:
+        environment = get_execution_environment(cwd=cwd, workspace=workspace)
+    except (OSError, ValueError) as exc:
+        return f"Environment state: error\nReason: {exc}"
+    state = _environment_state(environment)
     return "\n".join(
         (
             f"Project: {environment.project_id}",
             f"Workspace: {environment.workspace_root}",
             f"Python: {environment.python}",
             f"Environment: {environment.root}",
-            f"Environment ready: {'yes' if environment.python.is_file() else 'no'}",
+            f"Environment state: {state}",
+            f"Environment ready: {'yes' if state == 'ready' else 'no'}",
             f"Cache: {environment.cache}",
         )
     )
+
+
+def _environment_state(environment: ExecutionEnvironment) -> str:
+    marker = environment.root / ".redlotus-environment.json"
+    if not marker.is_file():
+        return (
+            "error: missing identity record"
+            if environment.python.is_file()
+            else "missing"
+        )
+    try:
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        state = record.get("state", "ready")
+        if state != "ready":
+            return state
+        if not environment.python.is_file():
+            return "error: interpreter missing"
+        expected = _python_identity(environment.base_command)
+        recorded = record.get("identity") or _python_identity(
+            tuple(record["base_command"])
+        )
+        if (
+            recorded != expected
+            or _python_identity((str(environment.python),)) != expected
+        ):
+            return "incompatible"
+        return "ready"
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        return f"error: {exc}"
 
 
 def _shell_tokens(command: str) -> list[str]:
@@ -391,9 +451,15 @@ def _shell_tokens(command: str) -> list[str]:
     return tokens
 
 
-def _command_invocations(command):
+def _command_invocations(command, *, posix_shell=None):
     """Expose executable positions, including ordinary nested shell commands."""
     tokens = _shell_tokens(command) if isinstance(command, str) else list(command)
+    if posix_shell is None:
+        posix_shell = _platform.system() != "Windows"
+    if isinstance(command, str) and posix_shell and "&" in tokens:
+        raise PermissionError(
+            "Background shell launches are not allowed; wait for the command to finish."
+        )
     segment = []
     for token in [*tokens, ";"]:
         if token not in _SEPARATORS:
@@ -416,41 +482,114 @@ def _command_invocations(command):
             for index, value in enumerate(segment):
                 if value.lower() in {"/c", "/k", "-c", "-command"}:
                     yield from _command_invocations(
-                        _unquote_shell_word(" ".join(segment[index + 1 :]))
+                        _unquote_shell_word(" ".join(segment[index + 1 :])),
+                        posix_shell=_program_name(segment[0]) in {"sh", "bash", "zsh"},
                     )
                     break
         segment = []
 
 
 def validate_agent_command(command, *, cwd: str) -> None:
-    """Apply the configured child-tool permissions before starting a process."""
+    """One policy entry for commands, inline programs and executed scripts."""
     from redlotus.runtime.context import current_execution_role
+    from redlotus.infra.command_policy import (
+        PythonCommandCheck,
+        code_without_literals,
+        read_script,
+    )
 
     role = current_execution_role()
     policy = _execution_config().get("permissions", {})
-    if role not in policy.get("restricted_roles", []):
+    if not policy:
         return
-    invocations = list(_command_invocations(command))
-    denied = set(policy["blocked_commands"])
-    for values in invocations:
-        if _program_name(values[0]).removesuffix(".exe") in denied:
-            raise PermissionError(
-                f"Permission denied for {role}: process-control commands are reserved for the runtime."
-            )
-    texts = [command if isinstance(command, str) else subprocess.list2cmdline(command)]
-    for value in dict.fromkeys(value for values in invocations for value in values):
-        path = Path(_unquote_shell_word(value))
-        if path.suffix.lower() in policy["script_extensions"]:
-            path = Path(cwd) / path
-            if path.is_file():
-                texts.append(path.read_text(encoding="utf-8-sig"))
-    for pattern in policy["blocked_code_patterns"]:
-        if any(
-            re.search(pattern, text, re.IGNORECASE | re.MULTILINE) for text in texts
-        ):
-            raise PermissionError(
-                f"Permission denied for {role}: the command or script contains a restricted process-control operation."
-            )
+    restricted = role in policy.get("restricted_roles", [])
+    visited = set()
+
+    def source(text, *, python=False, shell=False):
+        if python:
+            try:
+                PythonCommandCheck(policy, inspect, restricted=restricted).check(text)
+            except SyntaxError as exc:
+                raise ValueError(f"Cannot inspect Python source: {exc}") from exc
+        else:
+            if shell:
+                inspect(text)
+            if restricted and any(
+                re.search(pattern, code_without_literals(text), re.I | re.M)
+                for pattern in policy["blocked_script_patterns"]
+            ):
+                raise PermissionError(
+                    f"Permission denied for {role}: restricted process API."
+                )
+
+    def inspect(value):
+        for values in _command_invocations(value):
+            name = _program_name(values[0]).removesuffix(".exe")
+            words = [_unquote_shell_word(item) for item in values]
+            lower = [item.lower() for item in words]
+            if name in policy["background_commands"] and not (
+                name == "start-process" and "-wait" in lower
+            ):
+                raise PermissionError(
+                    "Background process launches are not allowed; run the command synchronously."
+                )
+            if restricted and (
+                name in policy["blocked_commands"]
+                or (
+                    name in {"powershell", "pwsh"}
+                    and any(item in policy["blocked_shell_options"] for item in lower)
+                )
+                or (
+                    name == "wmic"
+                    and "process" in lower
+                    and "call" in lower
+                    and "terminate" in lower
+                )
+            ):
+                raise PermissionError(
+                    f"Permission denied for {role}: process-control commands are reserved for the runtime."
+                )
+            python = name in {"python", "python3", "py"}
+            inline = "-c" if python else "-e" if name in {"node", "nodejs"} else None
+            if inline and inline in lower:
+                index = lower.index(inline)
+                if index + 1 < len(words):
+                    source(words[index + 1], python=python)
+                continue
+            programs = {
+                "python",
+                "python3",
+                "py",
+                "powershell",
+                "pwsh",
+                "sh",
+                "bash",
+                "zsh",
+                "node",
+                "nodejs",
+                "cmd",
+            }
+            candidates = words[1:] if name in programs else words[:1]
+            for item in candidates:
+                path = Path(cwd) / item
+                if (
+                    path.suffix.lower() not in policy["script_extensions"]
+                    or not path.is_file()
+                ):
+                    continue
+                path = path.resolve()
+                if path in visited:
+                    continue
+                visited.add(path)
+                extension = path.suffix.lower()
+                source(
+                    read_script(path),
+                    python=extension in {".py", ".pyw"},
+                    shell=extension in {".ps1", ".sh", ".bat", ".cmd"},
+                )
+                break
+
+    inspect(command)
 
 
 def _program_name(value: str) -> str:
@@ -574,43 +713,17 @@ def _unquote_shell_word(word: str) -> str:
     )
 
 
-def has_background_shell_command(command: str) -> bool:
-    """Recognize shell commands without inspecting quoted program source as shell."""
-    tokens = _shell_tokens(command)
-    if tokens and tokens[-1] == "&":
-        return True
-    at_command = True
-    executable = ""
-    for index, token in enumerate(tokens):
-        if token in (";", "&", "&&", "|", "||", "\n"):
-            at_command = True
-            continue
-        value = _unquote_shell_word(token)
-        if at_command:
-            executable = value.replace("\\", "/").rsplit("/", 1)[-1].lower()
-            if executable in ("start", "nohup", "setsid", "start-process"):
-                return True
-            at_command = False
-        if executable in (
-            "cmd",
-            "cmd.exe",
-            "powershell",
-            "powershell.exe",
-            "pwsh",
-            "pwsh.exe",
-            "sh",
-            "bash",
-            "zsh",
-        ) and value.lower() in ("/c", "/k", "-c", "-command"):
-            return has_background_shell_command(
-                _unquote_shell_word(" ".join(tokens[index + 1 :]))
-            )
-    return False
-
-
 async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
     """杀掉子进程及其后代（无 psutil 依赖），并收尸。"""
     if proc.returncode is not None:
+        # An exited parent can leave inherited pipes open. Do not claim tree
+        # cleanup before they close, or target a PID whose owner may have changed.
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=5)
+        except TimeoutError as exc:
+            raise RuntimeError(
+                "Parent exited but inherited pipes remain open; descendant ownership is unknown and cleanup is unverified."
+            ) from exc
         return
     try:
         if _platform.system() == "Windows":
@@ -659,14 +772,23 @@ async def run_subprocess(
     await asyncio.to_thread(validate_agent_command, args, cwd=cwd)
     configured = await asyncio.to_thread(_execution_config)
     if configured:
+        python_required = any(
+            _program_name(values[0]) in _PYTHON_NAMES | _PY_LAUNCHER_NAMES | _PIP_NAMES
+            or (_program_name(values[0]) in _UV_NAMES and "pip" in values[1:3])
+            for values in _command_invocations(args)
+        )
         environment = await asyncio.to_thread(
             get_execution_environment,
             cwd=cwd,
             workspace=workspace,
             overrides=env,
+            python_required=python_required,
         )
         validate_pip_command(args, selected_python=environment.python)
-        await ensure_execution_environment(environment)
+        if python_required:
+            await ensure_execution_environment(environment)
+        else:
+            await asyncio.to_thread(_prepare_runtime_dirs, environment)
         env = environment.variables
         if not shell:
             args = _rewrite_python_command(args, environment)

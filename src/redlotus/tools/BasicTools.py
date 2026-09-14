@@ -20,7 +20,6 @@ from redlotus.workspace.workspace import current_workspace
 from redlotus.infra.paths import runtime_dir, user_skills_dir
 from redlotus.infra.subprocess_runner import (
     describe_execution_environment,
-    has_background_shell_command,
     run_subprocess,
 )
 from redlotus.tools.browser_session import PlaywrightBrowserSession
@@ -219,13 +218,16 @@ class BasicToolkit:
 
         return user_response
 
-    async def extract_text(self, name: str) -> ToolReturn:
-        """Read a document with page/sheet/slide sources, tables and original images."""
+    async def extract_text(self, name: str) -> ToolReturn | str:
+        """Read a project document. For registered reference snapshots use read_reference(id)."""
         from redlotus.ModelGateway.input_policy import ModelInputPolicy
 
-        reference = await self._references.import_file(
-            self._readable_path(name), policy=ModelInputPolicy.for_role("coordinator")
-        )
+        try:
+            reference = await self._references.import_file(
+                self._readable_path(name), policy=ModelInputPolicy.for_role()
+            )
+        except (OSError, ValueError) as exc:
+            return f"Error reading '{name}': {exc}. For an already registered reference, use read_reference(reference_id)."
         return ToolReturn(
             return_value={"reference_id": reference.id, "source": reference.source},
             content=reference.to_prompt(),
@@ -410,8 +412,6 @@ class BasicToolkit:
                 use_shell = any(
                     c in command for c in ["|", ">", "<", "&&", "||", ";", "*", "?"]
                 )
-                if use_shell and has_background_shell_command(command):
-                    return "Error: background shell processes are not allowed"
                 cwd = str(self._base_dir.resolve())
                 overrides = None
                 if re.search(r"\bclawhub\b", command, re.I):

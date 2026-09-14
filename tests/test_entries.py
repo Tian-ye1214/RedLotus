@@ -181,7 +181,12 @@ async def test_tui_urgent_and_stop_do_not_answer_pending_question(
         await until(lambda: app._ask_future is not None)
         answer = app._ask_future
         await app.on_input_submitted(Input.Submitted(inp, "/urgent preserve evidence"))
-        await until(lambda: "preserve evidence" in system._session.user_inputs)
+        await until(
+            lambda: (
+                bool(system._session._urgent) and system._session._urgent[0][1].done()
+            )
+        )
+        assert system._session._urgent[0][1].result().text == "preserve evidence"
         assert not answer.done()
         await app.on_input_submitted(Input.Submitted(inp, "/stop"))
         await until(lambda: not system.has_current_turn)
@@ -189,7 +194,9 @@ async def test_tui_urgent_and_stop_do_not_answer_pending_question(
         assert "/stop" not in system._session.user_inputs
 
 
-async def test_status_refresh_after_tui_exit_does_not_query_removed_widgets(tmp_path, monkeypatch):
+async def test_status_refresh_after_tui_exit_does_not_query_removed_widgets(
+    tmp_path, monkeypatch
+):
     system = configured_system(tmp_path, monkeypatch)
     configure_cli_hooks(system, monkeypatch, preparer="system", enter_workspace=True)
     app = RedLotusTui(system)
@@ -338,6 +345,7 @@ async def test_clear_cancels_input_preparation_before_it_can_start_old_task(
             state,
             wait_for_turn=False,
             references=asyncio.sleep(0, result=[]),
+            admission=system._session.admit(system.workspace),
         )
     )
     await asyncio.wait_for(started.wait(), 5)

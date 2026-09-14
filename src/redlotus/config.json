@@ -191,7 +191,22 @@
       "HTTPS_PROXY",
       "NO_PROXY",
       "PLAYWRIGHT_BROWSERS_PATH",
-      "CLAWHUB_WORKDIR"
+      "CLAWHUB_WORKDIR",
+      "HOME",
+      "USERPROFILE",
+      "APPDATA",
+      "LOCALAPPDATA",
+      "HOMEDRIVE",
+      "HOMEPATH",
+      "XDG_CONFIG_HOME",
+      "SSH_AUTH_SOCK",
+      "SSH_AGENT_PID",
+      "GIT_CONFIG_GLOBAL",
+      "GIT_CONFIG_SYSTEM",
+      "GIT_SSH",
+      "GIT_SSH_COMMAND",
+      "NPM_CONFIG_USERCONFIG",
+      "npm_config_userconfig"
     ],
     "permissions": {
       "restricted_roles": [
@@ -223,15 +238,55 @@
         ".mjs",
         ".cjs"
       ],
-      "blocked_code_patterns": [
-        "\\b(?:os\\.(?:kill|killpg)|signal\\.pthread_kill)\\s*\\(",
-        "\\bfrom\\s+os\\s+import\\b[^;\\n]*\\b(?:kill|killpg)\\b",
-        "\\.\\s*(?:kill|terminate)\\s*\\(",
-        "\\b(?:TerminateProcess|NtTerminateProcess|TerminateJobObject)\\s*\\(",
-        "\\bwmic\\b[^\\n]*\\b(?:terminate|delete)\\b",
-        "(?:^|\\s)-(?:EncodedCommand|enc|ec)\\b",
-        "(?:^|[;&|\\n])\\s*(?:taskkill|tskill|pkill|killall|kill|Stop-Process|spps|shutdown|Stop-Service|Restart-Service)(?:\\.exe)?(?:\\s|$)"
+      "blocked_python_calls": [
+        "os.kill",
+        "os.killpg",
+        "signal.pthread_kill",
+        "psutil.Process.kill",
+        "psutil.Process.terminate",
+        "subprocess.Popen.kill",
+        "subprocess.Popen.terminate",
+        "multiprocessing.Process.kill",
+        "multiprocessing.Process.terminate"
+      ],
+      "command_wrappers": [
+        "subprocess.run",
+        "subprocess.call",
+        "subprocess.check_call",
+        "subprocess.check_output",
+        "subprocess.Popen",
+        "os.system",
+        "os.popen",
+        "asyncio.create_subprocess_exec",
+        "asyncio.create_subprocess_shell"
+      ],
+      "blocked_script_patterns": [
+        "\\bprocess\\s*\\.\\s*kill\\s*\\(",
+        "\\b(?:TerminateProcess|NtTerminateProcess|TerminateJobObject)\\s*\\("
+      ],
+      "blocked_shell_options": [
+        "-encodedcommand",
+        "-enc",
+        "-ec"
+      ],
+      "background_commands": [
+        "start",
+        "nohup",
+        "setsid",
+        "start-process"
       ]
+    },
+    "variables": {
+      "PIP_CACHE_DIR": "{cache}/{project_id}/pip",
+      "npm_config_cache": "{cache}/{project_id}/npm",
+      "UV_CACHE_DIR": "{cache}/{project_id}/uv",
+      "XDG_CACHE_HOME": "{cache}/{project_id}/xdg",
+      "TEMP": "{cache}/{project_id}/tmp",
+      "TMP": "{cache}/{project_id}/tmp",
+      "TMPDIR": "{cache}/{project_id}/tmp",
+      "PYTHONNOUSERSITE": "1",
+      "PYTHONUTF8": "1",
+      "PIP_DISABLE_PIP_VERSION_CHECK": "1"
     }
   }
 }

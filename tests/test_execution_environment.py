@@ -43,12 +43,16 @@ async def test_first_environment_creation_can_be_cancelled_and_retried(tmp_path)
 
 
 def _config(runtime: Path) -> dict:
-    return {
-        "python_executable": sys.executable,
-        "environment_dir": str(runtime / "environments" / "{project_id}"),
-        "cache_dir": str(runtime / "cache"),
-        "inherit_env": ["PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT"],
-    }
+    from copy import deepcopy
+    from redlotus.config.app_config import settings
+
+    config = deepcopy(settings()["execution"])
+    config.update(
+        python_executable=sys.executable,
+        environment_dir=str(runtime / "environments" / "{project_id}"),
+        cache_dir=str(runtime / "cache"),
+    )
+    return config
 
 
 async def test_python_command_is_provisioned_in_the_configured_project_environment(
@@ -158,7 +162,7 @@ async def test_existing_environment_rejects_a_changed_base_interpreter(
         json.dumps({"base_command": ["C:\\other\\python.exe"]}), encoding="utf-8"
     )
 
-    with pytest.raises(RuntimeError, match="其他基础解释器"):
+    with pytest.raises(RuntimeError, match="基础解释器"):
         await subprocess_runner.ensure_execution_environment(environment)
 
 

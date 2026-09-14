@@ -2,7 +2,7 @@ import sys
 
 import pytest
 
-from redlotus.infra.subprocess_runner import has_background_shell_command
+from redlotus.infra.subprocess_runner import validate_agent_command
 from redlotus.runtime.context import WorkspaceContext
 from redlotus.tools.BasicTools import BasicToolkit
 
@@ -42,10 +42,12 @@ async def test_cmd_outer_quotes_preserve_quoted_program_and_arguments(tmp_path):
         'powershell -Command "Start-Process app.exe"',
         "nohup task &",
         "echo ok; setsid task",
+        'sh -c "sleep 60 &"',
     ],
 )
-def test_actual_background_commands_remain_blocked(command):
-    assert has_background_shell_command(command)
+def test_actual_background_commands_remain_blocked(tmp_path, command):
+    with pytest.raises(PermissionError, match="Background"):
+        validate_agent_command(command, cwd=str(tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -57,5 +59,5 @@ def test_actual_background_commands_remain_blocked(command):
         "powershell -Command \"Write-Output 'start'\"",
     ],
 )
-def test_command_arguments_are_not_shell_commands(command):
-    assert not has_background_shell_command(command)
+def test_command_arguments_are_not_shell_commands(tmp_path, command):
+    validate_agent_command(command, cwd=str(tmp_path))

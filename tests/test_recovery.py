@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -98,19 +100,17 @@ async def test_legacy_migration_is_idempotent_and_excludes_unknown_projects(tmp_
 
 def process_alive(pid):
     if sys.platform == "win32":
-        import ctypes
-
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.OpenProcess.restype = ctypes.c_void_p
-        handle = kernel.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return False
-        code = ctypes.c_ulong()
-        try:
-            kernel.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))
-            return code.value == 259
-        finally:
-            kernel.CloseHandle(ctypes.c_void_p(handle))
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return (
+            re.search(
+                rb'^"[^"]*","' + str(pid).encode("ascii") + rb'",', result.stdout, re.M
+            )
+            is not None
+        )
     try:
         os.kill(pid, 0)
         return True
@@ -128,7 +128,7 @@ async def test_cancel_terminates_external_process_tree(tmp_path):
         "import subprocess,sys,time,os\nfrom pathlib import Path\n"
         "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
         "creationflags=subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0)\n"
-        "Path(sys.argv[1]).write_text(str(os.getpid())+','+str(child.pid))\ntime.sleep(60)\n",
+        "Path(sys.argv[1]).write_text(str(os.getpid())+','+str(child.pid))\nchild.wait()\n",
         encoding="utf-8",
     )
     task = asyncio.create_task(

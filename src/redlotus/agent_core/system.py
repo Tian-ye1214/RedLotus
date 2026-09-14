@@ -132,7 +132,7 @@ class AgentSystem:
 
     async def end_session_agents(self, session_key: str) -> None:
         await self._orchestrator.factory.cancel_session(session_key)
-        self._session.reset()
+        self._session.reset(discard=True)
         await self._registry.cancel_session(session_key)
         await self._registry.remove_session(session_key)
         if self._session_key == session_key:
@@ -191,6 +191,7 @@ class AgentSystem:
         await asyncio.shield(self._shutdown_task)
 
     async def _release_resources(self) -> None:
+        self._session.reset(discard=True)
         self._session.queue.discard()
         self._orchestrator.factory.stop()
         self._memory_factory.stop()
@@ -236,11 +237,11 @@ class AgentSystem:
             return "当前没有正在执行的用户任务。"
         return "已停止当前任务；已产生的记录保留，结果标记为取消。"
 
-    def _start_user_turn(self, message, history, *, goal_mode=False):
+    def _start_user_turn(self, message, history, *, goal_mode=False, turn_id=None):
         if self.has_current_turn or self._shutdown_done:
             return None
         self.last_turn_error = None
-        turn_id = uuid.uuid4().hex
+        turn_id = turn_id or uuid.uuid4().hex
         task = asyncio.create_task(
             self._run_user_turn(
                 turn_id,
@@ -357,15 +358,26 @@ class AgentSystem:
         from redlotus.infra.paths import session_data_dir
         from redlotus.infra.persist_utils import file_lock, iso_utc_now
 
-        receipt = dict(command=command, target=target, status=status, accepted=accepted,
-                       session_id=self._session_key, observed_at=iso_utc_now())
+        receipt = dict(
+            command=command,
+            target=target,
+            status=status,
+            accepted=accepted,
+            session_id=self._session_key,
+            observed_at=iso_utc_now(),
+        )
         encoded = json.dumps(receipt, ensure_ascii=False)
         path = session_data_dir(self.workspace) / "control_events.jsonl"
         with file_lock(path):
             with path.open("a", encoding="utf-8") as stream:
                 stream.write(encoded + "\n")
-        self._session.add_notice([TextContent("【运行控制回执】" + encoded,
-                                             metadata={"origin": "runtime_control"})])
+        self._session.add_notice(
+            [
+                TextContent(
+                    "【运行控制回执】" + encoded, metadata={"origin": "runtime_control"}
+                )
+            ]
+        )
         return receipt
 
     def bind_loaded_snapshot(self, agent, path, meta) -> None:
@@ -377,31 +389,75 @@ class AgentSystem:
         return self._task_manager.structured_status()
 
     def add_urgent(self, text: str) -> bool:
-        return self._session.add_urgent(text)
-
-    async def add_urgent_message(self, message: UserMessage) -> bool:
         if not self._session.accepting_urgent:
             return False
-        await self._toolkit._references.prepare_message(message)
-        accepted = self._session.add_urgent(
-            message.original_text or message.text, prompt=message.to_prompt()
+        self._session.add_notice(text)
+        return True
+
+    async def add_urgent_message(
+        self, message: UserMessage, *, admission=None, references=None
+    ) -> bool:
+        admission = admission or self._session.admit(self.workspace, urgent=True)
+        if not admission.urgent or not self._session.accepts(admission):
+            return False
+        store = self._toolkit._references
+
+        async def prepare():
+            try:
+                if references is not None:
+                    message.references = await references
+                await store.prepare_message(message)
+                return message
+            except (OSError, ValueError) as exc:
+                if self._session.accepts(admission):
+                    self._cli_controller.last_rejected_input = "/urgent " + (
+                        message.original_text or message.text
+                    )
+                    print_warning(str(exc))
+                return None
+
+        self._session.queue_urgent(admission, prepare())
+        logger.debug(
+            "input admitted id=%s sequence=%s turn=%s urgent=True",
+            admission.id,
+            admission.sequence,
+            admission.turn_id,
         )
-        if accepted and self._memory.current is not None:
-            event = self._memory.current
-            event.reference_ids = list(
-                dict.fromkeys(
-                    [*event.reference_ids, *(ref.id for ref in message.references)]
+        return True
+
+    async def _take_inner_inputs(self):
+        prompts = []
+        for admission, message in await self._session.take_urgent():
+            self._session.user_inputs.append(message.original_text or message.text)
+            prompts.append(message.to_prompt())
+            logger.debug(
+                "input consumed id=%s sequence=%s turn=%s",
+                admission.id,
+                admission.sequence,
+                admission.turn_id,
+            )
+            if self._memory.current is not None:
+                event = self._memory.current
+                event.reference_ids = list(
+                    dict.fromkeys(
+                        [*event.reference_ids, *(ref.id for ref in message.references)]
+                    )
                 )
-            )
-            self._memory.observations.save(event)
-            self._current_attachments.extend(
-                part for ref in message.references for part in ref.to_prompt()
-            )
-        return accepted
+                self._memory.observations.save(event)
+                self._current_attachments.extend(
+                    part for ref in message.references for part in ref.to_prompt()
+                )
+        return [
+            *prompts,
+            *self._session.take_notices(),
+            *self._memory.take_context_notices(),
+        ]
 
     async def switch_workspace(self, path) -> None:
         """Dispose the old session before publishing the new immutable workspace."""
         previous_memory = self._memory
+        self._session.reset(discard=True)
+        self._session.queue.discard()
         await self.cancel_current_turn()
         if self._session_key:
             await self.end_session_agents(self._session_key)
@@ -445,7 +501,10 @@ class AgentSystem:
     @asynccontextmanager
     async def _outer_turn(self, message: UserMessage, turn_id: str):
         async with self._session.turn(
-            message.original_text if message.original_text is not None else message.text
+            message.original_text
+            if message.original_text is not None
+            else message.text,
+            turn_id=turn_id,
         ):
             with workspace_context(self.workspace):
                 await self._toolkit._references.prepare_message(message)
@@ -676,11 +735,7 @@ class AgentSystem:
                         usage_limits=get_agent_usage_limits(),
                         event_stream_handler=stream_handler,
                         on_node=_save_coordinator_node,
-                        take_urgent=lambda: [
-                            *self._session.take_urgent(),
-                            *self._session.take_notices(),
-                            *self._memory.take_context_notices(),
-                        ],
+                        take_urgent=self._take_inner_inputs,
                         on_complete=self._session.close_inbox,
                     ),
                     agent_id=coord_aid,
@@ -720,9 +775,14 @@ class AgentSystem:
         *,
         wait_for_turn: bool,
         goal_mode: bool = False,
+        input_id: str | None = None,
     ) -> str:
         return await self._cli_controller.process_line(
-            raw_input, state, wait_for_turn=wait_for_turn, goal_mode=goal_mode
+            raw_input,
+            state,
+            wait_for_turn=wait_for_turn,
+            goal_mode=goal_mode,
+            input_id=input_id,
         )
 
     async def run_interactive(self, *, stop_event: asyncio.Event | None = None) -> None:

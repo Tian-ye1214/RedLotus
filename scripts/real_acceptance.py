@@ -15,6 +15,7 @@ import shutil
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from acceptance_assets import make_assets
@@ -274,35 +275,72 @@ class ApplicationDriver:
     async def say(self, text, *, goal=False):
         self.records.mkdir(parents=True, exist_ok=True)
         before = len(self.state.history.messages)
+        input_id = uuid.uuid4().hex
+        memory = self.system._memory
+        from redlotus.infra.paths import session_data_dir
+
+        journals = session_data_dir(self.system.workspace)
         await self.system.process_cli_line(
-            text, self.state, wait_for_turn=False, goal_mode=goal
+            text, self.state, wait_for_turn=False, goal_mode=goal, input_id=input_id
         )
         await self.idle()
-        if getattr(self.system, "last_turn_error", None) is not None:
-            raise RuntimeError(str(self.system.last_turn_error))
-        messages = self.state.history.messages
-        last = next(
-            (m for m in reversed(messages) if getattr(m, "kind", "") == "response"),
-            None,
+        result = await asyncio.to_thread(
+            self._read_turn_result, input_id, memory, journals
         )
-        output = (
-            "\n".join(
-                p.content for p in last.parts if getattr(p, "part_kind", "") == "text"
-            )
-            if last
-            else ""
-        )
+        output = result["output"]
         self.outputs.append(
             dict(
                 input=text if len(text) < 1000 else f"[long input: {len(text)} chars]",
-                output=output,
+                input_id=input_id,
+                **result,
                 messages_before=before,
-                messages_after=len(messages),
+                messages_after=len(self.state.history.messages),
             )
         )
         write_json(self.records / "dialogue.json", self.outputs)
         print("TURN", len(self.outputs), output[:180].replace("\n", " "), flush=True)
+        if result["status"] == "failed":
+            raise RuntimeError(result["error"])
         return output
+
+    @staticmethod
+    def _read_turn_result(input_id, memory, journals):
+        event = next(
+            (
+                row
+                for path in memory.observations.turns.glob("*.json")
+                if (row := read_json(path)).get("turn_id") == input_id
+            ),
+            {},
+        )
+        responses = []
+        for path in journals.glob("coordinator_*.jsonl"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                row = json.loads(line)
+                if (
+                    row["meta"].get("turn_id") == input_id
+                    and row["meta"].get("agent") == "coordinator"
+                    and row["message"]["kind"] == "response"
+                ):
+                    responses.append(row)
+        responses.sort(key=lambda row: row["saved_at"])
+        status = event.get("status", "cancelled")
+        output = (
+            "\n".join(
+                part["content"]
+                for part in responses[-1]["message"]["parts"]
+                if part["part_kind"] == "text"
+            )
+            if responses and status == "success"
+            else ""
+        )
+        return dict(
+            status=status,
+            error=event.get("error", ""),
+            output=output,
+            turn_id=event.get("turn_id"),
+            event_id=event.get("id"),
+        )
 
     async def close(self):
         await self.system.shutdown()

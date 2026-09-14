@@ -92,6 +92,33 @@ def test_settings_returns_independent_nested_snapshots(tmp_path, monkeypatch):
     assert settings()["models"]["worker"]["max_tokens"] == 12345
 
 
+def test_old_execution_policy_migrates_once_without_changing_models(
+    tmp_path, monkeypatch
+):
+    from copy import deepcopy
+
+    original = app_config.settings()
+    original["execution"]["inherit_env"] = ["PATH", "SystemRoot"]
+    original["execution"]["permissions"]["blocked_code_patterns"] = [r"\.kill\("]
+    original["execution"].pop("variables")
+    saved = deepcopy(original)
+    selected = tmp_path / "old-config.json"
+    selected.write_text(json.dumps(original), encoding="utf-8")
+    monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(selected))
+    app_config.initialize_config()
+    migrated = json.loads(selected.read_text(encoding="utf-8"))
+    assert "HOME" in migrated["execution"]["inherit_env"]
+    assert "blocked_code_patterns" not in migrated["execution"]["permissions"]
+    assert migrated["models"] == saved["models"]
+    backups = list((tmp_path / "config-backups").glob("*.json"))
+    assert (
+        len(backups) == 1
+        and json.loads(backups[0].read_text(encoding="utf-8")) == saved
+    )
+    app_config.initialize_config()
+    assert len(list((tmp_path / "config-backups").glob("*.json"))) == 1
+
+
 def test_partial_configuration_adds_roles_without_overwriting_preset_or_shared_context(
     tmp_path, monkeypatch
 ):

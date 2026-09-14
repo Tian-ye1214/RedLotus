@@ -67,6 +67,7 @@ class MemoryJob(BaseModel):
     records: list[str] = Field(default_factory=list)
     done: bool = False
     error: str = ""
+    failures: list[dict] = Field(default_factory=list)
     blocked_recipe: str = ""
 
 
@@ -216,9 +217,12 @@ class MemoryService:
         if not job.model_snapshot:
             return current
         if (job.model_snapshot["base_url"], job.model_snapshot["protocol"]) != (
-            current.base_url, current.protocol
+            current.base_url,
+            current.protocol,
         ):
-            raise ValueError("待恢复感知的网关与当前配置不同；请恢复原网关配置后重试，不能混用其他网关的凭据。")
+            raise ValueError(
+                "待恢复感知的网关与当前配置不同；请恢复原网关配置后重试，不能混用其他网关的凭据。"
+            )
         return ModelTarget(**job.model_snapshot, api_key=current.api_key)
 
     async def _produce(self, job):
@@ -477,6 +481,9 @@ class MemoryService:
             latest = self._job(job)
             for name in MemoryJob.model_fields:
                 setattr(job, name, getattr(latest, name))
+            if job.error and not job.failures:
+                job.failures.append(dict(recorded_at=iso_utc_now(), error=job.error))
+                self._save_job(job)
             if retry and job.blocked_recipe:
                 job.blocked_recipe = ""
                 self._save_job(job)
@@ -506,6 +513,7 @@ class MemoryService:
             if isinstance(exc, ValueError):
                 job.result = None
             job.error = self.last_error = str(exc)
+            job.failures.append(dict(recorded_at=iso_utc_now(), error=job.error))
             if isinstance(exc, UnexpectedModelBehavior) and str(exc).startswith(
                 "Model token limit ("
             ):
@@ -616,10 +624,11 @@ class MemoryService:
         if not self.owner_memory_allowed:
             return
         through = len(self.observations.order())
-        self.seal_windows(flush=flush, through=through)
+        if not recover:
+            self.seal_windows(flush=flush, through=through)
         with self._schedule_lock:
             self._pending_end = max(self._pending_end, through)
-            self._pending_recover |= recover
+            self._pending_recover = False if flush else self._pending_recover or recover
             if self._background_running:
                 return
             if (
@@ -650,7 +659,9 @@ class MemoryService:
                     through, recover = self._pending_end, self._pending_recover
                     self._pending_recover = False
                     producer._targets = deepcopy(self._targets)
-                await producer.process_pending(through=through, recover=recover)
+                await producer.process_pending(
+                    through=None if recover else through, recover=recover
+                )
                 self.last_error = producer.last_error
                 with self._schedule_lock:
                     if through == self._pending_end and not self._pending_recover:
@@ -706,8 +717,6 @@ class MemoryService:
     async def process_pending(self, *, flush=False, recover=False, through=None):
         if not self.owner_memory_allowed:
             return
-        through = len(self.observations.order()) if through is None else through
-        self.seal_windows(flush=flush, through=through)
         async with self._processing:
             self.observations.root.mkdir(parents=True, exist_ok=True)
             async with AsyncFileLock(
@@ -734,6 +743,8 @@ class MemoryService:
                     await asyncio.to_thread(migrate_pending_jobs, self)
                     self._recovered = True
                     recover = True  # One recovery attempt per new runtime, including a restored service balance.
+                through = len(self.observations.order()) if through is None else through
+                self.seal_windows(flush=flush, through=through)
                 if recover:
                     save_locked_json(self.state_path, {})
                 if self._paused():

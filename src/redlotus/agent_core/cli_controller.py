@@ -90,6 +90,7 @@ class AgentCliController:
         return None
 
     async def enter_current_workspace(self, *, state=None, force_picker=False):
+        generation = self.system._session.generation
         state = state or getattr(self, "_active_session_state", None)
         if state is None:
             return None
@@ -107,12 +108,14 @@ class AgentCliController:
             if len(snapshots) == 1 and not force_picker
             else await self._pick_snapshot(snapshots)
         )
-        if chosen is None:
+        if chosen is None or generation != self.system._session.generation:
             return None
         try:
             messages, meta = await asyncio.to_thread(
                 read_saved_model_messages_file, chosen.path
             )
+            if generation != self.system._session.generation:
+                return None
             await self.reset_session(state.history)
             histories = {
                 "coordinator": state.history,
@@ -134,6 +137,7 @@ class AgentCliController:
 
     async def reset_session(self, history: ChatHistory) -> None:
         system = self.system
+        system._session.reset(discard=True)
         self.last_rejected_input = None
         self._ready.clear()
         system._session.queue.discard()
@@ -216,19 +220,25 @@ class AgentCliController:
         wait_for_turn: bool,
         goal_mode: bool = False,
         references,
+        admission,
     ) -> str:
         system = self.system
         history = state.history
         await self._ready.wait()
+        if not system._session.accepts(admission):
+            references.cancel()
+            return "continue"
         self._preparing = True
         self._prepare_task = asyncio.current_task()
         try:
             await self._publish_context_usage(history)
             try:
                 file_refs = await references
-            except ValueError as exc:
+            except (OSError, ValueError) as exc:
                 self.last_rejected_input = raw_input
                 print_warning(str(exc))
+                return "continue"
+            if not system._session.accepts(admission):
                 return "continue"
             message = user_message_from_cli_input(raw_input)
             message.references = file_refs
@@ -240,13 +250,19 @@ class AgentCliController:
 
             if state.is_first_input:
                 task_name = await system.generate_task_title(raw_input)
+                if not system._session.accepts(admission):
+                    return "continue"
                 logger.setup_task_logger(task_name)
                 system._toolkit.set_task_directory(task_name)
                 safe_session_key = safe_name(task_name, max_len=50, fallback="task")
                 await system.bind_session(safe_session_key)
                 state.is_first_input = False
 
-            turn_task = system._start_user_turn(message, history, goal_mode=goal_mode)
+            if not system._session.accepts(admission):
+                return "continue"
+            turn_task = system._start_user_turn(
+                message, history, goal_mode=goal_mode, turn_id=admission.id
+            )
             if turn_task is None:
                 raise RuntimeError("Another turn bypassed the session queue")
 
@@ -270,6 +286,7 @@ class AgentCliController:
         *,
         wait_for_turn: bool,
         goal_mode: bool = False,
+        input_id: str | None = None,
     ) -> str:
         raw_input = raw_input.strip()
         if not raw_input:
@@ -287,28 +304,21 @@ class AgentCliController:
             state.is_first_input = True
             return "continue"
 
-        if command == "/urgent" or command.startswith("/urgent "):
+        urgent = command == "/urgent" or command.startswith("/urgent ")
+        if urgent:
             text = raw_input[len("/urgent") :].strip()
             if not text:
                 print_warning("用法：/urgent <内容>")
                 return "continue"
-            message = user_message_from_cli_input(text)
-            try:
-                message.references = await load_file_refs(
-                    text, workspace=self.system.workspace
-                )
-            except ValueError as exc:
-                print_warning(str(exc))
-                return "continue"
-            if await self.system.add_urgent_message(message):
-                print_success("加急输入将在本批工具完成后的下一次请求中处理。")
-                return "continue"
             raw_input = text
 
-        if raw_input.startswith("/"):
+        if raw_input.startswith("/") and not urgent:
             await self._publish_context_usage(state.history)
             return await self._handle_slash_command(raw_input, state)
 
+        admission = self.system._session.admit(
+            self.system.workspace, urgent=urgent, input_id=input_id
+        )
         app_config.reload_config()
         missing = app_config.missing_main_api_keys()
         if missing:
@@ -320,10 +330,23 @@ class AgentCliController:
             return "continue"
 
         references = asyncio.create_task(
-            load_file_refs(raw_input, workspace=self.system.workspace)
+            load_file_refs(raw_input, workspace=admission.workspace)
         )
         references.add_done_callback(
             lambda done: None if done.cancelled() else done.exception()
+        )
+        if admission.urgent:
+            await self.system.add_urgent_message(
+                user_message_from_cli_input(raw_input),
+                admission=admission,
+                references=references,
+            )
+            print_success("加急输入已登记，将按提交顺序在下一次请求中处理。")
+            return "continue"
+        logger.debug(
+            "input admitted id=%s sequence=%s urgent=False",
+            admission.id,
+            admission.sequence,
         )
         future = self.system._session.queue.submit(
             lambda: self._start_user_turn_from_raw_input(
@@ -332,6 +355,7 @@ class AgentCliController:
                 wait_for_turn=True,
                 goal_mode=goal_mode,
                 references=references,
+                admission=admission,
             ),
             data=raw_input,
         )

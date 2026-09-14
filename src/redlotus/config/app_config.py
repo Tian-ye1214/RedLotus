@@ -65,6 +65,17 @@ def initialize_config() -> None:
         current = json.loads(raw)
         updated = deepcopy(current)
         _copy_missing_defaults(updated, defaults)
+        execution = updated["execution"]
+        if "blocked_code_patterns" in execution["permissions"]:
+            execution["permissions"].pop("blocked_code_patterns")
+            execution["inherit_env"] = list(
+                dict.fromkeys(
+                    [
+                        *execution["inherit_env"],
+                        *defaults["execution"]["inherit_env"],
+                    ]
+                )
+            )
         if updated != current:
             backup = (
                 path.parent

@@ -27,7 +27,7 @@ class AgentRunner:
         prompt: Any,
         message_history: list,
         usage_limits: Any,
-        take_urgent: Callable[[], list[str]] | None = None,
+        take_urgent: Callable[[], Awaitable[list]] | None = None,
         before_request: Callable[[Any, Any], Awaitable[None]] | None = None,
         on_node: Callable[[Any], Awaitable[None]] | None = None,
         on_complete: Callable[[], None] | None = None,
@@ -39,14 +39,16 @@ class AgentRunner:
             prompt, message_history=message_history, usage_limits=usage_limits
         ) as run:
             results = []
+            prepared_request = None
             try:
                 node = run.next_node
                 while not agent.is_end_node(node):
                     if agent.is_model_request_node(node):
-                        if take_urgent:
+                        if take_urgent and node is not prepared_request:
                             node.request.parts.extend(
-                                UserPromptPart(text) for text in take_urgent()
+                                UserPromptPart(text) for text in await take_urgent()
                             )
+                        prepared_request = None
                         if on_node:
                             # Audit the pending tool batch before a compressor changes the model view.
                             run.ctx.state.message_history.append(node.request)
@@ -89,11 +91,12 @@ class AgentRunner:
                         await on_node(run)
                     # Steering arriving during a final model response still belongs to this turn.
                     if agent.is_end_node(next_node) and take_urgent:
-                        urgent = take_urgent()
+                        urgent = await take_urgent()
                         if urgent:
                             next_node = ModelRequestNode(
                                 ModelRequest(parts=[UserPromptPart(t) for t in urgent])
                             )
+                            prepared_request = next_node
                     if agent.is_end_node(next_node) and on_complete:
                         on_complete()  # Later input is a new turn, even while trace writes are draining.
                     node = next_node

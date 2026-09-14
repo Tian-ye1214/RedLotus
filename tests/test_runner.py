@@ -48,7 +48,7 @@ async def test_parallel_results_and_urgent_share_next_request():
         else:
             yield "完成"
 
-    def take_urgent():
+    async def take_urgent():
         values = urgent[:]
         urgent.clear()
         return values
@@ -81,7 +81,7 @@ async def test_urgent_during_final_response_is_consumed():
             urgent.append("补充信息")
         yield str(len(requests))
 
-    def take_urgent():
+    async def take_urgent():
         values, urgent[:] = urgent[:], []
         return values
 

@@ -293,10 +293,13 @@ class RedLotusTui(App[None]):
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[WorkspaceSnapshot | None] = loop.create_future()
+        generation = self.system._session.generation
 
         def _on_result(result: WorkspaceSnapshot | None) -> None:
             if not future.done():
-                future.set_result(result)
+                future.set_result(
+                    result if generation == self.system._session.generation else None
+                )
 
         screen = SnapshotPickScreen(snapshots)
         await self.push_screen(screen, callback=_on_result, wait_for_dismiss=False)
@@ -745,9 +748,12 @@ class RedLotusTui(App[None]):
 
     async def ask_user(self, question: str, *, record_reply=True, secret=False) -> str:
         """在 Textual 事件循环中弹出用户提问界面（内部方法）。"""
+        generation = self.system._session.generation
         if self._ask_lock is None:
             self._ask_lock = asyncio.Lock()
         async with self._ask_lock:  # 多个并行提问按 FIFO 串行排队，互不丢弃
+            if generation != self.system._session.generation:
+                raise asyncio.CancelledError()
             self._record_reply = record_reply
             self._ask_question = question.strip()
             self._ask_future = asyncio.get_running_loop().create_future()
@@ -760,7 +766,10 @@ class RedLotusTui(App[None]):
             inp.focus()
             self.refresh_status()
             try:
-                return await self._ask_future
+                answer = await self._ask_future
+                if generation != self.system._session.generation:
+                    raise asyncio.CancelledError()
+                return answer
             finally:
                 inp.password = False
                 self._record_reply = True

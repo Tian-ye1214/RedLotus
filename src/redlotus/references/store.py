@@ -220,10 +220,13 @@ class ReferenceStore:
         """Read a previously registered reference in this project, including native media."""
         from pydantic_ai import ToolReturn
 
-        reference = await asyncio.to_thread(self.load, reference_id)
-        if reference.project_id != self.workspace.project_id:
-            return "Error: Reference belongs to another project; retrieve its authorized memory record instead."
-        reference = await self.parse(reference)
+        try:
+            reference = await asyncio.to_thread(self.load, reference_id)
+            if reference.project_id != self.workspace.project_id:
+                return "Error: Reference belongs to another project; retrieve its authorized memory record instead."
+            reference = await self.parse(reference)
+        except (OSError, ValueError) as exc:
+            return f"Error reading reference '{reference_id}': {exc}"
         return ToolReturn(
             return_value=f"Read reference {reference.name} ({reference.id})",
             content=await asyncio.to_thread(reference.to_prompt),
