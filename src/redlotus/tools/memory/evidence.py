@@ -5,14 +5,14 @@ import json
 import mimetypes
 from pathlib import Path
 
-from pydantic_ai.messages import ModelMessagesTypeAdapter, BinaryContent
+from pydantic_ai.messages import BinaryContent, ModelMessagesTypeAdapter, TextContent
 
+from redlotus.config.app_config import settings
+from redlotus.infra.paths import project_data_dir
 from redlotus.ModelGateway.input_policy import ModelInputPolicy
 from redlotus.references.store import ReferenceStore
 from redlotus.runtime.tool_telemetry import tool_result_succeeded
 from redlotus.tools.memory.models import ObservedTurn
-from redlotus.infra.paths import project_data_dir
-from redlotus.config.app_config import settings
 
 
 class EvidenceReader:
@@ -35,8 +35,9 @@ class EvidenceReader:
         sources = {}
         refs = {
             key: await self.references.parse(self.references.load(key))
-            for event in events
-            for key in event.reference_ids
+            for key in dict.fromkeys(
+                key for event in events for key in event.reference_ids
+            )
         }
         paths = set()
         for event in events:
@@ -74,6 +75,10 @@ class EvidenceReader:
                 if (
                     event is None
                     or row.get("meta", {}).get("origin") == "context_summary"
+                    or (
+                        event.origin == "user"
+                        and row.get("meta", {}).get("agent") != "coordinator"
+                    )
                 ):
                     continue
                 messages.append(
@@ -93,6 +98,21 @@ class EvidenceReader:
                     for asset_index, item in enumerate(content):
                         if isinstance(item, str):
                             texts.append(item)
+                        elif (
+                            isinstance(item, TextContent)
+                            and (item.metadata or {}).get("origin") == "runtime_control"
+                        ):
+                            identity = f"{source_id}:{asset_index}"
+                            control = dict(
+                                id=identity,
+                                event_id=event.id,
+                                kind="control-return",
+                                tool="runtime",
+                                text=item.content,
+                                verified=True,
+                            )
+                            packets[event.id]["operations"].append(control)
+                            sources[identity] = control
                         elif isinstance(item, BinaryContent):
                             identifier = item.identifier or ""
                             known = identifier[:32]

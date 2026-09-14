@@ -39,6 +39,13 @@
       "top_p": 1.0,
       "reasoning_effort": "max",
       "thinking": "enabled"
+    },
+    "title": {
+      "name": "deepseek-v4-flash",
+      "temperature": 1.0,
+      "max_tokens": 393216,
+      "top_p": 1.0,
+      "thinking": "disabled"
     }
   },
   "context": {
@@ -66,6 +73,13 @@
       "auto_compress_ratio": 0.8,
       "tail_turns": 2,
       "head_turns": 2
+    },
+    "title": {
+      "max_context_tokens": null,
+      "default_context_tokens": 393216,
+      "auto_compress_ratio": 0.8,
+      "tail_turns": 2,
+      "head_turns": 2
     }
   },
   "bot": {
@@ -79,7 +93,8 @@
     "save_model_thinking_chain": true
   },
   "lifecycle": {
-    "invocation_history_per_session": 50
+    "invocation_history_per_session": 50,
+    "shutdown_grace_seconds": 3
   },
   "short_term_memory": {
     "db_path": "data/rag_lancedb/stm",
@@ -104,14 +119,14 @@
   "request_limit": null,
   "MODEL_HTTP_TIMEOUT": 300,
   "memory_perception": {
-    "window_turns": 25,
-    "overlap_turns": 5,
+    "window_turns": 20,
+    "overlap_turns": 3,
     "model_role": "worker",
     "max_concurrent": 1,
     "input_context_ratio": 0.65,
     "existing_record_limit": 12,
     "query_max_chars": 1200,
-    "fragment_min_chars": 1000
+    "evidence_read_tokens": 12000
   },
   "input_limits": {
     "defaults": {
@@ -157,5 +172,66 @@
     "references_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\references",
     "compression_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\sessions\\compression",
     "runtime_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\runtime"
+  },
+  "task_title": {
+    "max_chars": 50
+  },
+  "execution": {
+    "python_executable": "",
+    "environment_dir": "{runtime}/environments/{project_id}",
+    "cache_dir": "{runtime}/cache",
+    "inherit_env": [
+      "PATH",
+      "SystemRoot",
+      "WINDIR",
+      "COMSPEC",
+      "PATHEXT",
+      "SYSTEMDRIVE",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "PLAYWRIGHT_BROWSERS_PATH",
+      "CLAWHUB_WORKDIR"
+    ],
+    "permissions": {
+      "restricted_roles": [
+        "worker",
+        "manager"
+      ],
+      "blocked_commands": [
+        "kill",
+        "pkill",
+        "killall",
+        "taskkill",
+        "tskill",
+        "stop-process",
+        "spps",
+        "shutdown",
+        "restart-computer",
+        "stop-computer",
+        "stop-service",
+        "restart-service"
+      ],
+      "script_extensions": [
+        ".py",
+        ".pyw",
+        ".ps1",
+        ".sh",
+        ".bat",
+        ".cmd",
+        ".js",
+        ".mjs",
+        ".cjs"
+      ],
+      "blocked_code_patterns": [
+        "\\b(?:os\\.(?:kill|killpg)|signal\\.pthread_kill)\\s*\\(",
+        "\\bfrom\\s+os\\s+import\\b[^;\\n]*\\b(?:kill|killpg)\\b",
+        "\\.\\s*(?:kill|terminate)\\s*\\(",
+        "\\b(?:TerminateProcess|NtTerminateProcess|TerminateJobObject)\\s*\\(",
+        "\\bwmic\\b[^\\n]*\\b(?:terminate|delete)\\b",
+        "(?:^|\\s)-(?:EncodedCommand|enc|ec)\\b",
+        "(?:^|[;&|\\n])\\s*(?:taskkill|tskill|pkill|killall|kill|Stop-Process|spps|shutdown|Stop-Service|Restart-Service)(?:\\.exe)?(?:\\s|$)"
+      ]
+    }
   }
 }

@@ -1,7 +1,6 @@
 from pathlib import Path
 import asyncio
 import inspect
-import os
 import re
 import subprocess
 import threading
@@ -19,7 +18,11 @@ from redlotus.infra.path_sandbox import resolve_readable_path
 from redlotus.runtime.context import WorkspaceContext
 from redlotus.workspace.workspace import current_workspace
 from redlotus.infra.paths import runtime_dir, user_skills_dir
-from redlotus.infra.subprocess_runner import run_subprocess, has_background_shell_command
+from redlotus.infra.subprocess_runner import (
+    describe_execution_environment,
+    has_background_shell_command,
+    run_subprocess,
+)
 from redlotus.tools.browser_session import PlaywrightBrowserSession
 from redlotus.cli.render import show_file_diff
 from redlotus.cli.pending_review import PendingReviewStore
@@ -35,6 +38,8 @@ class BasicToolkit:
         workspace: WorkspaceContext | None = None,
     ):
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
+        if skills_manager is not None:
+            skills_manager.workspace = self.workspace
         self._clawhub_cwd = runtime_dir()
         self._skills_overlay = user_skills_dir()
         self._WORK_DATABASE_ROOT = self.workspace.root / "WorkDatabase"
@@ -100,7 +105,7 @@ class BasicToolkit:
             return call
 
         child = BasicToolkit(
-            SkillsManager(),
+            SkillsManager(workspace=self.workspace),
             workspace=self.workspace,
             extra_worker_tools=[bridge(t) for t in self._extra_worker_tools],
         )
@@ -382,7 +387,7 @@ class BasicToolkit:
         """
         is_safe, reason = self._is_command_safe(command)
         if not is_safe:
-            return f"Security error: {reason}"
+            return f"Error: Security check rejected the command: {reason}"
 
         danger = self._command_needs_confirm(command)
         if danger:
@@ -406,18 +411,23 @@ class BasicToolkit:
                     c in command for c in ["|", ">", "<", "&&", "||", ";", "*", "?"]
                 )
                 if use_shell and has_background_shell_command(command):
-                    return "Security error: background shell processes are not allowed"
+                    return "Error: background shell processes are not allowed"
                 cwd = str(self._base_dir.resolve())
-                env = None
+                overrides = None
                 if re.search(r"\bclawhub\b", command, re.I):
                     cwd = str(self._clawhub_cwd)
                     if "--workdir" not in command:
-                        env = os.environ | {"CLAWHUB_WORKDIR": cwd}
+                        overrides = {"CLAWHUB_WORKDIR": cwd}
 
                 shell = use_shell or _platform.system() == "Windows"
                 args = command if shell else shlex.split(command)
                 stdout, stderr, return_code = await run_subprocess(
-                    args, shell=shell, cwd=cwd, env=env, timeout=timeout
+                    args,
+                    shell=shell,
+                    cwd=cwd,
+                    env=overrides,
+                    timeout=timeout,
+                    workspace=self.workspace,
                 )
                 output = stdout + stderr
                 return (
@@ -428,7 +438,14 @@ class BasicToolkit:
         except subprocess.TimeoutExpired:
             return f"Error: Command execution timed out ({timeout} seconds)"
         except Exception as e:
-            return f"Execution error: {e}"
+            return f"Error executing command: {e}"
+
+    def execution_environment(self) -> str:
+        """Report the configured project interpreter and cache paths."""
+        return describe_execution_environment(
+            cwd=self._base_dir,
+            workspace=self.workspace,
+        )
 
     async def read_image(self, image_path: str) -> ToolReturn | str:
         """Read an original image from the current project or an explicitly requested HTTP(S) URL.
@@ -522,6 +539,7 @@ class BasicToolkit:
             ],
             "execution": [
                 self.run_command,
+                self.execution_environment,
             ],
             "media": [
                 self.generate_image,

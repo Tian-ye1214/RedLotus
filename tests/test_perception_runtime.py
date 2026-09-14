@@ -75,8 +75,11 @@ async def test_perception_uses_worker_target_in_owned_child_thread(
     def respond(request):
         payload = json.loads(request.content)
         requests.append((threading.get_ident(), payload))
-        assert payload.get("response_format") == {"type": "json_object"}
-        assert not payload.get("tools")
+        assert not payload.get("response_format")
+        assert {tool["function"]["name"] for tool in payload["tools"]} >= {"search_episodes", "read_episode"}
+        needs_search = not any(message.get("tool_calls") for message in payload["messages"])
+        scope = "search_memory" if "requested_scope" in json.dumps(payload["messages"]) else "search_episodes"
+        message = dict(role="assistant", content=None, tool_calls=[dict(id="search", type="function", function=dict(name=scope, arguments=json.dumps(dict(query="current task"))))]) if needs_search else dict(role="assistant", content=None, tool_calls=[dict(id="result", type="function", function=dict(name="final_result", arguments=json.dumps(next(outputs))))])
         return httpx.Response(
             200,
             json={
@@ -87,11 +90,8 @@ async def test_perception_uses_worker_target_in_owned_child_thread(
                 "choices": [
                     {
                         "index": 0,
-                        "finish_reason": "stop",
-                        "message": {
-                            "role": "assistant",
-                            "content": json.dumps(next(outputs)),
-                        },
+                        "finish_reason": "tool_calls",
+                        "message": message,
                     }
                 ],
                 "usage": {
@@ -149,7 +149,7 @@ async def test_perception_uses_worker_target_in_owned_child_thread(
             [],
         )
         assert [row.scope for row in scoped.records] == ["global"]
-        assert len(requests) == 3, "Wrong scope must be corrected during production"
+        assert len(requests) == 5, "Wrong scope must be corrected within the same perception run"
         repeated = await perception.produce(
             "repeat-job",
             dict(mode="explicit_request", explicit_request="Remember the same code preference", requested_scope="global", new_turn_ids=["turn"], existing_records=[{**preference, "id": "preference", "project_id": workspace.project_id, "origin": "explicit"}], events=[dict(id="turn", user_inputs=["Remember my code preference"], operations=[])]),
@@ -157,7 +157,7 @@ async def test_perception_uses_worker_target_in_owned_child_thread(
         )
         assert repeated.records[0].target_id == "preference"
         assert repeated.records[0].action == "update"
-        assert len(requests) == 5
+        assert len(requests) == 8
 
         memory = MemoryService(workspace=workspace)
         initial = memory._route()

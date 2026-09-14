@@ -23,7 +23,7 @@ def configured_system(tmp_path, monkeypatch):
     system._memory.long_term = LongTermMemory(tmp_path / "global")
     system._context_prewarmed = True
     monkeypatch.setattr(system, "_sync_skills_for_user_turn", noop)
-    monkeypatch.setattr(system._memory, "process_pending", noop)
+    monkeypatch.setattr(system._memory, "schedule_processing", lambda **kwargs: None)
     return system
 
 
@@ -97,7 +97,7 @@ async def test_shutdown_drains_resources_when_the_first_waiter_is_cancelled(
         started.set()
         await release.wait()
 
-    monkeypatch.setattr(system._memory, "process_pending", pending)
+    system._spawn_background(pending())
     first = asyncio.create_task(system.shutdown())
     await asyncio.wait_for(started.wait(), 3)
     first.cancel()
@@ -306,18 +306,26 @@ async def test_project_switch_does_not_wait_for_scoped_memory_production(
 ):
     system = configured_system(tmp_path, monkeypatch)
     previous = system._memory
-    started, finish = asyncio.Event(), asyncio.Event()
+    from redlotus.agent_core.memory_service import MemoryService
 
-    async def produce(**kwargs):
-        started.set()
-        await finish.wait()
+    started, finish = threading.Event(), threading.Event()
 
-    monkeypatch.setattr(previous, "process_pending", produce)
+    async def produce(producer, **kwargs):
+        if producer.workspace.project_id == previous.workspace.project_id:
+            started.set()
+            await asyncio.to_thread(finish.wait)
+
+    monkeypatch.setattr(
+        previous,
+        "schedule_processing",
+        MemoryService.schedule_processing.__get__(previous),
+    )
+    monkeypatch.setattr(MemoryService, "process_pending", produce)
     target = tmp_path / "next-project"
     target.mkdir()
     switching = asyncio.create_task(system.switch_workspace(target))
     try:
-        await started.wait()
+        assert await asyncio.to_thread(started.wait, 3)
         await asyncio.sleep(0.05)
         assert switching.done(), "Directory switching is blocked by background memory"
         await switching
@@ -328,3 +336,39 @@ async def test_project_switch_does_not_wait_for_scoped_memory_production(
         finish.set()
         await asyncio.gather(switching, return_exceptions=True)
         await system.shutdown()
+        for memory in (previous, system._memory):
+            assert (
+                memory._background is None or not memory._background.thread.is_alive()
+            )
+
+
+async def test_exit_seals_unfinished_memory_without_starting_production(
+    tmp_path, monkeypatch
+):
+    from redlotus.infra.persist_utils import read_locked_json
+    from redlotus.runtime.subagents import SubagentSpec
+
+    system = configured_system(tmp_path, monkeypatch)
+    event = system._memory.observations.begin(
+        "session", "turn", "unfinished project", []
+    )
+    event.status = "success"
+    system._memory.observations.finish(event)
+    started = threading.Event()
+
+    async def pending():
+        started.set()
+        await asyncio.sleep(30)
+
+    handle = system._memory_factory.start_background(
+        SubagentSpec("memory", None, system.workspace, role="perception"), pending
+    )
+    assert await asyncio.to_thread(started.wait, 3)
+    await asyncio.wait_for(system.shutdown(), 3)
+    assert handle._future.cancelled() and not handle.thread.is_alive()
+    jobs = list(system._memory.jobs_dir.glob("*.json"))
+    assert len(jobs) == 1
+    job = read_locked_json(jobs[0])
+    assert job["window"]["new_turn_ids"] == [event.id]
+    assert not job["done"] and job["result"] is None
+    assert system._memory.observations.cursor() == 0

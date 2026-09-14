@@ -496,7 +496,7 @@ class AcceptanceSuite:
                 else:
                     prompt = f"补充当前验收任务的第 {index} 项约束：报告需要保留地区字段和整数金额，阶段编号为 {index}。这是本任务上下文，不是长期偏好。只需一句话确认。"
                 await driver.say(prompt)
-                if index in (24, 25, 44, 45):
+                if index in (19, 20, 39, 40):
                     await driver.system.wait_for_memory_quiescent(timeout=600)
                     receipts = [
                         read_json(path)
@@ -516,15 +516,15 @@ class AcceptanceSuite:
                     assert len(authorized) == 1, (
                         "Ordinary context became explicit memory"
                     )
-                    expected = {24: 0, 25: 1, 44: 1, 45: 2}[index]
+                    expected = {19: 0, 20: 1, 39: 1, 40: 2}[index]
                     assert len(windows) == expected, (
                         f"window count at turn {index}: {windows}"
                     )
-                    if index == 45:
+                    if index == 40:
                         windows.sort(key=lambda row: row["start_position"])
                         assert (
                             len(windows[1]["new_turn_ids"]) == 20
-                            and len(windows[1]["overlap_turn_ids"]) == 5
+                            and len(windows[1]["overlap_turn_ids"]) == 3
                         )
             await driver.system.wait_for_memory_quiescent(timeout=600)
             known_jobs = set(driver.system._memory.jobs_dir.glob("*.json"))

@@ -5,25 +5,34 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
+from copy import deepcopy
 from dataclasses import asdict
+from datetime import datetime
 from typing import Literal
 
 from filelock import AsyncFileLock
 from pydantic import BaseModel, Field
 from pydantic_ai import ToolReturn
-from pydantic_ai.messages import TextContent
 from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
+from pydantic_ai.messages import TextContent
 
 from redlotus.config.app_config import settings
-from redlotus.prompt import load_prompt
-from redlotus.ModelGateway.model_factory import ModelTarget
 from redlotus.infra import logger
-from redlotus.infra.persist_utils import iso_utc_now, save_locked_json, read_locked_json
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.runtime.subagents import SubagentFactory
+from redlotus.infra.persist_utils import (
+    file_lock,
+    iso_utc_now,
+    read_locked_json,
+    save_locked_json,
+)
+from redlotus.ModelGateway.model_factory import ModelTarget
+from redlotus.prompt import load_prompt
 from redlotus.references.store import ReferenceStore
+from redlotus.runtime.context import WorkspaceContext
+from redlotus.runtime.lifecycle import AgentRegistry
+from redlotus.runtime.subagents import SubagentFactory, SubagentSpec
 from redlotus.tools.memory.evidence import EvidenceReader
-from redlotus.tools.memory.ltm import LongTermMemory, CREDENTIAL_PATTERN
+from redlotus.tools.memory.ltm import CREDENTIAL_PATTERN, LongTermMemory
 from redlotus.tools.memory.models import (
     MemoryRecord,
     ObservedTurn,
@@ -47,7 +56,13 @@ class MemoryJob(BaseModel):
     sources: dict = Field(default_factory=dict)
     reference_ids: list[str] = Field(default_factory=list)
     bases: dict[str, MemoryRecord] = Field(default_factory=dict)
-    fragments: list[dict] = Field(default_factory=list)
+    model_snapshot: dict = Field(default_factory=dict)
+    perception_config: dict = Field(default_factory=dict)
+    prompt_snapshot: str = ""
+    timings: dict[str, str] = Field(default_factory=dict)
+    searches: list[dict] = Field(default_factory=list)
+    model_calls: list[dict] = Field(default_factory=list)
+    elapsed: dict[str, float] = Field(default_factory=dict)
     usage: list[dict] = Field(default_factory=list)
     records: list[str] = Field(default_factory=list)
     done: bool = False
@@ -79,6 +94,12 @@ class MemoryService:
         self._explicit = asyncio.Lock()
         self._recovered = False
         self.last_error = ""
+        self._background = None
+        self._background_running = False
+        self._schedule_lock = threading.Lock()
+        self._pending_end = 0
+        self._pending_recover = False
+        self._targets: dict[str, ModelTarget] = {}
 
     def bind_runner(self, registry, *, input_source):
         self.perception = MemoryPerception(
@@ -167,7 +188,12 @@ class MemoryService:
     def _job(self, job):
         path = self._job_path(job)
         if path.exists():
-            return MemoryJob.model_validate(read_locked_json(path))
+            saved = read_locked_json(path)
+            if saved.get("fragments"):
+                backup = path.parent / "legacy_fragments" / path.name
+                if not backup.exists():
+                    save_locked_json(backup, saved)
+            return MemoryJob.model_validate(saved)
         self._save_job(job)
         return job
 
@@ -182,27 +208,28 @@ class MemoryService:
         )
         return root / f"{job.id}.json"
 
+    def target_for_job(self, job):
+        if job.id in self._targets:
+            return self._targets[job.id]
+        config = job.perception_config or settings()["memory_perception"]
+        current = ModelTarget.for_role(config["model_role"])
+        if not job.model_snapshot:
+            return current
+        if (job.model_snapshot["base_url"], job.model_snapshot["protocol"]) != (
+            current.base_url, current.protocol
+        ):
+            raise ValueError("待恢复感知的网关与当前配置不同；请恢复原网关配置后重试，不能混用其他网关的凭据。")
+        return ModelTarget(**job.model_snapshot, api_key=current.api_key)
+
     async def _produce(self, job):
-        config = settings()["memory_perception"]
+        config = job.perception_config or settings()["memory_perception"]
+        job.timings["preparing_at"] = iso_utc_now()
+        self._save_job(job)
         packets, job.sources, references = await self.evidence.collect(job.events)
         job.reference_ids = [ref.id for ref in references]
-        query = " ".join(text for event in job.events for text in event.user_inputs)[
-            : config["query_max_chars"]
-        ]
-        candidates = [
-            *(await asyncio.to_thread(self.store.all, "project", active_only=False))[
-                -config["existing_record_limit"] :
-            ],
-            *await self.store.search(query),
-            *(
-                row
-                for row in await asyncio.to_thread(
-                    self.store.all, "global", active_only=False
-                )
-                if row.state != "active"
-            ),
-        ]
-        job.bases = {row.id: row for row in candidates}
+        # Tombstones prevent forgotten facts being recreated; active records are retrieved by the Agent.
+        inactive = await asyncio.to_thread(self.store.all, active_only=False)
+        job.bases.update((row.id, row) for row in inactive if row.state != "active")
         payload = dict(
             mode="migration"
             if job.events[0].origin == "migration"
@@ -236,21 +263,32 @@ class MemoryService:
             ],
         )
 
-        def progress(fragments):
-            job.fragments = fragments
+        def retrieved(rows, search):
+            job.bases.update((row.id, row) for row in rows)
+            job.searches.append(search)
             self._save_job(job)
 
         def usage(value):
             job.usage.append(value)
             self._save_job(job)
 
+        def model_call(value):
+            job.model_calls.append(value)
+            self._save_job(job)
+
+        target = self.target_for_job(job)
+        job.timings["model_started_at"] = iso_utc_now()
+        self._save_job(job)
         result = await self.perception.produce(
             job.id,
             payload,
             references,
-            fragments=job.fragments,
-            on_fragment=progress,
             on_usage=usage,
+            on_search=retrieved,
+            on_call=model_call,
+            target=target,
+            config=config,
+            instructions=job.prompt_snapshot or None,
         )
         if job.request is not None and not result.request_authorized:
             job.result, job.done = result, True
@@ -259,6 +297,7 @@ class MemoryService:
         if job.request is not None and not result.records:
             raise ValueError(result.reason)
         job.result = result
+        job.timings["produced_at"] = iso_utc_now()
         self._save_job(job)
 
     def _record(self, job, draft, index):
@@ -294,8 +333,10 @@ class MemoryService:
             previous = None
         if previous and previous.last_change_id == f"{job.id}:{index}":
             return previous
-        if previous and not explicit and (
-            previous.scope != draft.scope or previous.origin == "explicit"
+        if (
+            previous
+            and not explicit
+            and (previous.scope != draft.scope or previous.origin == "explicit")
         ):
             return None
         source_time = max(events[key].created_at for key in draft.source_turn_ids)
@@ -373,7 +414,9 @@ class MemoryService:
             )
         )
         body.update(
-            project_id=self.workspace.project_id if draft.scope == "project" else record.project_id,
+            project_id=self.workspace.project_id
+            if draft.scope == "project"
+            else record.project_id,
             kind="requested" if explicit else draft.kind,
             origin="explicit" if explicit else "automatic",
             state="deleted" if draft.action == "delete" else "active",
@@ -424,6 +467,7 @@ class MemoryService:
                         )
                         self.observations.save(observed)
             job.done, job.error = True, ""
+            job.timings["committed_at"] = iso_utc_now()
             self._save_job(job)
 
     async def _execute(self, job, *, retry=False):
@@ -524,14 +568,147 @@ class MemoryService:
                 ensure_ascii=False,
             )
 
-    async def process_pending(self, *, flush=False, recover=False):
+    def seal_windows(self, *, flush=False, through=None):
+        """Reserve immutable windows without waiting for model or database work."""
         if not self.owner_memory_allowed:
             return
-        flush_path = self.observations.root / "flush_pending.json"
-        if flush:
-            save_locked_json(flush_path, {"requested_at": iso_utc_now()})
+        through = len(self.observations.order()) if through is None else through
+        requested_at = iso_utc_now()
+        with file_lock(self.observations.root / "schedule"):
+            start = self.observations.reserved_cursor()
+            for path in self.jobs_dir.glob("*.json"):
+                saved = read_locked_json(path)
+                if window := saved.get("window"):
+                    start = max(start, window["end_position"])
+            while window := self.observations.window(
+                flush=flush, through=through, start=start
+            ):
+                events = self.observations.read(
+                    [*window.overlap_turn_ids, *window.new_turn_ids]
+                )
+                config = deepcopy(settings()["memory_perception"])
+                frozen = ModelTarget.for_role(config["model_role"])
+                with self._schedule_lock:
+                    self._targets[window.id] = frozen
+                target = asdict(frozen)
+                target.pop("api_key")
+                self._job(
+                    MemoryJob(
+                        id=window.id,
+                        window=window,
+                        events=events,
+                        model_snapshot=target,
+                        perception_config=config,
+                        prompt_snapshot=load_prompt("memory_perception_system.md"),
+                        timings={
+                            "ready_at": requested_at
+                            if window.reason == "flush"
+                            else events[-1].finished_at,
+                            "sealed_at": iso_utc_now(),
+                        },
+                    )
+                )
+                self.observations.reserve(window)
+                start = window.end_position
+
+    def schedule_processing(self, *, flush=False, recover=False):
+        """Foreground notification; only this instance can extend its worker's boundary."""
+        if not self.owner_memory_allowed:
+            return
+        through = len(self.observations.order())
+        self.seal_windows(flush=flush, through=through)
+        with self._schedule_lock:
+            self._pending_end = max(self._pending_end, through)
+            self._pending_recover |= recover
+            if self._background_running:
+                return
+            if (
+                not (recover or flush)
+                and self.observations.reserved_cursor() <= self.observations.cursor()
+            ):
+                return
+            self._background_running = True
+            spec = SubagentSpec(
+                f"memory:{self.workspace.project_id}",
+                None,
+                self.workspace,
+                role="perception",
+            )
+            self._background = self._perception_factory.start_background(
+                spec, self._drain_background
+            )
+
+    async def _drain_background(self):
+        # Construct the entire producer inside its owning thread, including its LanceDB connection.
+        producer = MemoryService(
+            workspace=self.workspace, owner_memory_allowed=self.owner_memory_allowed
+        )
+        producer.perception = MemoryPerception(self.workspace, None, AgentRegistry())
+        try:
+            while True:
+                with self._schedule_lock:
+                    through, recover = self._pending_end, self._pending_recover
+                    self._pending_recover = False
+                    producer._targets = deepcopy(self._targets)
+                await producer.process_pending(through=through, recover=recover)
+                self.last_error = producer.last_error
+                with self._schedule_lock:
+                    if through == self._pending_end and not self._pending_recover:
+                        self._background_running = False
+                        return
+        except asyncio.CancelledError:
+            with self._schedule_lock:
+                self._background_running = False
+            raise
+        except Exception as exc:
+            with self._schedule_lock:
+                self._background_running = False
+            self.last_error = str(exc)
+            logger.error("感知后台执行失败，任务保留待恢复：%s", exc)
+            raise
+        finally:
+            await producer.close()
+
+    async def _index_job(self, job):
+        if "indexed_at" in job.timings:
+            return
+        if job.records:
+            job.timings["index_started_at"] = iso_utc_now()
+            self._save_job(job)
+            await self.store.reconcile()
+            if self.store.last_error:
+                job.error = self.last_error = self.store.last_error
+                self._save_job(job)
+                return
+        job.timings["indexed_at"] = iso_utc_now()
+        self._save_job(job)
+        if job.window and "ready_at" in job.timings:
+            ready = datetime.fromisoformat(job.timings["ready_at"])
+            elapsed = (
+                datetime.fromisoformat(job.timings["indexed_at"]) - ready
+            ).total_seconds()
+            api_seconds = sum(call["seconds"] for call in job.model_calls)
+            job.elapsed = dict(
+                total_seconds=elapsed,
+                model_api_seconds=api_seconds,
+                other_seconds=max(0, elapsed - api_seconds),
+            )
+            self._save_job(job)
+            logger.info_file_only(
+                "记忆感知：新增 %s 回合，保存 %s 条，总计 %.2f 秒（模型 API %.2f 秒），窗口 %s。",
+                len(job.window.new_turn_ids),
+                len(job.records),
+                elapsed,
+                api_seconds,
+                job.id,
+            )
+
+    async def process_pending(self, *, flush=False, recover=False, through=None):
+        if not self.owner_memory_allowed:
+            return
+        through = len(self.observations.order()) if through is None else through
+        self.seal_windows(flush=flush, through=through)
         async with self._processing:
-            flush = flush or flush_path.exists()
             self.observations.root.mkdir(parents=True, exist_ok=True)
             async with AsyncFileLock(
                 self.observations.root / "processing.lock", run_in_executor=False
@@ -539,8 +716,8 @@ class MemoryService:
                 if not self._recovered:
                     from redlotus.tools.memory.migration import (
                         migrate_observations,
-                        migrate_record_files,
                         migrate_pending_jobs,
+                        migrate_record_files,
                     )
 
                     await migrate_observations(
@@ -573,28 +750,12 @@ class MemoryService:
                     for path in self.jobs_dir.glob("*.json")
                 ]
                 for job in sorted(jobs, key=lambda item: (item.created_at, item.id)):
+                    if job.window and job.window.end_position > through:
+                        continue
                     if not job.done and not await self._execute(job, retry=recover):
                         return
+                    await self._index_job(job)
                 await self._migrate_core()
-                while window := self.observations.window(flush=flush):
-                    job = self._job(
-                        MemoryJob(
-                            id=window.id,
-                            window=window,
-                            events=self.observations.read(
-                                [*window.overlap_turn_ids, *window.new_turn_ids]
-                            ),
-                        )
-                    )
-                    if not await self._execute(job):
-                        return
-                    logger.info(
-                        "记忆感知：处理 %s 回合，保存 %s 条记忆。",
-                        len(job.events),
-                        len(job.records),
-                    )
-                await self.store.reconcile()
-                flush_path.unlink(missing_ok=True)
 
     async def _migrate_core(self):
         marker = self.long_term.directory / "migration_backup/core_records_v3.json"
@@ -761,12 +922,14 @@ class MemoryService:
             await self._clear("project")
 
     async def wait_idle(self, timeout=15):
-        try:
-            await asyncio.wait_for(self._processing.acquire(), timeout)
-            self._processing.release()
+        if self._background is None:
             return True
-        except asyncio.TimeoutError:
+        future = asyncio.wrap_future(self._background._future)
+        done, _ = await asyncio.wait([future], timeout=timeout)
+        if not done or future.cancelled():
             return False
+        future.result()
+        return True
 
     async def close(self):
         if self._owns_factory:

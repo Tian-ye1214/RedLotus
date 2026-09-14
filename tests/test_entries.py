@@ -189,6 +189,15 @@ async def test_tui_urgent_and_stop_do_not_answer_pending_question(
         assert "/stop" not in system._session.user_inputs
 
 
+async def test_status_refresh_after_tui_exit_does_not_query_removed_widgets(tmp_path, monkeypatch):
+    system = configured_system(tmp_path, monkeypatch)
+    configure_cli_hooks(system, monkeypatch, preparer="system", enter_workspace=True)
+    app = RedLotusTui(system)
+    async with tui_session(app, system):
+        app.refresh_status()
+    app.refresh_status()
+
+
 async def test_goal_iterations_form_one_episode_from_original_user(
     tmp_path, monkeypatch
 ):

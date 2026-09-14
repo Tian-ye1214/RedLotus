@@ -27,6 +27,7 @@ from redlotus.cli.render import (
 from redlotus.cli.cli_ui import format_user_log_text
 from redlotus.infra import logger
 import traceback
+import json
 import time
 import asyncio
 import uuid
@@ -70,6 +71,7 @@ class AgentSystem:
         *,
         workspace: WorkspaceContext | None = None,
         owner_memory_allowed: bool = True,
+        exit_deadline=None,
     ):
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
         self._owner_memory_allowed = owner_memory_allowed
@@ -78,6 +80,7 @@ class AgentSystem:
         self._background_tasks: set[asyncio.Task] = set()
         self._shutdown_done = False
         self._shutdown_task: asyncio.Task | None = None
+        self._exit_deadline = exit_deadline
         self.last_turn_error: Exception | None = None
         self._cancel_lock = asyncio.Lock()
         self._skills_manager = SkillsManager()
@@ -182,18 +185,23 @@ class AgentSystem:
     async def shutdown(self) -> None:
         if self._shutdown_task is None:
             self._shutdown_done = True
+            if self._exit_deadline is not None:
+                self._exit_deadline.start()
             self._shutdown_task = asyncio.create_task(self._release_resources())
         await asyncio.shield(self._shutdown_task)
 
     async def _release_resources(self) -> None:
         self._session.queue.discard()
+        self._orchestrator.factory.stop()
+        self._memory_factory.stop()
         await self.cancel_current_turn()
-        self._spawn_background(self._memory.process_pending(flush=True))
+        self._memory.seal_windows(flush=True)
         if self._session_key:
             await self.end_session_agents(self._session_key)
         pending = list(self._background_tasks)
         if pending:
-            logger.info("[lifecycle] draining %s background task(s)", len(pending))
+            for task in pending:
+                task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
         await self._registry.cancel_all()
         await self._orchestrator.factory.close()
@@ -340,18 +348,25 @@ class AgentSystem:
         self._toolkit.set_task_directory(task_name)
 
     async def generate_task_title(self, user_text: str) -> str:
-        """Name the task with the configured Worker model and the shared model gateway."""
-        from redlotus.ModelGateway.gateway import complete_text
-        from redlotus.infra.persist_utils import safe_name
+        from redlotus.agent_core.task_title import generate_task_title
 
-        try:
-            title = await complete_text(
-                "worker", "用一句短语概括任务标题，只输出标题。", user_text
-            )
-        except Exception as exc:
-            logger.warning("LLM 标题生成失败，使用用户输入命名: %s", exc)
-            title = ""
-        return safe_name(title or user_text[:30], max_len=50, fallback="task")
+        return await generate_task_title(user_text)
+
+    def record_control_result(self, command, target, status, *, accepted):
+        from pydantic_ai.messages import TextContent
+        from redlotus.infra.paths import session_data_dir
+        from redlotus.infra.persist_utils import file_lock, iso_utc_now
+
+        receipt = dict(command=command, target=target, status=status, accepted=accepted,
+                       session_id=self._session_key, observed_at=iso_utc_now())
+        encoded = json.dumps(receipt, ensure_ascii=False)
+        path = session_data_dir(self.workspace) / "control_events.jsonl"
+        with file_lock(path):
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(encoded + "\n")
+        self._session.add_notice([TextContent("【运行控制回执】" + encoded,
+                                             metadata={"origin": "runtime_control"})])
+        return receipt
 
     def bind_loaded_snapshot(self, agent, path, meta) -> None:
         self._session_logs.bind_loaded_snapshot(agent, path, meta)
@@ -421,13 +436,11 @@ class AgentSystem:
 
         set_workspace(path)
         self._spawn_background(self._retire_memory(previous_memory))
-        self._spawn_background(self._memory.process_pending())
+        self._memory.schedule_processing(recover=True)
 
     async def _retire_memory(self, memory):
-        try:
-            await memory.process_pending(flush=True)
-        finally:
-            await memory.close()
+        memory.schedule_processing(flush=True)
+        await memory.close()
 
     @asynccontextmanager
     async def _outer_turn(self, message: UserMessage, turn_id: str):
@@ -466,9 +479,10 @@ class AgentSystem:
                     self._cli_turn_id, self._current_attachments = None, []
                     paths = [
                         str(log.model_messages_path())
-                        for log in self._session_logs._logs.values()
+                        for name, log in self._session_logs._logs.items()
+                        if name == "coordinator"
                     ]
-                    paths.extend(self._orchestrator.evidence.pop(turn_id, []))
+                    self._orchestrator.evidence.pop(turn_id, None)
                     await self._memory.finish_turn(
                         job,
                         status=status,
@@ -476,7 +490,8 @@ class AgentSystem:
                         evidence_paths=paths,
                         error=error,
                     )
-                    self._spawn_background(self._memory.process_pending())
+                    if not self._shutdown_done:
+                        self._memory.schedule_processing()
 
     async def execute_task_with_manager(
         self, user_input: str, continue_from_previous: bool = False
@@ -663,6 +678,7 @@ class AgentSystem:
                         on_node=_save_coordinator_node,
                         take_urgent=lambda: [
                             *self._session.take_urgent(),
+                            *self._session.take_notices(),
                             *self._memory.take_context_notices(),
                         ],
                         on_complete=self._session.close_inbox,

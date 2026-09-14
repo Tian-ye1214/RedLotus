@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 import shlex
 import subprocess
-import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,10 +29,11 @@ class SkillsManager:
     FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
     IGNORED_RESOURCE_DIRS = {".git", "__pycache__", ".idea", ".vscode"}
 
-    def __init__(self, skills_dir: str | Path | None = None):
+    def __init__(self, skills_dir: str | Path | None = None, *, workspace=None):
         self.skills_dir = (
             Path(skills_dir) if skills_dir is not None else user_skills_dir()
         )
+        self.workspace = workspace
         self._roots = (shipped_skills_dir(), self.skills_dir)
         self._refresh_lock = threading.Lock()
         self.skills = {}
@@ -148,10 +148,10 @@ class SkillsManager:
         """Run a script inside its Skill directory without adding its source to context.
 
         Supports Python, Bash, batch and PowerShell. Quote arguments containing spaces.
-        Python uses the running application's interpreter; timeout also reaps child processes.
+        Python uses the configured project interpreter; timeout also reaps child processes.
         """
         executors = {
-            ".py": ["python" if getattr(sys, "frozen", False) else sys.executable],
+            ".py": ["python"],
             ".sh": ["bash"],
             ".bat": ["cmd", "/c"],
             ".ps1": ["powershell", "-File"],
@@ -170,6 +170,7 @@ class SkillsManager:
                 shell=False,
                 cwd=str(self.skills[skill_name].path),
                 timeout=timeout,
+                workspace=self.workspace,
             )
             return f"返回码: {code}\n输出:\n{stdout}{stderr}"
         except subprocess.TimeoutExpired:

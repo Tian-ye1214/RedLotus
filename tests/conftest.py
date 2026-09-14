@@ -19,6 +19,10 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolate_background_services(monkeypatch, tmp_path):
     monkeypatch.setenv("REDLOTUS_DATA_DIR", str(tmp_path / "state"))
+    config = tmp_path.parent / "config_files" / (tmp_path.name + ".json")
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_bytes((ROOT / "src/redlotus/config.default.json").read_bytes())
+    monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(config))
     # Keep native LanceDB on the test volume, including Windows exFAT fallback.
     memory_root = os.environ.get("REDLOTUS_TEST_MEMORY_ROOT")
     database = Path(memory_root) / uuid.uuid4().hex if memory_root else tmp_path / "rag"

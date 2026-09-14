@@ -13,12 +13,21 @@
   "model_gateway": {
     "protocol": "openai-chat",
     "connect_timeout": 10,
-    "settings": { "parallel_tool_calls": true }
+    "settings": {
+      "parallel_tool_calls": true
+    }
   },
   "model_metadata": {
     "url": "https://openrouter.ai/api/v1/models",
     "timeout": 15,
-    "supported_thinking_efforts": ["minimal", "low", "medium", "high", "xhigh", "max"]
+    "supported_thinking_efforts": [
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ]
   },
   "rag_service": {
     "timeout": 60,
@@ -63,6 +72,13 @@
       "top_p": 1.0,
       "reasoning_effort": "max",
       "thinking": "enabled"
+    },
+    "title": {
+      "name": "deepseek-v4-flash",
+      "temperature": 1.0,
+      "max_tokens": 393216,
+      "top_p": 1.0,
+      "thinking": "disabled"
     }
   },
   "context": {
@@ -90,6 +106,13 @@
       "auto_compress_ratio": 0.8,
       "tail_turns": 2,
       "head_turns": 2
+    },
+    "title": {
+      "max_context_tokens": null,
+      "default_context_tokens": 393216,
+      "auto_compress_ratio": 0.8,
+      "tail_turns": 2,
+      "head_turns": 2
     }
   },
   "bot": {
@@ -103,7 +126,8 @@
     "save_model_thinking_chain": true
   },
   "lifecycle": {
-    "invocation_history_per_session": 50
+    "invocation_history_per_session": 50,
+    "shutdown_grace_seconds": 3
   },
   "agent_run_policy": {
     "max_worker_concurrent": 3,
@@ -133,20 +157,81 @@
   "request_limit": null,
   "MODEL_HTTP_TIMEOUT": 300,
   "memory_perception": {
-    "window_turns": 25,
-    "overlap_turns": 5,
+    "window_turns": 20,
+    "overlap_turns": 3,
     "model_role": "worker",
     "max_concurrent": 1,
     "input_context_ratio": 0.65,
     "existing_record_limit": 12,
     "query_max_chars": 1200,
-    "fragment_min_chars": 1000
+    "evidence_read_tokens": 12000
   },
   "input_limits": {
     "defaults": {
       "max_files": 20,
       "max_file_bytes": 20000000,
       "max_request_bytes": null
+    }
+  },
+  "task_title": {
+    "max_chars": 50
+  },
+  "execution": {
+    "python_executable": "",
+    "environment_dir": "{runtime}/environments/{project_id}",
+    "cache_dir": "{runtime}/cache",
+    "inherit_env": [
+      "PATH",
+      "SystemRoot",
+      "WINDIR",
+      "COMSPEC",
+      "PATHEXT",
+      "SYSTEMDRIVE",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "PLAYWRIGHT_BROWSERS_PATH",
+      "CLAWHUB_WORKDIR"
+    ],
+    "permissions": {
+      "restricted_roles": [
+        "worker",
+        "manager"
+      ],
+      "blocked_commands": [
+        "kill",
+        "pkill",
+        "killall",
+        "taskkill",
+        "tskill",
+        "stop-process",
+        "spps",
+        "shutdown",
+        "restart-computer",
+        "stop-computer",
+        "stop-service",
+        "restart-service"
+      ],
+      "script_extensions": [
+        ".py",
+        ".pyw",
+        ".ps1",
+        ".sh",
+        ".bat",
+        ".cmd",
+        ".js",
+        ".mjs",
+        ".cjs"
+      ],
+      "blocked_code_patterns": [
+        "\\b(?:os\\.(?:kill|killpg)|signal\\.pthread_kill)\\s*\\(",
+        "\\bfrom\\s+os\\s+import\\b[^;\\n]*\\b(?:kill|killpg)\\b",
+        "\\.\\s*(?:kill|terminate)\\s*\\(",
+        "\\b(?:TerminateProcess|NtTerminateProcess|TerminateJobObject)\\s*\\(",
+        "\\bwmic\\b[^\\n]*\\b(?:terminate|delete)\\b",
+        "(?:^|\\s)-(?:EncodedCommand|enc|ec)\\b",
+        "(?:^|[;&|\\n])\\s*(?:taskkill|tskill|pkill|killall|kill|Stop-Process|spps|shutdown|Stop-Service|Restart-Service)(?:\\.exe)?(?:\\s|$)"
+      ]
     }
   }
 }

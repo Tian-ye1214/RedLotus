@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from redlotus.infra.shared_http import close_all_clients
-from redlotus.runtime.context import WorkspaceContext, workspace_context
+from redlotus.runtime.context import WorkspaceContext, execution_role, workspace_context
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,9 @@ class SubagentHandle:
     """One Agent, one execution thread, one loop, and an idempotent cancel path."""
 
     def __init__(
-        self, spec: SubagentSpec, execute: Callable[[], Awaitable[Any]]
+        self,
+        spec: SubagentSpec,
+        execute: Callable[[], Awaitable[Any]],
     ) -> None:
         self.id = uuid.uuid4().hex
         self.spec = spec
@@ -55,7 +57,10 @@ class SubagentHandle:
             if self._cancelled.is_set():
                 raise asyncio.CancelledError()
             try:
-                with workspace_context(self.spec.workspace):
+                with (
+                    workspace_context(self.spec.workspace),
+                    execution_role(self.spec.role),
+                ):
                     return await self._execute()
             finally:
                 await close_all_clients()
@@ -113,6 +118,38 @@ class SubagentFactory:
         self._generation = 0
         self._closed = False
         self._releases: set[asyncio.Task] = set()
+        self._background_slots = threading.BoundedSemaphore(max(1, max_concurrent))
+        self._background_handles: dict[str, SubagentHandle] = {}
+        self._background_lock = threading.Lock()
+
+    def start_background(
+        self, spec: SubagentSpec, execute: Callable[[], Awaitable[Any]]
+    ):
+        """Run background work until completion or an explicit factory shutdown."""
+        if self._closed:
+            raise RuntimeError("Agent factory is closed")
+
+        async def bounded():
+            while not self._background_slots.acquire(blocking=False):
+                await asyncio.sleep(0.01)
+            try:
+                return await execute()
+            finally:
+                self._background_slots.release()
+
+        handle = SubagentHandle(spec, bounded)
+
+        def finished(future):
+            with self._background_lock:
+                self._background_handles.pop(handle.id, None)
+            if not future.cancelled():
+                future.exception()
+
+        with self._background_lock:
+            self._background_handles[handle.id] = handle
+        handle._future.add_done_callback(finished)
+        handle.start()
+        return handle
 
     @property
     def handles(self) -> tuple[SubagentHandle, ...]:
@@ -165,5 +202,16 @@ class SubagentFactory:
         await asyncio.gather(*(handle.close() for handle in handles))
 
     async def close(self) -> None:
+        handles = self.stop()
+        await asyncio.gather(*(handle.close() for handle in handles))
+        await asyncio.gather(*list(self._releases))
+
+    def stop(self) -> tuple[SubagentHandle, ...]:
+        """Close admission and cancel every owned task before awaiting any cleanup."""
         self._closed = True
-        await self.cancel_all()
+        self._generation += 1
+        with self._background_lock:
+            handles = (*self.handles, *self._background_handles.values())
+        for handle in handles:
+            handle.cancel()
+        return handles

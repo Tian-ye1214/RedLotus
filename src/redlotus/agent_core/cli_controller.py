@@ -138,7 +138,7 @@ class AgentCliController:
         self._ready.clear()
         system._session.queue.discard()
         await system.cancel_current_turn()
-        system._spawn_background(system._memory.process_pending(flush=True))
+        system._memory.schedule_processing(flush=True)
         if system._session_key:
             await system.end_session_agents(system._session_key)
         system._task_manager.reset()
@@ -147,6 +147,7 @@ class AgentCliController:
         system._manager_history.reset()
         system._session_logs.reset()
         system._memory.reset_injection_snapshot()
+        system._session.take_notices()
         system._session.queue.discard()
         history.reset()
         clear_context_usage()
@@ -157,7 +158,7 @@ class AgentCliController:
         self.system._context_prewarmed = True
 
     async def prepare_session(self) -> tuple[str, ...]:
-        self.system._spawn_background(self.system._memory.process_pending())
+        self.system._memory.schedule_processing(recover=True)
         print_startup_logo()
         print_repl_welcome()
         app_config.reload_config()

@@ -276,7 +276,6 @@ def migrate_pending_jobs(memory):
                 for index, draft in enumerate(job.result.records)
             ]
             job.bases = {key: records[key] for key in identities if key in records}
-        job.fragments = read(production / f"{job.id}-fragments.json", [])
         if receipt is not None:
             job.done, job.records = True, receipt.get("ids", [])
         memory._save_job(job)

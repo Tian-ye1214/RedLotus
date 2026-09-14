@@ -40,26 +40,26 @@ def test_window_boundary_overlap_flush_and_restart(tmp_path):
     workspace = WorkspaceContext.from_path(tmp_path)
     store = ObservationStore(workspace)
     ids = []
-    for index in range(24):
+    for index in range(19):
         event = store.begin("session", str(index), str(index), [])
         event.status = "success"
         store.finish(event)
         ids.append(event.id)
     assert store.window() is None
-    event = store.begin("session", "24", "24", [])
+    event = store.begin("session", "19", "19", [])
     event.status = "success"
     store.finish(event)
     ids.append(event.id)
     first = store.window()
     assert first.new_turn_ids == ids and not first.overlap_turn_ids
     store.commit(first)
-    for index in range(25, 45):
+    for index in range(20, 40):
         event = store.begin("session", str(index), str(index), [])
         event.status = "success"
         store.finish(event)
         ids.append(event.id)
     second = store.window()
-    assert second.overlap_turn_ids == ids[20:25] and second.new_turn_ids == ids[25:45]
+    assert second.overlap_turn_ids == ids[17:20] and second.new_turn_ids == ids[20:40]
     store.commit(second)
     assert ObservationStore(workspace).window(flush=True) is None
     event = store.begin("session", "last", "last", [])

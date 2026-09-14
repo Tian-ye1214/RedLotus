@@ -598,6 +598,8 @@ class RedLotusTui(App[None]):
         widget.display = False
 
     def refresh_status(self) -> None:
+        if not self.is_running:
+            return
         self.query_one("#status", Static).update(self._status_text())
         controller = self.system._cli_controller
         if controller.last_rejected_input and self._ask_future is None:

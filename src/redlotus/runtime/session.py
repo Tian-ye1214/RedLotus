@@ -73,6 +73,7 @@ class SessionController:
         self.queue = TurnQueue()
         self._turn_lock = asyncio.Lock()
         self._urgent: deque = deque()
+        self._notices: deque = deque()
         self._generation = 0
         self.active = False
         self.accepting_urgent = False
@@ -110,6 +111,14 @@ class SessionController:
         self._urgent.clear()
         return messages
 
+    def add_notice(self, content) -> None:
+        self._notices.append(content)
+
+    def take_notices(self) -> list:
+        notices = list(self._notices)
+        self._notices.clear()
+        return notices
+
     def open_inbox(self) -> None:
         self.accepting_urgent = True
 
@@ -120,3 +129,4 @@ class SessionController:
         self._generation += 1
         self.close_inbox()
         self._urgent.clear()
+        self._notices.clear()

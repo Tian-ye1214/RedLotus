@@ -7,14 +7,18 @@ from pathlib import Path
 import lancedb
 import pytest
 from pydantic_ai.messages import (
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
-    UserPromptPart,
     TextPart,
-    ModelMessagesTypeAdapter,
+    UserPromptPart,
 )
 
-from redlotus.infra.subprocess_runner import run_subprocess
+from redlotus.infra.subprocess_runner import (
+    ensure_execution_environment,
+    get_execution_environment,
+    run_subprocess,
+)
 from redlotus.runtime.context import WorkspaceContext
 from redlotus.tools.memory.migration import migrate_observations
 from redlotus.tools.memory.observations import ObservationStore
@@ -115,6 +119,9 @@ def process_alive(pid):
 
 
 async def test_cancel_terminates_external_process_tree(tmp_path):
+    # Provisioning is covered separately; this deadline measures process-tree cancellation.
+    environment = await asyncio.to_thread(get_execution_environment, cwd=tmp_path)
+    await ensure_execution_environment(environment)
     pid_file = tmp_path / "child.pid"
     script = tmp_path / "parent.py"
     script.write_text(
@@ -126,7 +133,7 @@ async def test_cancel_terminates_external_process_tree(tmp_path):
     )
     task = asyncio.create_task(
         run_subprocess(
-            [sys.executable, str(script), str(pid_file)],
+            [str(environment.python), str(script), str(pid_file)],
             shell=False,
             cwd=str(tmp_path),
             timeout=30,

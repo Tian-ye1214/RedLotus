@@ -25,6 +25,20 @@ class WorkspaceContext:
 _workspace_context: ContextVar[WorkspaceContext | None] = ContextVar(
     "workspace_context", default=None
 )
+_execution_role: ContextVar[str | None] = ContextVar("execution_role", default=None)
+
+
+def current_execution_role() -> str | None:
+    return _execution_role.get()
+
+
+@contextmanager
+def execution_role(role: str):
+    token = _execution_role.set(role)
+    try:
+        yield
+    finally:
+        _execution_role.reset(token)
 
 
 def active_workspace() -> WorkspaceContext | None:

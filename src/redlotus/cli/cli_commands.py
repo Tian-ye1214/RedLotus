@@ -463,7 +463,9 @@ class SlashCommands:
         return None
 
     async def stop(self):
+        active = self.system.has_current_turn
         msg = await self.system.cancel_current_turn()
+        self.system.record_control_result("stop", "current_turn", "cancelled" if active else "not_running", accepted=active)
         _out(msg)
         return None
 
@@ -477,6 +479,7 @@ class SlashCommands:
                 return None
             aid = self.parts[2].strip()
             n = await self.system.registry.cancel_agent(aid)
+            self.system.record_control_result("cancel_agent", aid, "cancellation_requested" if n else "not_running", accepted=bool(n))
             if n:
                 print_success(f"已请求取消 agent_id={aid!r} 的当前 invocation。")
             else:
@@ -485,11 +488,13 @@ class SlashCommands:
         iid = self.parts[1].strip()
         n_match = await self.system.registry.count_active_invocation_prefix_matches(iid)
         if n_match > 1:
+            self.system.record_control_result("cancel", iid, "ambiguous", accepted=False)
             print_warning(f"前缀 {iid!r} 匹配到多个活跃 invocation，请使用更长的 id。")
             return None
         resolved = await self.system.registry.resolve_active_invocation_id(iid)
         ok = await self.system.registry.cancel(iid)
         if ok:
+            self.system.record_control_result("cancel", resolved or iid, "cancellation_requested", accepted=True)
             print_success(f"已请求取消 invocation_id={(resolved or iid)!r}。")
             return None
         sk = getattr(self.system, "session_key", None)
@@ -498,11 +503,13 @@ class SlashCommands:
                 sk, iid
             )
             if recent is not None:
+                self.system.record_control_result("cancel", recent.invocation_id, recent.state.value, accepted=False)
                 print_warning(
                     f"invocation {iid!r} 已在近期历史中结束"
                     f"（state={recent.state.value}），无法取消。"
                 )
                 return None
+        self.system.record_control_result("cancel", iid, "not_found", accepted=False)
         print_warning(f"未找到活跃 invocation_id={iid!r}（支持 UUID 前缀匹配）。")
         return None
 
@@ -516,7 +523,7 @@ class SlashCommands:
         render = _format_ltm_snapshot if global_scope else _format_stm_snapshot
         action = self.parts[1].lower() if len(self.parts) > 1 else "show"
         if action == "retry":
-            await memory.process_pending(flush=True, recover=True)
+            memory.schedule_processing(flush=True, recover=True)
         elif action == "show":
             print_markdown_panel(render(await snapshot()), title=label)
         elif action == "clear":

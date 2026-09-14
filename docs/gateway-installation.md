@@ -48,11 +48,11 @@ Windows 默认目录为 `%LOCALAPPDATA%\RedLotus`；其他平台通过 `platform
 
 模型请求参数在 `models` 或 `model_presets` 中设置；通用网关设置在 `model_gateway`，连接超时使用 `MODEL_HTTP_TIMEOUT` 与网关的可选覆盖。RAG 模型名称、连接、批量与检索设置分别由 `RAG_models`、`rag_service`、`short_term_memory` 和 `long_term_memory` 提供。工厂把复制后的配置交给 SDK，协议编码不修改用户的采样和输出预算。
 
-上下文压缩使用 `compressor`。感知是独立的子 Agent 任务，默认由 `memory_perception.model_role` 选择 `worker`，使用该角色的模型、输出上限与附件限制；其并发由 `memory_perception.max_concurrent` 控制。记忆的窗口、重叠和分批预算也由该段配置管理。
+上下文压缩使用 `compressor`。感知是独立的子 Agent 任务，默认由 `memory_perception.model_role` 选择 `worker`，使用该角色的模型、输出上限与附件限制；其并发由 `memory_perception.max_concurrent` 控制。记忆的窗口、重叠和证据读取预算也由该段配置管理。
 
 会话 system prompt 完整包含通用约束、系统环境、Skills 目录与摘要、角色职责、项目和核心记忆。它在会话内固定；当前时间追加到新输入的运行元数据中。Skills 通过工具逐步读取指令、资源和脚本。摘要带独立的来源标记，即使 SDK 合并消息也能在恢复会话时识别；记忆写入、纠正和清空通过后续结果告知模型，不重写已缓存的系统前缀。
 
-缓存验收使用服务返回的输入命中与未命中 token，包含正常完成的主 Agent、子 Agent、压缩与感知调用。冷启动和压缩产生的未命中照常计入；缺失用量或取消的调用单独说明，不能把估算值当成真实计量。
+缓存验收使用服务返回的输入命中与未命中 token。主 Agent 与普通任务子 Agent 合计要求大于 90%；压缩和感知单独报告。首次冷请求和压缩后重建上下文的未命中照常计入；缺失用量或取消的调用单独说明，不能把估算值当成真实计量。
 
 ## 外部资源与打包
 
@@ -77,4 +77,4 @@ Windows 默认目录为 `%LOCALAPPDATA%\RedLotus`；其他平台通过 `platform
 
 `scripts/real_acceptance.py --root <新的测试目录>` 覆盖六类场景；`scripts/real_soak.py --root <新的测试目录>` 连续运行至少两小时、200 个用户回合。测试依赖包含开发 extra、浏览器 extra 和 `psutil`。Windows 原生 CLI/TUI 验收脚本 `scripts/installed_entry_acceptance.py` 另需 `pywinpty`、`pyte`，并通过 `--executable` 指定安装后的入口或冻结程序。
 
-报告中的缓存比例使用服务返回的缓存命中 token 除以全部输入 token，包含首次冷请求；没有返回缓存用量的协议显示为未测量。运行及退出阶段的非预期 WARNING/ERROR、记忆未处理完或子 Agent 未释放，均应判为失败。测试完成后可以保留报告、请求统计和终端证据，删除生成的打包目录。
+报告中的缓存比例使用服务返回的缓存命中 token 除以全部输入 token，包含首次冷请求；没有返回缓存用量的协议显示为未测量。运行阶段的非预期 WARNING/ERROR 或任务资源未释放应判为失败。用户退出时允许取消尚未完成的记忆生产，但必须保留可恢复窗口、不误推进完成位置，并验证下次启动可以继续处理。测试完成后可以保留报告、请求统计和终端证据，删除生成的打包目录。

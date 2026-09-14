@@ -1,9 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
+import threading
 
 from redlotus.infra.shared_http import close_all_clients
+
+
+class ExitDeadline:
+    """Bound process exit even when a native call ignores task cancellation."""
+
+    def __init__(self, seconds: float):
+        self._timer = threading.Timer(seconds, os._exit, args=(0,))
+        self._timer.daemon = True
+
+    def start(self):
+        self._timer.start()
+
+    def close(self):
+        self._timer.cancel()
 
 
 def install_stop_handlers(stop_event: asyncio.Event) -> None:
@@ -20,13 +36,14 @@ def install_stop_handlers(stop_event: asyncio.Event) -> None:
             signal.signal(sig, request_stop)
 
 
-async def run_cli() -> None:
+async def run_cli(system=None):
     """Run the interactive RedLotus CLI/TUI."""
-    from redlotus.config.app_config import initialize_config
     from redlotus.agent_core.system import AgentSystem
+    from redlotus.config.app_config import initialize_config
 
-    initialize_config()
-    system = AgentSystem()
+    if system is None:
+        initialize_config()
+        system = AgentSystem()
     stop_event = asyncio.Event()
     install_stop_handlers(stop_event)
     try:
@@ -34,8 +51,18 @@ async def run_cli() -> None:
     finally:
         await system.shutdown()
         await close_all_clients()
+    return system
 
 
 def main() -> None:
     """CLI entrypoint used by root ``main.py``."""
-    asyncio.run(run_cli())
+    from redlotus.agent_core.system import AgentSystem
+    from redlotus.config.app_config import initialize_config, settings
+
+    initialize_config()
+    deadline = ExitDeadline(settings()["lifecycle"]["shutdown_grace_seconds"])
+    system = AgentSystem(exit_deadline=deadline)
+    try:
+        asyncio.run(run_cli(system))
+    finally:
+        deadline.close()

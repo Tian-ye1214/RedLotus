@@ -4,16 +4,16 @@ import hashlib
 
 from filelock import FileLock, Timeout
 
+from redlotus.config.app_config import settings
+from redlotus.infra.paths import migrate_project_data, project_data_dir
 from redlotus.infra.persist_utils import (
-    file_lock,
-    save_locked_json,
     atomic_write_json,
+    file_lock,
     iso_utc_now,
     read_locked_json,
+    save_locked_json,
 )
 from redlotus.runtime.context import WorkspaceContext
-from redlotus.infra.paths import project_data_dir, migrate_project_data
-from redlotus.config.app_config import settings
 from redlotus.tools.memory.models import ObservedTurn, WindowManifest
 
 
@@ -86,9 +86,20 @@ class ObservationStore:
         return read_locked_json(self.order_path) if self.order_path.exists() else []
 
     def cursor(self) -> int:
-        if not self.cursor_path.exists():
-            return 0
-        return int(read_locked_json(self.cursor_path)["consumed"])
+        return int(self._state().get("consumed", 0))
+
+    def _state(self) -> dict:
+        return read_locked_json(self.cursor_path) if self.cursor_path.exists() else {}
+
+    def reserved_cursor(self) -> int:
+        state = self._state()
+        return max(state.get("consumed", 0), state.get("reserved", 0))
+
+    def reserve(self, window: WindowManifest) -> None:
+        with file_lock(self.cursor_path):
+            state = self._state()
+            state["reserved"] = max(state.get("reserved", 0), window.end_position)
+            atomic_write_json(self.cursor_path, state)
 
     def read(self, ids: list[str]) -> list[ObservedTurn]:
         return [
@@ -97,11 +108,17 @@ class ObservationStore:
         ]
 
     def window(
-        self, *, flush: bool = False, migration: bool = False
+        self,
+        *,
+        flush: bool = False,
+        migration: bool = False,
+        through: int | None = None,
+        start: int | None = None,
     ) -> WindowManifest | None:
-        order, cursor = self.order(), self.cursor()
+        order = self.order()[:through]
+        cursor = self.cursor() if start is None else start
         overlap = order[max(0, cursor - self.overlap_turns) : cursor]
-        needed = self.window_turns - len(overlap)
+        needed = self.window_turns
         fresh = order[cursor : cursor + needed]
         if not fresh or (len(fresh) < needed and not flush):
             return None
@@ -128,9 +145,11 @@ class ObservationStore:
         )
 
     def commit(self, window: WindowManifest) -> None:
-        save_locked_json(
-            self.cursor_path, dict(consumed=window.end_position, last_window=window.id)
-        )
+        with file_lock(self.cursor_path):
+            state = self._state()
+            if state.get("consumed", 0) < window.end_position:
+                state.update(consumed=window.end_position, last_window=window.id)
+                atomic_write_json(self.cursor_path, state)
 
     def recover(self) -> None:
         """Recover ended turns and released crash claims without inventing successful outcomes."""
