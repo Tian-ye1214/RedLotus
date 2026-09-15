@@ -14,9 +14,19 @@ def gate(monkeypatch):
     return importlib.import_module("verify_usage")
 
 
-@pytest.mark.parametrize("workers,executed", [(1, True), (2, True), (1, False)])
+@pytest.mark.parametrize(
+    "workers,command",
+    [
+        (1, "python WorkDatabase/summary.py"),
+        (2, "python WorkDatabase/summary.py"),
+        (1, ""),
+        (1, "echo summary.py"),
+        (1, "type WorkDatabase/summary.py"),
+        (1, "python -c \"print('summary.py')\""),
+    ],
+)
 def test_delivery_requires_one_worker_and_successful_program_execution(
-    gate, tmp_path, workers, executed
+    gate, tmp_path, workers, command
 ):
     directory = tmp_path / "sessions/project"
     directory.mkdir(parents=True)
@@ -29,17 +39,17 @@ def test_delivery_requires_one_worker_and_successful_program_execution(
                         part_kind="tool-return",
                         tool_name="run_command",
                         tool_call_id=f"run-{index}",
-                        content="Return code: 0\nCommand: python WorkDatabase/summary.py\n",
+                        content=f"Return code: 0\nCommand: {command}\n",
                     )
                 ]
-                if executed
+                if command
                 else []
             ),
         )
         (directory / f"worker_{index}.jsonl").write_text(
             json.dumps(row), encoding="utf-8"
         )
-    if workers == 1 and executed:
+    if workers == 1 and command == "python WorkDatabase/summary.py":
         result = gate.delivery_evidence(tmp_path, "delivery")
         assert result["worker_ids"] == ["worker-0"]
         assert set(result["command_receipts"]) == {"run-0"}

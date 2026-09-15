@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import sys
 import time
 from copy import deepcopy
@@ -66,6 +67,30 @@ def configure(args):
     )
 
 
+def runs_summary(content, root):
+    metadata = content.split("\nstdout:\n", 1)[0]
+    command = next(
+        (
+            line.removeprefix("Command: ")
+            for line in metadata.splitlines()
+            if line.startswith("Command: ")
+        ),
+        "",
+    )
+    args = [part.strip("\"'") for part in shlex.split(command, posix=False)]
+    if len(args) < 2:
+        return False
+    program = Path(args[0].replace("\\", "/")).name.lower()
+    script = Path(args[1].replace("\\", "/"))
+    if not script.is_absolute():
+        script = root / "project" / script
+    return (
+        "Return code: 0" in metadata.splitlines()
+        and program in {"python", "python.exe", "python3", "python3.exe"}
+        and script.resolve() == (root / "project/WorkDatabase/summary.py").resolve()
+    )
+
+
 def delivery_evidence(root, turn_id):
     workers, executions = set(), {}
     for path in (root / "sessions").glob("*/worker_*.jsonl"):
@@ -80,11 +105,7 @@ def delivery_evidence(root, turn_id):
                     and part["tool_name"] == "run_command"
                 ):
                     content = part["content"]
-                    if (
-                        isinstance(content, str)
-                        and re.search(r"^Return code: 0$", content, re.MULTILINE)
-                        and re.search(r"^Command: .*summary\.py", content, re.MULTILINE)
-                    ):
+                    if isinstance(content, str) and runs_summary(content, root):
                         executions[part["tool_call_id"]] = content
     assert len(workers) == 1, f"Expected exactly one Worker invocation, found {workers}"
     assert executions, "The Worker did not actually run summary.py successfully"
