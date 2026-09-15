@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
     ModelRequest,
@@ -10,10 +12,12 @@ from pydantic_ai.messages import (
     TextPart,
     UserPromptPart,
 )
-from pydantic_ai.models.function import FunctionModel, DeltaToolCall
+from pydantic_ai.models.function import FunctionModel, DeltaToolCall, DeltaThinkingPart
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.usage import UsageLimits
 
 from redlotus.agent_core.runner import AgentRunner
+from redlotus.ModelGateway.agent_factory import create_agent, create_function_toolset
 from redlotus.tools.memory.chat_history import messages_safe_for_new_prompt
 
 
@@ -106,3 +110,85 @@ def test_retry_closes_tool_call():
         ModelResponse(parts=[TextPart("done")]),
     ]
     assert messages_safe_for_new_prompt(messages) == messages
+
+
+async def test_thinking_only_after_tools_fails_then_resumes_without_repeating_tools():
+    calls = []
+    requests = []
+
+    async def write_artifact() -> str:
+        calls.append("written")
+        return "artifact saved; verification passed"
+
+    async def model(messages, info):
+        requests.append(list(messages))
+        if len(requests) == 1:
+            yield "I will write the artifact now."
+            yield {
+                0: DeltaToolCall(
+                    name="write_artifact", json_args="{}", tool_call_id="write"
+                )
+            }
+        elif len(requests) == 2:
+            yield {0: DeltaThinkingPart(content="...", signature=None)}
+        else:
+            yield "The artifact was saved and verified."
+
+    agent = create_agent(
+        FunctionModel(stream_function=model),
+        toolsets=[create_function_toolset([write_artifact])],
+    )
+    saved = []
+
+    async def on_node(run):
+        saved[:] = run.all_messages()
+
+    with pytest.raises(UnexpectedModelBehavior):
+        await AgentRunner().run(
+            agent=agent,
+            prompt="Write and verify the artifact, then report the outcome.",
+            message_history=[],
+            usage_limits=UsageLimits(),
+            on_node=on_node,
+        )
+    assert calls == ["written"]
+    assert len(requests) == 2
+    assert saved[-1].metadata["status"] == "failed"
+    result = await AgentRunner().run(
+        agent=agent,
+        prompt="Continue with the final report using the existing results.",
+        message_history=saved,
+        usage_limits=UsageLimits(),
+    )
+    assert result.output == "The artifact was saved and verified."
+    assert calls == ["written"]
+    assert len(requests) == 3
+    assert any(
+        isinstance(part, ToolReturnPart) and part.tool_call_id == "write"
+        for message in requests[2]
+        for part in message.parts
+    )
+
+
+async def test_thinking_only_cannot_reuse_a_previous_turn_as_success():
+    async def model(messages, info):
+        yield {0: DeltaThinkingPart(content="...", signature=None)}
+
+    history = [
+        ModelRequest(parts=[UserPromptPart("Earlier task")]),
+        ModelResponse(parts=[TextPart("Earlier task completed.")]),
+    ]
+    saved = []
+
+    async def on_node(run):
+        saved[:] = run.all_messages()
+
+    with pytest.raises(UnexpectedModelBehavior):
+        await AgentRunner().run(
+            agent=create_agent(FunctionModel(stream_function=model)),
+            prompt="A different task",
+            message_history=history,
+            usage_limits=UsageLimits(),
+            on_node=on_node,
+        )
+    assert saved[-1].metadata["status"] == "failed"

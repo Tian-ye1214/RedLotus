@@ -84,6 +84,41 @@ async def test_system_serializes_turns_freezes_session_memory_and_records_raw(
     await system.shutdown()
 
 
+async def test_missing_current_reply_is_recorded_as_a_failed_turn(tmp_path, monkeypatch):
+    import pytest
+    from pydantic_ai.exceptions import UnexpectedModelBehavior
+    from pydantic_ai.models.function import DeltaThinkingPart
+    from redlotus.ModelGateway.agent_factory import create_agent
+
+    system = configured_system(tmp_path, monkeypatch)
+    requests = 0
+
+    async def model(messages, info):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            yield "Earlier task completed."
+        else:
+            yield {0: DeltaThinkingPart(content="...", signature=None)}
+
+    async def create(*args, **kwargs):
+        return create_agent(FunctionModel(stream_function=model))
+
+    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    history = ChatHistory()
+    try:
+        await system.run_agent_system(UserMessage(text="Earlier task"), history)
+        with pytest.raises(UnexpectedModelBehavior):
+            await system.run_agent_system(UserMessage(text="Different task"), history)
+        events = system._memory.observations.read(system._memory.observations.order())
+        assert [event.status for event in events] == ["success", "failed"]
+        assert events[-1].error
+        assert history.messages[-1].metadata["status"] == "failed"
+        assert requests == 2
+    finally:
+        await system.shutdown()
+
+
 async def test_shutdown_drains_resources_when_the_first_waiter_is_cancelled(
     tmp_path, monkeypatch
 ):

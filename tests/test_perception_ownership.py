@@ -110,7 +110,8 @@ print('UNEXPECTED_NORMAL_RETURN', flush=True)
         capture_output=True,
         text=True,
         encoding="utf-8",
-        timeout=20,
+        # Startup imports are outside the exit deadline asserted below.
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
     exit_at = next(

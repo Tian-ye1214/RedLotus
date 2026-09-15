@@ -7,6 +7,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
+from typing import Literal
 
 from pydantic_ai import ModelRetry, ToolReturn, capture_run_messages
 from pydantic_ai.capabilities import AbstractCapability
@@ -132,13 +133,18 @@ class MemoryPerception:
             }
             references_by_id = {ref.id: ref for ref in references}
 
-            async def search(query, scope):
+            async def search(query, scope, *, episodes_only=False):
                 rows = await store.search(query, scope)
-                if scope == "project":
+                if episodes_only:
                     rows = [row for row in rows if row.kind == "episode"]
                 existing.update((row.id, row) for row in rows)
                 searches.append(
-                    dict(query=query, scope=scope, ids=[row.id for row in rows])
+                    dict(
+                        query=query,
+                        scope=scope,
+                        kind="episode" if episodes_only else None,
+                        ids=[row.id for row in rows],
+                    )
                 )
                 if on_search:
                     on_search(rows, searches[-1])
@@ -148,6 +154,9 @@ class MemoryPerception:
                             key: row.model_dump()[key]
                             for key in (
                                 "id",
+                                "scope",
+                                "kind",
+                                "origin",
                                 "subject",
                                 "goal",
                                 "status",
@@ -162,23 +171,36 @@ class MemoryPerception:
 
             async def search_episodes(query: str) -> dict:
                 """Search existing episodes in this project before proposing a memory change."""
-                return await search(query, "project")
+                return await search(query, "project", episodes_only=True)
 
-            async def search_memory(query: str) -> dict:
-                """Search the owner's global preferences and reusable semantic memory."""
-                return await search(query, "global")
+            async def search_memory(
+                query: str, scope: Literal["project", "global"] = "global"
+            ) -> dict:
+                """Search all memory kinds, including requested facts, in the selected scope."""
+                return await search(query, scope)
 
             async def read_memory(id: str) -> dict:
-                """Read a complete retrieved memory before updating it, preserving still-valid facts."""
+                """Read a known permitted memory ID, including an explicitly supplied project record."""
                 if id not in existing:
-                    raise ModelRetry("先检索得到记录 ID，再读取对应记忆。")
+                    try:
+                        row = await asyncio.to_thread(store.get, id)
+                    except (KeyError, ValueError) as exc:
+                        raise ModelRetry("该记录不存在或不属于当前授权范围。") from exc
+                    existing[id] = row
+                    if on_search:
+                        on_search(
+                            [row],
+                            dict(operation="read", query=id, scope=row.scope, ids=[id]),
+                        )
                 return existing[id].model_dump(mode="json")
 
             async def read_episode(id: str) -> dict:
                 """Read a complete project episode obtained through search_episodes."""
                 row = await read_memory(id)
                 if row["scope"] != "project" or row["kind"] != "episode":
-                    raise ModelRetry("该 ID 不是当前项目的情景记忆。")
+                    raise ModelRetry(
+                        "该 ID 不是项目情景；主动记忆或语义记忆请使用 read_memory。"
+                    )
                 return row
 
             async def read_evidence(id: str, start: int = 0) -> dict:
@@ -216,11 +238,23 @@ class MemoryPerception:
                     raise ModelRetry(
                         "正式提交记忆变更前，先调用 search_episodes 或 search_memory 查询已有记录，避免重复入库。"
                     )
-                if {row.scope for row in result.records} - {
-                    row["scope"] for row in searches
-                }:
+                if any(
+                    not any(
+                        query["scope"] == row.scope
+                        and query["kind"]
+                        in (
+                            None,
+                            "requested"
+                            if payload["mode"] == "explicit_request"
+                            else row.kind,
+                        )
+                        for query in searches
+                    )
+                    for row in result.records
+                ):
                     raise ModelRetry(
-                        "项目变更先检索项目情景，全局变更先检索全局记忆；不能用另一范围的查询代替。"
+                        "项目情景用 search_episodes；项目主动记忆用 search_memory(scope='project')；"
+                        "全局变更用 search_memory(scope='global')。不能用另一范围的查询代替。"
                     )
                 allowed = [
                     row
