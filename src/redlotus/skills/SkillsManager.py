@@ -165,14 +165,14 @@ class SkillsManager:
                 str(script),
                 *shlex.split(args),
             ]
-            stdout, stderr, code = await run_subprocess(
+            result = await run_subprocess(
                 command,
                 shell=False,
                 cwd=str(self.skills[skill_name].path),
                 timeout=timeout,
                 workspace=self.workspace,
             )
-            return f"返回码: {code}\n输出:\n{stdout}{stderr}"
+            return result.to_text()
         except subprocess.TimeoutExpired:
             return f"Error: Skill script timed out ({timeout} seconds)"
         except (KeyError, OSError, ValueError) as exc:

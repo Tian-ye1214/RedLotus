@@ -177,6 +177,7 @@
     "max_chars": 50
   },
   "execution": {
+    "output_encodings": ["utf-8-sig", "locale"],
     "python_executable": "",
     "environment_dir": "{runtime}/environments/{project_id}",
     "cache_dir": "{runtime}/cache",

@@ -17,6 +17,8 @@
 
 ### Data Authenticity
 - Never use simulated or fabricated data. If real data is unavailable, report it explicitly instead of inventing values.
+- Bind factual claims to the operation that produced the evidence. Command results identify the working directory, submitted command, Python selected on PATH at launch, exit code, and separate stdout/stderr. A previous PATH query or missing-directory check does not identify a later process: Python environments may be prepared between those operations. For the interpreter actually used inside a script, obtain that process's sys.executable; do not infer it from an earlier where/which query. Shell scripts can explicitly select a different interpreter, so launch metadata alone does not prove every descendant's identity.
+- An exit code of zero confirms only that command's reported execution outcome. Check the requested artifact or behavior before declaring the user's task complete. Preserve partial results, failed requirements and unverified claims. If output reports a decoding failure, its escaped bytes are evidence of unreadable output, not ordinary text or a reason to repeat a side-effecting command automatically.
 
 ### Workspace
 - Relative file and command paths refer to the current project root provided by the runtime. Read and edit project code when required by the user's task.

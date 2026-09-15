@@ -69,13 +69,13 @@ class OfficeConverter:
                 str(profile_root),
                 str(working),
             ]
-            stdout, stderr, code = await run_subprocess(
+            result = await run_subprocess(
                 args, shell=False, cwd=str(profile_root), timeout=120
             )
             output = profile_root / (source.stem + "." + target_format.split(":")[0])
-            if code != 0 or not output.is_file():
+            if result.returncode != 0 or not output.is_file():
                 raise ValueError(
-                    f"Office 转换失败 ({source.name}, exit {code})：{stdout}\n{stderr}"
+                    f"Office 转换失败 ({source.name})：{result.to_text()}"
                 )
             target = directory / output.name
             shutil.copyfile(output, target)

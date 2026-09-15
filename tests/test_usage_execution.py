@@ -109,10 +109,11 @@ async def test_non_python_command_does_not_resolve_or_create_python(
         if sys.platform == "win32"
         else ["echo", "audit-ok"]
     )
-    out, err, code = await runner.run_subprocess(
+    result = await runner.run_subprocess(
         command, shell=False, cwd=str(tmp_path), timeout=5
     )
-    assert code == 0 and "audit-ok" in out
+    assert result.returncode == 0 and "audit-ok" in result.stdout
+    assert result.python_on_path is None
     assert not (tmp_path / "env").exists()
 
 

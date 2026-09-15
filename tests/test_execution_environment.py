@@ -36,8 +36,8 @@ async def test_first_environment_creation_can_be_cancelled_and_retried(tmp_path)
         first.cancel()
         await asyncio.gather(first, return_exceptions=True)
         assert time.monotonic() - started < 3
-        stdout, stderr, code = await factory.run(spec, run)
-        assert code == 0 and "ready" in stdout, stderr
+        result = await factory.run(spec, run)
+        assert result.returncode == 0 and "ready" in result.stdout, result.stderr
     finally:
         await factory.close()
 
@@ -65,18 +65,18 @@ async def test_python_command_is_provisioned_in_the_configured_project_environme
         subprocess_runner, "_execution_config", lambda: _config(runtime)
     )
 
-    stdout, stderr, code = await subprocess_runner.run_subprocess(
+    result = await subprocess_runner.run_subprocess(
         ["python", "-c", "import sys; print(sys.prefix); print(sys.executable)"],
         shell=False,
         cwd=str(tmp_path),
         timeout=120,
     )
 
-    assert code == 0, stderr
+    assert result.returncode == 0, result.stderr
     environment = subprocess_runner.get_execution_environment(cwd=tmp_path)
-    assert str(environment.root) in stdout
+    assert str(environment.root) in result.stdout
     assert environment.root.is_dir()
-    assert str(Path(sys.executable).parent) not in stdout
+    assert str(Path(sys.executable).parent) not in result.stdout
 
 
 def test_environment_only_inherits_allowlisted_values_and_keeps_explicit_overrides(
@@ -185,12 +185,14 @@ async def test_skill_scripts_delegate_bare_python_to_the_shared_runner(
     calls = {}
 
     async def run(args, **kwargs):
+        from redlotus.infra.subprocess_runner import CommandResult
+
         calls["args"] = args
         calls["kwargs"] = kwargs
-        return "ok", "", 0
+        return CommandResult("ok", "", 0, tuple(args), kwargs["cwd"])
 
     monkeypatch.setattr(skills_module, "run_subprocess", run)
-    assert "返回码: 0" in await manager.execute_skill_script("demo", "check.py")
+    assert "Return code: 0" in await manager.execute_skill_script("demo", "check.py")
     assert calls["args"][0] == "python"
     assert calls["kwargs"]["workspace"].project_id == manager.workspace.project_id
 
@@ -206,9 +208,11 @@ async def test_clawhub_command_passes_only_explicit_environment_override(
     calls = {}
 
     async def run(args, **kwargs):
+        from redlotus.infra.subprocess_runner import CommandResult
+
         calls["args"] = args
         calls["kwargs"] = kwargs
-        return "", "", 0
+        return CommandResult("", "", 0, args, kwargs["cwd"])
 
     monkeypatch.setattr(basic_tools, "run_subprocess", run)
     monkeypatch.setenv("UNLISTED_SECRET", "must-not-reach-child")

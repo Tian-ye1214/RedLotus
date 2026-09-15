@@ -406,8 +406,10 @@ class AgentSystem:
             try:
                 if references is not None:
                     message.references = await references
+                if not self._session.accepts(admission):
+                    return None
                 await store.prepare_message(message)
-                return message
+                return message if self._session.accepts(admission) else None
             except (OSError, ValueError) as exc:
                 if self._session.accepts(admission):
                     self._cli_controller.last_rejected_input = "/urgent " + (

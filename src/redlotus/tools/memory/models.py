@@ -24,7 +24,10 @@ class MemoryContent(BaseModel):
     attempts: list[str] = Field(default_factory=list)
     result: str = ""
     unresolved: list[str] = Field(default_factory=list)
-    status: Outcome = "unverified"
+    status: Outcome = Field(
+        default="unverified",
+        description="Outcome of the user's goal, not the completion of an Agent turn. Required steps still failed or unverified cannot be success.",
+    )
     source_turn_ids: list[str] = Field(default_factory=list)
     reference_ids: list[str] = Field(default_factory=list)
 

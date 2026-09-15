@@ -128,7 +128,9 @@ async def test_cancel_terminates_external_process_tree(tmp_path):
         "import subprocess,sys,time,os\nfrom pathlib import Path\n"
         "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
         "creationflags=subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0)\n"
-        "Path(sys.argv[1]).write_text(str(os.getpid())+','+str(child.pid))\nchild.wait()\n",
+        "ready=Path(sys.argv[1]); temporary=ready.with_suffix('.tmp')\n"
+        "temporary.write_text(str(os.getpid())+','+str(child.pid))\n"
+        "temporary.replace(ready)\nchild.wait()\n",
         encoding="utf-8",
     )
     task = asyncio.create_task(

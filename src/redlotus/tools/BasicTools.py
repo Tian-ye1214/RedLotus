@@ -383,6 +383,10 @@ class BasicToolkit:
     async def run_command(self, command: str, timeout: int = 60) -> str:
         """
         Execute a Shell/terminal command.
+        Python and pip commands automatically prepare/reuse the configured project
+        environment; bare python/pip use it. A missing environment before the first
+        command is expected. Run the requested command directly: no manual venv
+        activation, framework-source inspection or host installation is needed.
         Parameters:
             command: Command to execute
             timeout: Timeout in seconds, defaults to 60
@@ -421,7 +425,7 @@ class BasicToolkit:
 
                 shell = use_shell or _platform.system() == "Windows"
                 args = command if shell else shlex.split(command)
-                stdout, stderr, return_code = await run_subprocess(
+                result = await run_subprocess(
                     args,
                     shell=shell,
                     cwd=cwd,
@@ -429,12 +433,7 @@ class BasicToolkit:
                     timeout=timeout,
                     workspace=self.workspace,
                 )
-                output = stdout + stderr
-                return (
-                    f"Return code: {return_code}\nOutput:\n{output}"
-                    if output
-                    else f"Execution completed, return code: {return_code}"
-                )
+                return result.to_text()
         except subprocess.TimeoutExpired:
             return f"Error: Command execution timed out ({timeout} seconds)"
         except Exception as e:

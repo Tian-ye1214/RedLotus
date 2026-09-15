@@ -10,7 +10,9 @@ class SubagentResult(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    status: Literal["success", "failed", "cancelled", "needs_input"]
+    status: Literal["success", "failed", "cancelled", "needs_input"] = Field(
+        description="Outcome of the whole delegated goal. If a required step failed and remains unresolved, use failed; preserve successful substeps in summary.",
+    )
     summary: str = Field(min_length=1)
     artifacts: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)

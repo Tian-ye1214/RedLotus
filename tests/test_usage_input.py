@@ -13,6 +13,50 @@ from test_entries import configure_cli_hooks
 from test_system import configured_system
 
 
+async def test_expired_urgent_does_not_capture_attachments_after_slow_parse(
+    tmp_path, monkeypatch
+):
+    import io
+    from PIL import Image
+    from pydantic_ai.messages import BinaryContent
+    from redlotus.agent_core.input_messages import UserMessage
+
+    system = configured_system(tmp_path, monkeypatch)
+    parsing, release = asyncio.Event(), asyncio.Event()
+    picture = io.BytesIO()
+    Image.new("RGB", (2, 2), "blue").save(picture, format="PNG")
+    store = system._toolkit._references
+
+    async def parse():
+        parsing.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+        return []
+
+    try:
+        async with system._session.turn("old task"):
+            message = UserMessage(
+                text="old",
+                attachments=[
+                    BinaryContent(data=picture.getvalue(), media_type="image/png")
+                ],
+            )
+            await system.add_urgent_message(
+                message, references=asyncio.create_task(parse())
+            )
+            await parsing.wait()
+            preparations = tuple(system._session._preparations)
+            system._session.reset(discard=True)
+            release.set()
+            await asyncio.gather(*preparations, return_exceptions=True)
+        assert not list((store.root / "manifests").glob("*.json"))
+    finally:
+        release.set()
+        await system.shutdown()
+
+
 async def test_slow_urgent_keeps_submission_order_through_final_response(
     tmp_path, monkeypatch
 ):

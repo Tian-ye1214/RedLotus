@@ -1,7 +1,9 @@
 """Shared subprocess execution and the configured project Python environment."""
 
 import asyncio
+import codecs
 import json
+import locale
 import os
 import platform as _platform
 import re
@@ -11,7 +13,7 @@ import signal
 import subprocess
 import sys
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 _SEPARATORS = {";", "&", "&&", "|", "||", "\n"}
@@ -41,6 +43,36 @@ class ExecutionEnvironment:
     cache: Path
     variables: dict[str, str] = field(repr=False)
     base_command: tuple[str, ...] = field(default_factory=tuple, repr=False)
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """The process outcome and launch context; neither implies task completion."""
+
+    stdout: str
+    stderr: str
+    returncode: int | None
+    command: str | tuple[str, ...]
+    cwd: str
+    python_on_path: str | None = None
+    output_decoded: bool = True
+
+    def to_text(self) -> str:
+        context = [
+            f"Return code: {self.returncode}",
+            f"Working directory: {self.cwd}",
+            f"Command: {self.command}",
+        ]
+        if self.python_on_path:
+            context.append(f"Python on PATH: {self.python_on_path}")
+        if not self.output_decoded:
+            context.insert(
+                0,
+                "Error: command output could not be decoded; execution is not verified.",
+            )
+        return "\n".join(
+            [*context, f"stdout:\n{self.stdout}", f"stderr:\n{self.stderr}"]
+        )
 
 
 def _execution_config() -> dict:
@@ -301,7 +333,7 @@ async def ensure_execution_environment(environment: ExecutionEnvironment) -> Non
         bootstrap_env["PATH"] = os.environ.get("PATH", "")
         for command, next_state in steps:
             try:
-                stdout, stderr, code = await _run_owned_process(
+                result = await _run_owned_process(
                     command,
                     shell=False,
                     cwd=str(environment.workspace_root),
@@ -310,10 +342,8 @@ async def ensure_execution_environment(environment: ExecutionEnvironment) -> Non
                 )
             except subprocess.TimeoutExpired as exc:
                 raise TimeoutError(f"创建项目 Python 环境超时（{timeout} 秒）") from exc
-            if code:
-                raise RuntimeError(
-                    f"创建项目 Python 环境失败（返回码 {code}）: {(stderr or stdout).strip()}"
-                )
+            if result.returncode or not result.output_decoded:
+                raise RuntimeError(f"创建项目 Python 环境失败: {result.to_text()}")
             if not environment.python.is_file():
                 raise RuntimeError(
                     f"Python 环境创建后未找到解释器: {environment.python}"
@@ -399,6 +429,7 @@ def describe_execution_environment(
             f"Environment: {environment.root}",
             f"Environment state: {state}",
             f"Environment ready: {'yes' if state == 'ready' else 'no'}",
+            "Python/pip commands automatically prepare or reuse this environment; no manual activation is needed.",
             f"Cache: {environment.cache}",
         )
     )
@@ -763,14 +794,11 @@ async def run_subprocess(
     env: dict | None = None,
     timeout: float,
     workspace=None,
-) -> tuple[str, str, int | None]:
-    """跑子进程并返回 (stdout, stderr, returncode)；取消或超时都会杀掉整棵进程树。
-
-    取代 asyncio.to_thread(subprocess.run, ...)——后者在任务被取消时既不中断阻塞线程、
-    也不杀子进程，会留下孤儿进程与卡死的线程池槽位。
-    """
+) -> CommandResult:
+    """Run a command with its launch evidence, reclaiming owned processes on cancellation."""
     await asyncio.to_thread(validate_agent_command, args, cwd=cwd)
     configured = await asyncio.to_thread(_execution_config)
+    python_on_path = None
     if configured:
         python_required = any(
             _program_name(values[0]) in _PYTHON_NAMES | _PY_LAUNCHER_NAMES | _PIP_NAMES
@@ -787,14 +815,35 @@ async def run_subprocess(
         validate_pip_command(args, selected_python=environment.python)
         if python_required:
             await ensure_execution_environment(environment)
+            python_on_path = str(environment.python)
         else:
             await asyncio.to_thread(_prepare_runtime_dirs, environment)
         env = environment.variables
         if not shell:
             args = _rewrite_python_command(args, environment)
 
-    return await _run_owned_process(
+    result = await _run_owned_process(
         args, shell=shell, cwd=cwd, env=env, timeout=timeout
+    )
+    return replace(result, python_on_path=python_on_path)
+
+
+def _decode_output(data: bytes, encodings: list[str]) -> tuple[str, bool]:
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        encodings = ["utf-16"]
+    candidates = [
+        locale.getencoding() if value == "locale" else value for value in encodings
+    ]
+    for encoding in candidates:
+        try:
+            return data.decode(encoding), True
+        except UnicodeDecodeError:
+            continue
+    # Keep every byte and the original exit code; do not silently replace text.
+    return (
+        f"[Cannot decode output using {candidates}; raw bytes escaped below]\n"
+        + data.decode("ascii", errors="backslashreplace"),
+        False,
     )
 
 
@@ -829,8 +878,14 @@ async def _run_owned_process(
     except asyncio.CancelledError:
         await _terminate_process_tree(proc)
         raise
-    return (
-        out.decode("utf-8", errors="replace"),
-        err.decode("utf-8", errors="replace"),
+    encodings = _execution_config()["output_encodings"]
+    stdout, stdout_decoded = _decode_output(out, encodings)
+    stderr, stderr_decoded = _decode_output(err, encodings)
+    return CommandResult(
+        stdout,
+        stderr,
         proc.returncode,
+        args if isinstance(args, str) else tuple(args),
+        cwd,
+        output_decoded=stdout_decoded and stderr_decoded,
     )
