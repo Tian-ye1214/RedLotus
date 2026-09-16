@@ -14,8 +14,10 @@ from dataclasses import asdict
 import hashlib
 import json
 import httpx
+import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -128,6 +130,56 @@ class RequestJournal:
         self._factory = None
         self._thread_role = threading.local()
         self._in_flight: set[str] = set()
+        self._previous: dict[tuple, dict] = {}
+
+    @staticmethod
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+    def request_evidence(self, row):
+        """Compare actual sent payloads without changing or warming any request."""
+        payload = row["payload"]
+        if not isinstance(payload, dict):
+            return {}
+        messages = payload.get("messages", [])
+        key = row["role"], row["agent"]
+        previous = self._previous.get(key)
+        self._previous[key] = payload
+        previous_messages = previous.get("messages", []) if previous else []
+        return {
+            "system_sha256": self.digest([m for m in messages if m.get("role") in {"system", "developer"}]),
+            "tools_sha256": self.digest(payload.get("tools", [])),
+            "parameters_sha256": self.digest({k: v for k, v in payload.items() if k not in {"messages", "tools"}}),
+            "messages_sha256": self.digest(messages),
+            "cold_request": previous is None,
+            "history_prefix_preserved": (messages[:len(previous_messages)] == previous_messages) if previous else None,
+            "reference_markers": payload_text(messages).count("【引用文件 "),
+            "request_bytes": len(json.dumps(payload, ensure_ascii=False).encode()),
+        }
+
+    @staticmethod
+    def response_evidence(value):
+        """Keep provider usage and fingerprint; absence is unknown rather than zero."""
+        chunks = [value] if isinstance(value, dict) else []
+        if isinstance(value, str):
+            for line in value.splitlines():
+                if line.startswith("data: ") and line[6:] != "[DONE]":
+                    try:
+                        chunks.append(json.loads(line[6:]))
+                    except json.JSONDecodeError:
+                        continue  # A cancelled stream can end mid-frame; leave its usage unknown.
+        usage, fingerprint, model = {}, None, None
+        for chunk in chunks:
+            usage = chunk.get("usage") or usage
+            fingerprint = chunk.get("system_fingerprint") or fingerprint
+            model = chunk.get("model") or model
+        total = usage.get("prompt_tokens")
+        hit = usage.get("prompt_cache_hit_tokens", (usage.get("prompt_tokens_details") or {}).get("cached_tokens"))
+        miss = usage.get("prompt_cache_miss_tokens")
+        if miss is None and total is not None and hit is not None:
+            miss = total - hit
+        return dict(input_tokens=total, cache_hit_tokens=hit, cache_miss_tokens=miss,
+                    output_tokens=usage.get("completion_tokens"), model_fingerprint=fingerprint, returned_model=model)
 
     @staticmethod
     def payload(content):
@@ -201,6 +253,7 @@ class RequestJournal:
                     row["model"] = row["payload"].get("model")
                 request.extensions["cli_state_request"] = row
                 with self._lock:
+                    row["cache"] = self.request_evidence(row)
                     self.rows.append(row)
                     self._in_flight.add(row["request_id"])
 
@@ -233,7 +286,30 @@ class RequestJournal:
             value = {"capture_error": f"{type(exc).__name__}: {exc}"}
         with self._lock:
             row.update(response_at=time.monotonic() - self.evidence.started, response=value)
+            row.setdefault("cache", {}).update(self.response_evidence(value))
+            row["cache"]["seconds"] = row["response_at"] - row["at"]
             getattr(self, "_in_flight", set()).discard(row["request_id"])
+
+    def cache_report(self):
+        groups = {}
+        for row in self.rows:
+            role = row.get("role")
+            group = "main_and_workers" if role in {"coordinator", "manager", "worker"} else role or "unclassified"
+            summary = groups.setdefault(group, dict(requests=0, input_tokens=0, cache_hit_tokens=0,
+                cache_miss_tokens=0, unknown_usage_requests=0, cold_requests=0, prefix_changes=0))
+            cache = row.get("cache", {})
+            summary["requests"] += 1
+            summary["cold_requests"] += bool(cache.get("cold_request"))
+            summary["prefix_changes"] += cache.get("history_prefix_preserved") is False
+            for name in ("input_tokens", "cache_hit_tokens", "cache_miss_tokens"):
+                summary[name] += cache.get(name) or 0
+            summary["unknown_usage_requests"] += cache.get("cache_hit_tokens") is None
+        for summary in groups.values():
+            summary["cache_hit_ratio"] = (
+                summary["cache_hit_tokens"] / summary["input_tokens"]
+                if summary["input_tokens"] and not summary["unknown_usage_requests"] else None
+            )
+        return groups
 
     def has_in_flight(self, turn_id: str, role: str) -> bool:
         with self._lock:
@@ -360,6 +436,7 @@ class AcceptanceRun:
                 "evidence_root": str(self.args.root),
                 "project": str(self.project) if self.project else None,
                 "usage": usage,
+                "wire_cache": self.journal.cache_report(),
                 "fixtures": redact(self.fixtures),
                 "failures": redact(self.failures),
                 "steps": redact(self.steps),
@@ -791,6 +868,31 @@ class AcceptanceRun:
             "restored session query did not preserve reference sources",
         )
 
+        # Keep the original four tasks intact; these additional checks exercise intentional rereads.
+        reader = self.driver.system._toolkit._references
+        reference = next(
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (reader.root / "manifests").glob("*.json")
+            if json.loads(path.read_text(encoding="utf-8"))["name"] == long_file.name
+        )
+        new_fact = "修订核验码-" + uuid4().hex[:12]
+        long_file.write_text("这是用户修改后的磁盘版本。\n" + new_fact, encoding="utf-8")
+        reread = await self.turn(
+            "explicit_reread_after_load",
+            f"请明确重读原引用 {reference['id']} 的完整快照，再读取磁盘当前版本 references/{long_file.name}。"
+            "文件已经修改；比较两个版本，用原快照首条记录及磁盘版本的修订核验码作为证据。"
+            "只在最终回复给出比较结论，不覆盖已有产物。",
+        )
+        self.require(new_fact in reread.get("output", ""), "reread did not inspect the changed on-disk version")
+        reread_calls = [
+            part for row in self.journal.rows
+            if row.get("turn_id") == reread["input_id"]
+            for message in row.get("payload", {}).get("messages", [])
+            for part in message.get("tool_calls", [])
+        ]
+        self.require(any(part.get("function", {}).get("name") == "read_reference" for part in reread_calls),
+                     "explicit snapshot reread did not execute read_reference")
+
         current_file = self.driver.system._session_file
         old_jobs = dict(getattr(current_file, "_jobs", {}))
         old_completed = current_file.completed_turns
@@ -825,10 +927,51 @@ class AcceptanceRun:
             )
         self.require(bool(self.evidence.resources), "resource sampler produced no evidence")
         self.require(not self.evidence.warnings, "unexpected WARNING/ERROR appeared in the normal calibration path")
+        foreground = self.journal.cache_report().get("main_and_workers", {})
+        self.require((foreground.get("cache_hit_ratio") or 0) > .9,
+                     "main/ordinary worker cache ratio (including cold requests) did not exceed 90%")
         self.save()
+
+    async def local_regressions(self):
+        """Run the fixed fault-injection and interaction suite within the same deadline."""
+        names = [
+            "test_session_transactions", "test_cli_storage_transactions", "test_cli_transition_recovery",
+            "test_storage_cleanup", "test_memory_cli_boundaries", "test_usage_input",
+            "test_permission_wrappers", "test_command_permissions", "test_background_command_syntax",
+            "test_reference_admission", "test_reference_spaces", "test_missing_reference_boundary",
+            "test_prompt_cache", "test_cache_accounting", "test_cache_evidence",
+            "test_compression_reference_sources", "test_gateway", "test_entries", "test_system",
+            "test_layout_contract",
+        ]
+        output = self.args.root / "reports/local-regressions.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        (self.args.root / "runtime").mkdir(parents=True, exist_ok=True)
+        command = [sys.executable, "-m", "pytest", *[f"tests/{name}.py" for name in names],
+                   "-q", "--tb=short", "--basetemp", str(self.args.root / "runtime/local-tests")]
+        started = self.now()
+        with output.open("wb") as stream:
+            process = await asyncio.create_subprocess_exec(
+                *command, cwd=SCRIPT_DIR.parent, stdout=stream, stderr=stream,
+                env={**os.environ, "REDLOTUS_TEST_MEMORY_ROOT": str(
+                    Path.home() / ".redlotus/e" / (hashlib.sha256(str(self.args.root).encode()).hexdigest()[:8] + "-local")
+                )},
+                **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+                   if sys.platform == "win32" else {"start_new_session": True}),
+            )
+            try:
+                code = await process.wait()
+            finally:
+                if process.returncode is None:
+                    from redlotus.tools.execution import _terminate_process_tree
+                    await _terminate_process_tree(process)
+        self.steps.append(dict(kind="local_regressions", seconds=self.now() - started,
+                               exit_code=code, evidence=str(output)))
+        self.require(code == 0, "local regression/structure gate failed; see local-regressions.txt")
 
     async def execute(self) -> None:
         try:
+            if self.args.regressions:
+                await self.local_regressions()
             await self.start()
             await self.run_scenario()
             self.status = "passed" if not self.failures else "failed"
@@ -929,6 +1072,7 @@ def main() -> int:
     parser.add_argument("--dotenv", type=Path, help="explicit credentials file, if required")
     parser.add_argument("--root", type=Path, required=True, help="E: drive evaluation run directory")
     parser.add_argument("--dependencies", type=Path)
+    parser.add_argument("--regressions", action="store_true", help="include fixed local checks within the same deadline")
     parser.add_argument("--deadline", type=float, default=600, help="hard deadline in seconds (max 600)")
     args = parser.parse_args()
     if not 0 < args.deadline <= 600:

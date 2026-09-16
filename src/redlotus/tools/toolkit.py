@@ -340,7 +340,11 @@ class BasicToolkit:
         return user_response
 
     async def extract_text(self, name: str) -> ToolReturn | str:
-        """Read a project document. For registered reference snapshots use read_reference(id)."""
+        """Parse a project document that has not already been supplied as a reference.
+
+        Returns structured text and native media. Use supplied reference contents directly;
+        read_reference(id) retrieves a registered immutable version when it is needed again.
+        """
         from redlotus.core.gateway import ModelInputPolicy
 
         try:
@@ -356,7 +360,10 @@ class BasicToolkit:
 
     def read_file(self, name: str) -> str:
         """
-        Read file contents.
+        Read the current on-disk version of a project text file.
+        Use for source code, generated artifacts, changes since a reference was captured,
+        or an explicit reread. Reference blocks already contain the stated snapshot content;
+        use read_reference for that immutable version when it is absent from context.
         Parameters:
             name: File name/path
         """
