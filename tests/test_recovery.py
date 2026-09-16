@@ -25,7 +25,7 @@ from redlotus.core.agents import WorkspaceContext
 
 
 def test_legacy_session_archives_are_not_loaded_or_migrated(tmp_path):
-    from redlotus.core.session import list_workspace_snapshots
+    from redlotus.core.cli_commands import list_workspace_snapshots
     from redlotus.core.session import SessionFile
 
     old = tmp_path / "coordinator_old_ModelMessages.json"

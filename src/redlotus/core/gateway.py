@@ -1,4 +1,4 @@
-"""Configuration-driven SDK model and Agent construction, request budgets, and title generation."""
+"""Configuration-driven SDK model construction, request execution, and title generation."""
 
 from __future__ import annotations
 
@@ -6,7 +6,14 @@ import json
 import asyncio
 from dataclasses import dataclass, field, asdict
 from copy import deepcopy
-from pydantic_ai import ModelSettings, Agent, FunctionToolset, RunContext, PromptedOutput
+from pydantic_ai import (
+    Agent,
+    FunctionToolset,
+    ModelRequestNode,
+    ModelSettings,
+    PromptedOutput,
+    RunContext,
+)
 from pydantic_ai.models import create_async_http_client
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.google import GoogleModel
@@ -30,9 +37,16 @@ from redlotus.core.config import (
 )
 from pydantic_ai.capabilities import AbstractCapability, Capability
 from typing import Any
+from collections.abc import Awaitable, Callable, Sequence
 from pydantic_ai.exceptions import UnexpectedModelBehavior
-from pydantic_ai.messages import TextPart
-from redlotus.tools import registry as tool_telemetry
+from pydantic_ai.messages import (
+    FunctionToolResultEvent,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from redlotus.core import config as logger
 from redlotus.prompts.prompt import with_runtime_context, load_prompt
 from pydantic import BaseModel, Field, field_validator
@@ -347,6 +361,151 @@ class RequestPolicy(AbstractCapability):
         raise error
 
 
+class AgentRunner:
+    """The inner loop: finish a tool batch, assemble steering, request the model."""
+
+    async def run(
+        self,
+        *,
+        agent: Any,
+        prompt: Any,
+        message_history: list,
+        usage_limits: Any,
+        take_urgent: Callable[[], Awaitable[list]] | None = None,
+        before_request: Callable[[Any, Any], Awaitable[None]] | None = None,
+        on_node: Callable[[Any], Awaitable[None]] | None = None,
+        on_complete: Callable[[], None] | None = None,
+        event_stream_handler=None,
+    ):
+        original_history = list(message_history)
+        response_received = False
+        async with agent.iter(
+            prompt, message_history=message_history, usage_limits=usage_limits
+        ) as run:
+            results = []
+            prepared_request = None
+            try:
+                node = run.next_node
+                while not agent.is_end_node(node):
+                    if agent.is_model_request_node(node):
+                        if take_urgent and node is not prepared_request:
+                            node.request.parts.extend(
+                                UserPromptPart(text) for text in await take_urgent()
+                            )
+                        prepared_request = None
+                        if on_node:
+                            # Audit the pending tool batch before a compressor changes the model view.
+                            run.ctx.state.message_history.append(node.request)
+                            try:
+                                await on_node(run)
+                            finally:
+                                run.ctx.state.message_history.pop()
+                        if before_request:
+                            await before_request(run, node)
+
+                    results = []
+                    if agent.is_model_request_node(node) or agent.is_call_tools_node(
+                        node
+                    ):
+                        async with node.stream(run.ctx) as stream:
+
+                            async def events():
+                                async for event in stream:
+                                    if isinstance(event, FunctionToolResultEvent):
+                                        results.append(event.part)
+                                    yield event
+
+                            if event_stream_handler:
+                                await event_stream_handler(run.ctx, events())
+                            else:
+                                async for _ in events():
+                                    pass
+                    next_node = await run.next(node)
+                    if agent.is_model_request_node(node):
+                        response_received = True
+                    if results and agent.is_model_request_node(next_node):
+                        ids = {p.tool_call_id for p in results}
+                        other = [
+                            p
+                            for p in next_node.request.parts
+                            if getattr(p, "tool_call_id", None) not in ids
+                        ]
+                        next_node.request.parts[:] = [*results, *other]
+                    if on_node:
+                        await on_node(run)
+                    # Steering arriving during a final model response still belongs to this turn.
+                    if agent.is_end_node(next_node) and take_urgent:
+                        urgent = await take_urgent()
+                        if urgent:
+                            next_node = ModelRequestNode(
+                                ModelRequest(parts=[UserPromptPart(t) for t in urgent])
+                            )
+                            prepared_request = next_node
+                    if agent.is_end_node(next_node) and on_complete:
+                        on_complete()  # Later input is a new turn, even while trace writes are draining.
+                    node = next_node
+            except BaseException as exc:
+                if on_complete:
+                    on_complete()
+                self._close_interrupted_calls(
+                    run.ctx.state.message_history, results, exc
+                )
+                if on_node:
+                    await on_node(run)
+                if isinstance(exc, InputLimitError) and not response_received:
+                    # The rejected input remains in the journal, outside the next request's view.
+                    run.ctx.state.message_history[:] = original_history
+                    if on_node:
+                        await on_node(run)
+                raise
+        return run.result
+
+    @staticmethod
+    def _close_interrupted_calls(messages, results, error):
+        pending = {}
+        for message in messages:
+            for part in message.parts:
+                kind = getattr(part, "part_kind", "")
+                if kind == "tool-call":
+                    pending[part.tool_call_id] = part
+                elif kind in ("tool-return", "retry-prompt"):
+                    pending.pop(getattr(part, "tool_call_id", ""), None)
+        completed = [part for part in results if part.tool_call_id in pending]
+        for part in completed:
+            pending.pop(part.tool_call_id, None)
+        status = "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
+        completed.extend(
+            ToolReturnPart(
+                tool_name=part.tool_name,
+                tool_call_id=key,
+                content={
+                    "status": status,
+                    "execution_outcome": "unknown",
+                    "error": "Execution interrupted; completion is unverified.",
+                },
+                outcome="failed",
+                metadata={
+                    "origin": "runtime_control",
+                    "execution_outcome": "unknown",
+                    "interruption_status": status,
+                },
+            )
+            for key, part in pending.items()
+        )
+        if completed:
+            messages.append(ModelRequest(parts=completed))
+        messages.append(
+            ModelResponse(
+                parts=[
+                    TextPart(
+                        f"Execution {status}. Unfinished actions are unverified; await the next user instruction."
+                    )
+                ],
+                metadata={"origin": "execution_status", "status": status},
+            )
+        )
+
+
 _TOOL_DESCRIPTIONS = {
     "core": "Always-available Worker tools for reading, searching, user input, and coordination.",
     "file_mutation": "Use for writing, editing, appending files, or creating directories.",
@@ -365,6 +524,8 @@ def create_function_toolset(
     instructions: str | None = None,
     defer_loading: bool = False,
 ) -> FunctionToolset:
+    from redlotus.tools import registry as tool_telemetry
+
     wrapped_tools = tool_telemetry.wrap_tools_for_user_notify(
         list(tools), policy=get_agent_run_policy()
     )
@@ -457,6 +618,37 @@ def create_agent(
     if output_type is str:
         agent.output_validator(_validate_current_text)
     return agent
+
+
+async def create_coordinator_agent(
+    skills_manager: Any,
+    memory_injection: str,
+    routing_tools: Sequence[Any],
+    worker_tools: Sequence[Any],
+    task_state=None,
+    *,
+    instructions: str | None = None,
+):
+    from redlotus.prompts.prompt import get_coordinator_system_prompt
+
+    target = ModelTarget.for_role("coordinator")
+    if instructions is None:
+        instructions = await asyncio.to_thread(
+            get_coordinator_system_prompt, skills_manager, memory_injection
+        )
+    toolsets = [
+        create_function_toolset(list(tools), toolset_id=name)
+        for name, tools in (("delegation", routing_tools), ("execution", worker_tools))
+        if tools
+    ]
+    return create_agent(
+        target,
+        instructions=instructions,
+        toolsets=toolsets,
+        role="coordinator",
+        follow_config=True,
+        task_state=task_state,
+    )
 
 
 async def complete_text(

@@ -16,11 +16,27 @@ from filelock import FileLock
 from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelResponse
 from collections import deque
 from contextlib import asynccontextmanager, contextmanager
-from redlotus.core.agents import WorkspaceContext
+from redlotus.core.agents import (
+    InputAdmission,
+    TurnQueue,
+    WorkspaceContext,
+    conversations_root,
+    current_workspace,
+    set_workspace,
+)
 
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _write_with_cleanup(path, operation):
+    """Retry one unchanged file transaction only after approved space reclamation."""
+    try:
+        operation()
+    except OSError as exc:
+        from redlotus.core.config import retry_after_storage_cleanup
+        retry_after_storage_cleanup(path, exc, operation)
 
 
 def _response_id(message):
@@ -41,12 +57,15 @@ def _response_usage(message, **metadata):
 class SessionFile:
     """Append completed updates; compact only when retained evidence changes."""
 
-    def __init__(self, path):
+    def __init__(self, path, *, lock=None, recover=True):
         self.path = Path(path)
-        self._lock = FileLock(self.path.with_suffix(".lock"))
+        self._lock = lock or FileLock(self.path.with_suffix(".lock"))
         self._mutex = threading.RLock()
+        self._recover_partial = recover
         self.recovered_partial_write = False
         self._view = []
+        self._pending_update = None
+        self._use_lock = None
         self._read()
 
     @classmethod
@@ -59,13 +78,35 @@ class SessionFile:
         header = dict(session_id=identity, project_id=project_id, title=title,
                       created_at=datetime.now(timezone.utc).isoformat())
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("x", encoding="utf-8", newline="\n") as stream:
-            stream.write(_json(header)[:-1] + ',"updates":[\n]}')
+        with FileLock(path.with_suffix(".lock")):
+            if path.exists():
+                raise FileExistsError(path)
+            cls._replace_file(path, {**header, "updates": []})
         return cls(path)
 
     @classmethod
-    def load(cls, path):
-        return cls(path)
+    def load(cls, path, *, lock=None, recover=True):
+        return cls(path, lock=lock, recover=recover)
+
+    def acquire_use(self):
+        """Protect this loaded instance from cleanup until its owner releases it."""
+        with self._mutex, self._lock:
+            if self._use_lock is None:
+                if not self.path.is_file():
+                    raise FileNotFoundError(f"会话恢复文件已不存在: {self.path}")
+                self._use_lock = FileLock(
+                    self.path.parent / f".use-{os.getpid()}-{uuid4().hex}.lock",
+                    thread_local=False,
+                )
+                self._use_lock.acquire()
+
+    def release_use(self):
+        """Release only this instance's ownership marker, including repeated shutdown."""
+        with self._mutex, self._lock:
+            if self._use_lock is not None:
+                self._use_lock.release()
+                Path(self._use_lock.lock_file).unlink(missing_ok=True)
+                self._use_lock = None
 
     @property
     def session_id(self):
@@ -91,13 +132,38 @@ class SessionFile:
 
     def _read(self):
         with self._mutex, self._lock:
+            self.recovered_partial_write = False
             previous_view = self._view
             previous_records = getattr(self, "_records", {})
-            text = self.path.read_text(encoding="utf-8")
+            raw = self.path.read_bytes()
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                if exc.reason != "unexpected end of data" or exc.end != len(raw):
+                    raise
+                text = raw[:exc.start].decode("utf-8")
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
                 data = self._recover(text)
+            if (not isinstance(data, dict) or not isinstance(data.get("updates"), list)
+                    or not all(isinstance(data.get(key), str) for key in ("session_id", "project_id", "title", "created_at"))):
+                raise ValueError(f"会话结构无效: {self.path}")
+            updates = data["updates"]
+            for number, update in enumerate(updates, 1):
+                if not isinstance(update, dict):
+                    raise ValueError(f"会话事务结构无效: {self.path}, transaction={number}")
+                commit = update.get("commit")
+                if commit and commit != self._commit_tag(update, number):
+                    if number != len(updates):
+                        raise ValueError(f"会话中间事务校验失败: {self.path}, transaction={number}")
+                    updates.pop()
+                    self.recovered_partial_write = True
+                    break
+            if self.recovered_partial_write:
+                if not self._recover_partial:
+                    raise ValueError(f"会话含未完成事务，未修改原文件: {self.path}")
+                self._replace(data)
             self.header = {key: value for key, value in data.items() if key != "updates"}
             self._records, self._prompts, self._metadata, self._turns = {}, {}, {}, {}
             self._jobs, self._usage, self._digests = {}, {}, {}
@@ -112,6 +178,7 @@ class SessionFile:
             ):
                 self._view = previous_view
             self._count = len(data["updates"])
+            self._last_commit = updates[-1].get("commit") if updates else None
             self._saved_version = self._version()
 
     def _recover(self, text):
@@ -119,32 +186,99 @@ class SessionFile:
         prefix, tail = text.split(',"updates":[', 1)
         data, updates = json.loads(prefix + "}"), []
         decoder, offset = json.JSONDecoder(), 0
+
+        def top_level_end(start):
+            """Find one journal row boundary without treating strings or nested dicts as rows."""
+            depth, quoted, escaped = 0, False, False
+            for index in range(start, len(tail)):
+                char = tail[index]
+                if quoted:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        quoted = False
+                    continue
+                if char == '"':
+                    quoted = True
+                elif char in "[{":
+                    depth += 1
+                elif char in "]}":
+                    if depth == 0:
+                        return None
+                    depth -= 1
+                    if depth == 0:
+                        return index + 1
+            return None
+
+        def has_following_commit(start):
+            """Reject recovery when a later complete journal row survived the corruption."""
+            cursor = start
+            while cursor < len(tail):
+                while cursor < len(tail) and tail[cursor] in " \r\n\t,":
+                    cursor += 1
+                if cursor >= len(tail) or tail[cursor] != "{":
+                    return False
+                end = top_level_end(cursor)
+                if end is None:
+                    return False
+                try:
+                    candidate, decoded_end = decoder.raw_decode(tail, cursor)
+                except json.JSONDecodeError:
+                    candidate, decoded_end = None, cursor
+                commit = candidate.get("commit") if isinstance(candidate, dict) else None
+                if (
+                    decoded_end == end
+                    and isinstance(commit, dict)
+                    and isinstance(commit.get("sequence"), int)
+                    and commit["sequence"] > len(updates)
+                    and commit == self._commit_tag(candidate, commit["sequence"])
+                ):
+                    return True
+                cursor = end
+            return False
+
         while offset < len(tail):
             while offset < len(tail) and tail[offset] in " \r\n\t,":
                 offset += 1
             try:
                 update, offset = decoder.raw_decode(tail, offset)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                if has_following_commit(offset):
+                    raise ValueError(f"会话中间事务损坏，未修改原文件: {self.path}") from exc
                 break
             updates.append(update)
         data["updates"] = updates
-        self._replace(data)
         self.recovered_partial_write = True
         return data
 
+    @staticmethod
+    def _commit_tag(update, sequence):
+        """Check the whole packed update before any of its fields become visible."""
+        payload = {key: value for key, value in update.items() if key != "commit"}
+        return dict(sequence=sequence, checksum=hashlib.sha256(_json(payload).encode()).hexdigest())
+
     def _replace(self, data):
-        temporary = self.path.with_suffix(".tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-            header = {key: value for key, value in data.items() if key != "updates"}
-            stream.write(_json(header)[:-1] + ',"updates":[')
-            stream.write(",\n".join(_json(row) for row in data["updates"]))
-            stream.write("\n]}")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, self.path)
+        self._replace_file(self.path, data)
+
+    @staticmethod
+    def _replace_file(path, data):
+        """Publish initialization or a compacted snapshot only after durable writing."""
+        temporary = path.with_suffix(".tmp")
+        def write():
+            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+                header = {key: value for key, value in data.items() if key != "updates"}
+                stream.write(_json(header)[:-1] + ',"updates":[')
+                stream.write(",\n".join(_json(row) for row in data["updates"]))
+                stream.write("\n]}")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        _write_with_cleanup(path, write)
 
     def _refresh(self):
-        if self._version() != self._saved_version:
+        if self._pending_update is None and self._version() != self._saved_version:
             self._read()
 
     @contextmanager
@@ -223,17 +357,49 @@ class SessionFile:
         return packed
 
     def _append(self, update):
+        if self._pending_update is not None:
+            raise OSError(f"存在尚未确认保存的批次，请先重试: {self.path}")
         update = self._pack(update)
+        update["commit"] = self._commit_tag(update, self._count + 1)
+        self._pending_update = update
+        self._write_update(update)
+
+    def _write_update(self, update):
+        """Publish one transaction only after all bytes have been flushed to disk."""
         payload = ((",\n" if self._count else "") + _json(update) + "\n]}").encode()
-        with self.path.open("r+b") as stream:
-            stream.seek(-3, os.SEEK_END)
-            stream.write(payload)
-            stream.truncate()
-            stream.flush()
-            os.fsync(stream.fileno())
+        offset = self.path.stat().st_size - 3
+
+        def write():
+            with self.path.open("r+b") as stream:
+                stream.seek(offset)
+                stream.write(payload)
+                stream.truncate()
+                stream.flush()
+                os.fsync(stream.fileno())
+
+        _write_with_cleanup(self.path, write)
         self._apply(update)
         self._count += 1
+        self._last_commit = update["commit"]
         self._saved_version = self._version()
+        self._pending_update = None
+
+    def retry_pending(self):
+        """Settle an uncertain previous write before admitting another transaction."""
+        with self._mutex, self._lock:
+            pending = self._pending_update
+            if pending is None:
+                return
+            with self.path.open("r+b") as stream:
+                stream.flush()
+                os.fsync(stream.fileno())
+            self._read()
+            if self._last_commit == pending["commit"]:
+                self._pending_update = None
+            elif pending["commit"]["sequence"] == self._count + 1:
+                self._write_update(pending)
+            else:
+                raise OSError("会话已有其他写入，未保存批次不能覆盖新的提交")
 
     def update(self, *, metadata=None, turns=None, jobs=None):
         """Append only changed metadata, turn fields, and perception job fields."""
@@ -260,6 +426,7 @@ class SessionFile:
                 prefix += 1
             start = max(0, prefix - 1)
             view = self._view[:start]
+            next_id = self._next_id
             additions, prompts, usage, pending_digests = {}, {}, {}, {}
             for offset, message in enumerate(messages[start:], start=start):
                 from redlotus.tools.references import reference_message_data
@@ -276,8 +443,8 @@ class SessionFile:
                     if offset < prefix:
                         key = self._view[offset][1]
                     else:
-                        key = str(self._next_id)
-                        self._next_id += 1
+                        key = str(next_id)
+                        next_id += 1
                     previous_record = self._records.get(key, {})
                     previous_message = previous_record.get("message", {})
                     additions[key] = dict(
@@ -300,7 +467,7 @@ class SessionFile:
                     break
                 shared += 1
             update = dict(messages=additions, prompts=prompts, usage=usage,
-                          metadata=changed_meta, next_id=self._next_id)
+                          metadata=changed_meta, next_id=next_id)
             if context != self._context:
                 update["context_delta"] = dict(start=shared, ids=context[shared:])
             if additions or prompts or usage or changed_meta or "context_delta" in update:
@@ -335,7 +502,10 @@ class SessionFile:
             previous = self._turns.get(turn_id)
             number = previous["number"] if previous else self.completed_turns + 1
             turn = dict(details, id=turn_id, number=number, session_id=self.session_id)
-            self._append(dict(turns={turn_id: turn}, metadata={"completed_turns": max(number, self.completed_turns)}))
+            metadata = {"completed_turns": max(number, self.completed_turns)}
+            if (self._metadata.get("active_turn") or {}).get("id") == turn_id:
+                metadata["active_turn"] = None
+            self._append(dict(turns={turn_id: turn}, metadata=metadata))
             return deepcopy(turn)
 
     def pending_turns(self, after):
@@ -351,7 +521,7 @@ class SessionFile:
     def turn(self, identity):
         """Read retained turn metadata without loading any other session."""
         with self._locked_state():
-            active = self._metadata.get("active_turn")
+            active = self._metadata.get("active_turn") or self._metadata.get("interrupted_turn")
             return deepcopy(self._turns.get(identity) or (active if active and active["id"] == identity else None))
 
     def usage_responses(self):
@@ -386,6 +556,8 @@ class SessionFile:
     def compact(self, *, keep_turn_ids):
         """Prune only released bodies while retaining context, pending evidence, and totals."""
         with self._locked_state():
+            if self._pending_update is not None:
+                raise OSError(f"尚未确认保存的批次不能被清理覆盖: {self.path}")
             records = {key: row for key, row in self._records.items() if key in self._context or row["turn_id"] in keep_turn_ids}
             owners = {row["turn_id"] for row in records.values()}
             retained_turns = keep_turn_ids | {key for key, row in self._turns.items() if row.get("turn_id", key) in owners}
@@ -395,79 +567,10 @@ class SessionFile:
                             turns={key: row if key in retained_turns else
                                    {field: row[field] for field in ("id", "number", "session_id", "status")}
                                    for key, row in self._turns.items()}, next_id=self._next_id)
-            self._replace({**self.header, "updates": [self._pack(snapshot, snapshot=True)]})
+            update = self._pack(snapshot, snapshot=True)
+            update["commit"] = self._commit_tag(update, 1)
+            self._replace({**self.header, "updates": [update]})
             self._read()
-
-
-@dataclass(frozen=True)
-class InputAdmission:
-    id: str
-    sequence: int
-    generation: int
-    workspace: WorkspaceContext
-    turn_id: str | None
-    urgent: bool
-
-
-class TurnQueue:
-    """FIFO work admission; cancelling one turn never kills the queue consumer."""
-
-    def __init__(self, maxsize=0):
-        self.pending = deque()
-        self.maxsize = maxsize
-        self.current = None
-        self.worker = None
-
-    def submit(self, work, *, data=None):
-        if self.maxsize and len(self.pending) >= self.maxsize:
-            raise asyncio.QueueFull
-        result = asyncio.get_running_loop().create_future()
-        result.add_done_callback(
-            lambda done: None if done.cancelled() else done.exception()
-        )
-        self.pending.append((work, result, data))
-        if self.worker is None or self.worker.done():
-            self.worker = asyncio.create_task(self._consume())
-        return result
-
-    async def _consume(self):
-        try:
-            while self.pending:
-                work, result, _ = self.pending.popleft()
-                if result.cancelled():
-                    continue
-                self.current = asyncio.create_task(work())
-                try:
-                    value = await self.current
-                    if not result.done():
-                        result.set_result(value)
-                except asyncio.CancelledError:
-                    result.cancel()
-                    if asyncio.current_task().cancelling():
-                        raise
-                except Exception as exc:
-                    if not result.done():
-                        result.set_exception(exc)
-                finally:
-                    self.current = None
-        finally:
-            self.worker = None
-
-    def discard(self):
-        while self.pending:
-            self.pending.popleft()[1].cancel()
-
-    async def join(self):
-        while self.worker and not self.worker.done():
-            await asyncio.shield(self.worker)
-
-    async def cancel(self, *, discard=False):
-        if discard:
-            self.discard()
-        current = self.current
-        if current and not current.done():
-            current.cancel()
-            await asyncio.gather(current, return_exceptions=True)
 
 
 class SessionController:
@@ -583,59 +686,3 @@ class SessionController:
             task.cancel()
         self._urgent.clear()
         self._notices.clear()
-
-
-MODEL_MESSAGES_GLOB = "*/model_messages.json"
-_workspace = None
-
-
-def current_workspace():
-    from redlotus.core.agents import active_workspace
-
-    active = active_workspace()
-    return active.root if active else _workspace or Path.cwd().resolve()
-
-
-def set_workspace(path):
-    global _workspace
-    _workspace = Path(path).expanduser().resolve()
-    return _workspace
-
-
-def conversations_root():
-    from redlotus.core.config import session_data_dir
-    from redlotus.core.agents import WorkspaceContext
-
-    return session_data_dir(WorkspaceContext.from_path(current_workspace()))
-
-
-def read_saved_model_messages_file(path):
-    session = SessionFile.load(path)
-    return session.model_messages(), session.info()
-
-
-@dataclass(frozen=True)
-class WorkspaceSnapshot:
-    path: Path
-    meta: dict
-    saved_at: datetime
-    agent: str
-    date: str
-    topic: str
-    message_count: int
-
-    @property
-    def label(self):
-        saved = self.saved_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-        return f"{saved} | {self.topic} #{self.meta['session_id']} | {self.message_count} msgs"
-
-
-def list_workspace_snapshots(*, root=None):
-    snapshots = []
-    for path in (root or conversations_root()).glob(MODEL_MESSAGES_GLOB):
-        meta = SessionFile.load(path).info()
-        snapshots.append(WorkspaceSnapshot(
-            path, meta, datetime.fromisoformat(meta["saved_at"]), "coordinator",
-            meta["date"], meta["topic"], meta["message_count"]
-        ))
-    return sorted(snapshots, key=lambda row: (row.saved_at, str(row.path)), reverse=True)

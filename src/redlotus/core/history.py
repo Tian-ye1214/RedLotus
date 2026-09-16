@@ -13,6 +13,7 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextContent,
+    ToolReturnPart,
     UserPromptPart,
     ModelMessagesTypeAdapter,
 )
@@ -67,28 +68,62 @@ def messages_safe_for_new_prompt(messages: list) -> list:
     return list(messages[:cut])
 
 
+def repair_interrupted_tool_calls(messages: list) -> list:
+    """Close only persisted tool calls that have no recorded result."""
+    pending: dict[str, Any] = {}
+    for message in messages:
+        for part in getattr(message, "parts", ()) or ():
+            kind, key = _part_kind(part), _tool_key(part)
+            if kind == "tool-call" and key:
+                pending[key] = part
+            elif kind in ("tool-return", "retry-prompt") and key:
+                pending.pop(key, None)
+    if not pending:
+        return list(messages)
+    metadata = {"origin": "runtime_control", "execution_outcome": "unknown"}
+    returns = [
+        ToolReturnPart(
+            str(getattr(part, "tool_name", "")),
+            {
+                "status": "unknown",
+                "message": "Original tool execution outcome is unknown; no result was persisted.",
+            },
+            tool_call_id=key,
+            outcome="failed",
+            metadata={**metadata, "tool_call_id": key},
+        )
+        for key, part in pending.items()
+    ]
+    return [*messages, ModelRequest(parts=returns, metadata=metadata)]
+
+
 class ChatHistory:
     __slots__ = (
         "_messages",
         "_compress_summary_state",
+        "_revision",
     )
 
     def __init__(self):
         self._messages: list = []
         self._compress_summary_state: str | None = None
+        self._revision = 0
 
     def update(self, result) -> None:
         """从 RunResult / StreamedRunResult 提取完整消息列表并保存。"""
         self._messages = list(result.all_messages())
+        self._revision += 1
 
     def reset(self) -> None:
         self._messages = []
         self._compress_summary_state = None
+        self._revision += 1
 
     def set_messages(self, messages: list) -> None:
         """直接替换消息列表（供上下文压缩等使用）。"""
         self._messages = list(messages)
         self._compress_summary_state = None
+        self._revision += 1
         for message in reversed(self._messages):
             candidates = [getattr(message, "metadata", None) or {}]
             for part in message.parts:
@@ -114,6 +149,10 @@ class ChatHistory:
     def messages(self) -> list:
         """传入 agent.run(message_history=...) 的只读引用。"""
         return self._messages
+
+    @property
+    def revision(self) -> int:
+        return self._revision
 
 
 
@@ -334,22 +373,18 @@ def _compression_bounds(messages, context, *, retain_tail=True):
     return head_end, tail_start
 
 
-def compress_history(
-    history: ChatHistory,
+def _compression_candidate(
+    messages: list,
+    summary_state: str | None,
     *,
     role: str,
     force: bool,
     task_state: str | None = None,
     retain_tail: bool = True,
     context: dict | None = None,
-) -> bool:
-    """
-    压缩三步：1) 按阈值或 force 触发；2) 头尾保留，中间段展成 Markdown 摘录；
-    3) 压缩模型输出固定结构的 Markdown，写入一条 User 摘要消息。
-    """
-    messages = list(history.messages)
+) -> ChatHistory | None:
     if len(messages) < 2:
-        return False
+        return None
 
     ctx = get_context_config(role) if context is None else context
     max_ctx = get_effective_max_context(role=role, context=ctx)
@@ -357,14 +392,14 @@ def compress_history(
     threshold = max_ctx * float(ctx["auto_compress_ratio"])
 
     if not force and (used is None or used < threshold):
-        return False
+        return None
 
     bounds = _compression_bounds(messages, ctx, retain_tail=retain_tail)
     if bounds is None:
-        return False
+        return None
     head_end, tail_start = bounds
 
-    prev_summary = history.compress_summary_state
+    prev_summary = summary_state
     from redlotus.prompts.message_text import pydantic_messages_to_text
 
     excerpt = pydantic_messages_to_text(
@@ -407,8 +442,33 @@ def compress_history(
     )
     new_messages = messages[:head_end] + [summary_msg] + messages[tail_start:]
     logger.info("上下文压缩完成: role=%s messages=%d→%d", role, len(messages), len(new_messages))
-    history.set_messages(new_messages)
-    history.compress_summary_state = summary_md.strip()
+    candidate = ChatHistory()
+    candidate.set_messages(new_messages)
+    return candidate
+
+
+def compress_history(
+    history: ChatHistory,
+    *,
+    role: str,
+    force: bool,
+    task_state: str | None = None,
+    retain_tail: bool = True,
+    context: dict | None = None,
+) -> bool:
+    """Synchronously build and apply a context-compression candidate."""
+    candidate = _compression_candidate(
+        list(history.messages),
+        history.compress_summary_state,
+        role=role,
+        force=force,
+        task_state=task_state,
+        retain_tail=retain_tail,
+        context=context,
+    )
+    if candidate is None:
+        return False
+    history.set_messages(candidate.messages)
     return True
 
 
@@ -445,6 +505,31 @@ async def get_effective_max_context_async(
     )
 
 
+async def prepare_compression(
+    history: ChatHistory,
+    *,
+    role: str,
+    force: bool,
+    task_state: str | None = None,
+    retain_tail: bool = True,
+    context: dict | None = None,
+) -> ChatHistory | None:
+    """Build a detached compression candidate without changing ``history``."""
+    messages = list(history.messages)
+    summary_state = history.compress_summary_state
+    context = dict(context) if context is not None else None
+    return await asyncio.to_thread(
+        _compression_candidate,
+        messages,
+        summary_state,
+        role=role,
+        force=force,
+        task_state=task_state,
+        retain_tail=retain_tail,
+        context=context,
+    )
+
+
 async def compress_history_async(
     history: ChatHistory,
     *,
@@ -454,8 +539,8 @@ async def compress_history_async(
     retain_tail: bool = True,
     context: dict | None = None,
 ) -> bool:
-    return await asyncio.to_thread(
-        compress_history,
+    revision = history.revision
+    candidate = await prepare_compression(
         history,
         role=role,
         force=force,
@@ -463,6 +548,10 @@ async def compress_history_async(
         retain_tail=retain_tail,
         context=context,
     )
+    if candidate is None or history.revision != revision:
+        return False
+    history.set_messages(candidate.messages)
+    return True
 
 
 def _closed_boundaries(messages: list) -> list[int]:

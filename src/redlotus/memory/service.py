@@ -62,6 +62,18 @@ class MemoryService:
         self.observations.bind(session)
         self.evidence.session = session
 
+    def unbind_session(self):
+        """Drop volatile state after the owner has cancelled this session's Agents."""
+        self.session = self.current = None
+        self.observations.session = self.evidence.session = None
+        self.last_error = ""
+        self._context_notices = []
+        with self._schedule_lock:
+            self._background = None
+            self._background_running = False
+            self._pending_end = 0
+            self._targets = {}
+
     def _processor(self, value=None):
         """Read or update this session's retry state in its sole JSON file."""
         if value is not None:
@@ -492,5 +504,5 @@ class MemoryService:
     async def close(self):
         if self._owns_factory:
             await self._perception_factory.close()
-        self.observations.session = None
+        self.unbind_session()
         await self.store.close()

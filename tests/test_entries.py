@@ -294,16 +294,32 @@ async def test_tui_stop_during_title_preparation_keeps_app_and_records_receipt(
         assert '"accepted": true' in receipt.content
 
 
-async def test_tui_urgent_and_stop_do_not_answer_pending_question(
+async def test_tui_ctrl_enter_answers_pending_question_once_and_stop_cancels_next_question(
     tmp_path, monkeypatch
 ):
     system = configured_system(tmp_path, monkeypatch)
     configure_cli_hooks(system, monkeypatch, preparer="system", enter_workspace=True)
 
+    replies = []
+
     async def create(*args, **kwargs):
         async def model(messages, info):
             if any(isinstance(p, ToolReturnPart) for p in messages[-1].parts):
-                yield "done"
+                replies.extend(
+                    str(part.content)
+                    for part in messages[-1].parts
+                    if isinstance(part, ToolReturnPart)
+                )
+                if len(replies) == 1:
+                    yield {
+                        0: DeltaToolCall(
+                            name="ask_user",
+                            json_args='{"question":"Anything else?"}',
+                            tool_call_id="ask-next",
+                        )
+                    }
+                else:
+                    yield "done"
             else:
                 yield {
                     0: DeltaToolCall(
@@ -325,16 +341,18 @@ async def test_tui_urgent_and_stop_do_not_answer_pending_question(
         answer = app._ask_future
         inp.value = "preserve evidence"
         await app.action_submit_urgent()
+        await until(lambda: answer.done())
         await until(
-            lambda: (
-                bool(system._session._urgent) and system._session._urgent[0][1].done()
-            )
+            lambda: app._ask_future is not None and app._ask_future is not answer
         )
-        assert system._session._urgent[0][1].result().text == "preserve evidence"
-        assert not answer.done()
+        assert answer.result() == "preserve evidence"
+        assert replies == ["preserve evidence"]
+        assert system._session.user_inputs == ["ask me", "preserve evidence"]
+        assert not system._session._urgent
+        next_answer = app._ask_future
         await app.on_input_submitted(Input.Submitted(inp, "/stop"))
         await until(lambda: not system.has_current_turn)
-        assert answer.cancelled() and app._ask_future is None
+        assert next_answer.cancelled() and app._ask_future is None
         assert "/stop" not in system._session.user_inputs
 
 

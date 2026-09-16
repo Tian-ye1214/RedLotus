@@ -397,9 +397,8 @@ def _python_identity(command: tuple[str, ...]) -> dict:
 
 
 def _prepare_runtime_dirs(environment: ExecutionEnvironment) -> None:
-    paths = {
-        environment.cache / environment.project_id,
-    }
+    project_cache = environment.cache / environment.project_id
+    paths = {project_cache}
     for name in (
         "PIP_CACHE_DIR",
         "XDG_CACHE_HOME",
@@ -413,6 +412,9 @@ def _prepare_runtime_dirs(environment: ExecutionEnvironment) -> None:
             paths.add(Path(environment.variables[name]))
     for path in paths:
         path.mkdir(parents=True, exist_ok=True)
+    (project_cache / ".redlotus-cache").write_text(
+        json.dumps({"project_id": environment.project_id}), encoding="utf-8"
+    )
 
 
 def describe_execution_environment(

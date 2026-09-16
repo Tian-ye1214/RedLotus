@@ -532,19 +532,15 @@ def _run_wrapped(
 
 
 def _model_result(result: Any, policy: AgentRunPolicy | None) -> Any:
-    if (
-        policy is None
-        or not isinstance(result, str)
-        or len(result) <= policy.max_tool_output_chars
-    ):
+    if policy is None or not isinstance(result, str) or len(result) <= policy.max_tool_output_chars:
         return result
     import uuid
-    from redlotus.core.session import conversations_root
+    from redlotus.core.agents import WorkspaceContext, active_workspace
     from redlotus.core.config import atomic_write_text
+    from redlotus.core.session import current_workspace
 
-    path = (
-        conversations_root() / "tool_results" / f"{uuid.uuid4().hex}.txt"
-    )
+    workspace = active_workspace() or WorkspaceContext.from_path(current_workspace())
+    path = workspace.root / "WorkDatabase" / "tool_results" / f"{uuid.uuid4().hex}.txt"
     atomic_write_text(path, result)
     preview = policy.truncate_text(result)
     if not tool_result_succeeded(result):

@@ -8,7 +8,12 @@
     "sessions_dir": null,
     "references_dir": null,
     "compression_dir": null,
-    "runtime_dir": null
+    "runtime_dir": null,
+    "cleanup": {
+      "enabled": true,
+      "session_retention_days": 7,
+      "execution_cache": true
+    }
   },
   "model_gateway": {
     "protocol": "openai-chat",

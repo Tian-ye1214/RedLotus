@@ -2,30 +2,28 @@
 
 from __future__ import annotations
 
-import re
 import asyncio
 import traceback
 import json
 import time
 import uuid
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
-from enum import Enum
+import inspect
+from collections.abc import Callable
 from typing import Any, Tuple
-from pydantic_ai.messages import BaseToolReturnPart, ModelRequest, ModelResponse, TextPart
 from redlotus.tools.interaction import UserMessage, TaskManager
-from redlotus.prompts.prompt import load_prompt, get_coordinator_system_prompt
-from redlotus.prompts.message_text import split_messages_into_turns
-from redlotus.core.gateway import create_agent, create_function_toolset, ModelTarget
+from redlotus.prompts.prompt import load_prompt
+from redlotus.core.gateway import create_coordinator_agent
 from redlotus.tools.registry import SkillsManager
 from redlotus.tools.toolkit import BasicToolkit, WorkerOrchestrator
 from redlotus.core.history import (
     ChatHistory,
     messages_safe_for_new_prompt,
     prewarm_effective_max_contexts_by_role_async,
+    prepare_compression,
+    repair_interrupted_tool_calls,
 )
 from redlotus.core.session import SessionFile, SessionController, current_workspace
-from redlotus.core.config import session_data_dir, get_agent_usage_limits, settings
+from redlotus.core.config import session_data_dir, get_agent_usage_limits, settings, finish_file_io
 from redlotus.core.presentation import (
     supports_model_stream,
     TextEventStreamHandler,
@@ -47,172 +45,11 @@ from redlotus.core.agents import (
     SubagentFactory,
 )
 from redlotus.core.console import AgentCliController, CliSessionState
-from redlotus.memory.service import MemoryService
-
-
-class GoalSignal(str, Enum):
-    CONTINUE = "CONTINUE"
-    DONE = "DONE"
-
-
-GOAL_MARKER_RE = re.compile(
-    r"<!--\s*REDLOTUS_GOAL\s*:\s*(CONTINUE|DONE)\s*-->",
-    re.IGNORECASE,
+from redlotus.core.cli_commands import (
+    GoalSignal, GoalParseResult, parse_goal_output, summarize_last_coordinator_turn,
+    build_goal_iteration_prompt, run_goal_loop,
 )
-
-
-@dataclass(frozen=True)
-class GoalParseResult:
-    signal: GoalSignal
-    cleaned_text: str
-    marker_count: int
-
-    @property
-    def missing_marker(self) -> bool:
-        return self.marker_count == 0
-
-
-def parse_goal_output(text: str) -> GoalParseResult:
-    """Strip goal-mode sentinel markers and return the effective signal.
-
-    If no marker is present, goal mode treats the turn as CONTINUE so the next
-    prompt can remind the model to add an explicit status marker.
-    """
-    body = text or ""
-    matches = list(GOAL_MARKER_RE.finditer(body))
-    cleaned = GOAL_MARKER_RE.sub("", body).strip()
-    if not matches:
-        return GoalParseResult(GoalSignal.CONTINUE, cleaned, 0)
-    signal = GoalSignal(matches[-1].group(1).upper())
-    return GoalParseResult(signal, cleaned, len(matches))
-
-
-def summarize_last_coordinator_turn(messages: list) -> str:
-    """Build goal-mode previous_output from the latest turn's assistant text and tool returns."""
-    turns = split_messages_into_turns(messages)
-    if not turns:
-        return ""
-    sections: list[str] = []
-    for msg in turns[-1]:
-        if isinstance(msg, ModelResponse):
-            for part in msg.parts:
-                if isinstance(part, TextPart):
-                    text = (part.content or "").strip()
-                    if text:
-                        sections.append(text)
-        elif isinstance(msg, ModelRequest):
-            for part in msg.parts:
-                if isinstance(part, BaseToolReturnPart):
-                    content = (
-                        part.model_response_str()
-                        if hasattr(part, "model_response_str")
-                        else str(part.content)
-                    )
-                    tool_name = part.tool_name or "tool"
-                    sections.append(f"[{tool_name}]\n{content}")
-    return "\n\n".join(sections).strip()
-
-
-def build_goal_iteration_prompt(
-    *,
-    original_goal: str,
-    iteration: int,
-    previous_output: str = "",
-    missing_marker_reminder: bool = False,
-) -> str:
-    template = load_prompt("goal_iteration.md")
-    return template.format(
-        original_goal=original_goal.strip(),
-        iteration=iteration,
-        previous_output=previous_output.strip(),
-        user_updates="",
-        missing_marker_reminder=str(bool(missing_marker_reminder)).lower(),
-    )
-
-
-async def run_goal_loop(
-    system: Any,
-    *,
-    message: UserMessage,
-    history: Any,
-    turn_id: str | None,
-    conversation_log_hint: str,
-    set_iteration: Callable[[int], None] | None = None,
-) -> None:
-    original_goal = message.text or ""
-    previous_output = ""
-    missing_marker = False
-    iteration = 0
-
-    while True:
-        iteration += 1
-        if set_iteration is not None:
-            set_iteration(iteration)
-
-        prompt_text = build_goal_iteration_prompt(
-            original_goal=original_goal,
-            iteration=iteration,
-            previous_output=previous_output,
-            missing_marker_reminder=missing_marker,
-        )
-
-        parse_result: GoalParseResult | None = None
-
-        def output_transform(raw_output: str) -> str:
-            nonlocal parse_result
-            parse_result = parse_goal_output(raw_output)
-            return parse_result.cleaned_text
-
-        prompt_message = replace(message, text=prompt_text)
-        _history, output = await system.run_agent_system(
-            prompt_message,
-            history,
-            conversation_log_hint=conversation_log_hint,
-            conversation_log_extra={
-                "turn_id": turn_id,
-                "goal_mode": True,
-                "goal_iteration": iteration,
-            },
-            turn_id=turn_id,
-            output_transform=output_transform,
-            _inside_goal=True,
-        )
-
-        parsed = parse_result or parse_goal_output(output)
-        previous_output = summarize_last_coordinator_turn(_history.messages) or output
-        missing_marker = parsed.missing_marker
-
-        if parsed.signal == GoalSignal.DONE:
-            return
-
-
-async def create_coordinator_agent(
-    skills_manager: SkillsManager,
-    memory_injection: str,
-    routing_tools: Sequence[Any],
-    worker_tools: Sequence[Any],
-    task_state=None,
-    *,
-    instructions: str | None = None,
-):
-    target = ModelTarget.for_role("coordinator")
-    if instructions is None:
-        instructions = await asyncio.to_thread(
-            get_coordinator_system_prompt, skills_manager, memory_injection
-        )
-    toolsets = [
-        create_function_toolset(list(tools), toolset_id=name)
-        for name, tools in (("delegation", routing_tools), ("execution", worker_tools))
-        if tools
-    ]
-    return create_agent(
-        target,
-        instructions=instructions,
-        toolsets=toolsets,
-        role="coordinator",
-        follow_config=True,
-        task_state=task_state,
-    )
+from redlotus.memory.service import MemoryService
 
 
 def _make_coordinator_stream_handler() -> TextEventStreamHandler | None:
@@ -276,17 +113,23 @@ class AgentSystem:
         self._current_turn: dict[str, Any] | None = None
         self._cli_turn_id: str | None = None
         self._session_key: str | None = None
+        self._compression_future = None
+        self._storage_retry = asyncio.Event()
+        self._storage_paused = False
         self._cli_controller = AgentCliController(self)
 
     async def bind_session(self, session_key: str, *, storage=None) -> None:
         if self._session_key is not None and self._session_key != session_key:
             self._coordinator_agent = None
             self._memory.reset_injection_snapshot()
-        self._session_key = session_key
         if self._session_file is None or self._session_file.session_id != session_key:
-            self._session_file = storage or SessionFile.create(
+            if self._session_file is not None:
+                self._session_file.release_use()
+            self._session_file = storage or await self._durable_write(lambda: SessionFile.create(
                 session_data_dir(self.workspace), self.workspace.project_id, session_id=session_key
-            )
+            ))
+        self._session_key = session_key
+        self._session_file.acquire_use()
         self._memory.bind_session(self._session_file)
         self._orchestrator.session_file = self._session_file
         await self._registry.ensure_agent(session_key, "coordinator")
@@ -299,30 +142,36 @@ class AgentSystem:
         await self._registry.cancel_session(session_key)
         await self._registry.remove_session(session_key)
         if self._session_key == session_key:
+            self._memory.unbind_session()
+            self._session_file.release_use()
             self._session_key = None
             self._session_file = None
             self._coordinator_agent = None
             self._memory.reset_injection_snapshot()
             self._orchestrator.set_session_key(None)
+            self._orchestrator.session_file = None
+            self._storage_paused = False
 
-    async def reset_session(self) -> None:
-        """Release the current conversation before clearing its task and prompt state."""
+    async def reset_session(self, *, close_memory=False) -> None:
+        """Release resources before discarding a conversation's recoverable state."""
         self._session.reset(discard=True)
         self._session.queue.discard()
         await self.cancel_current_turn()
+        await self._factory.cancel_all()
+        await self._toolkit.close()
+        if close_memory:
+            await self._memory.store.close()
         if self._session_key:
             await self.end_session_agents(self._session_key)
-        await self._factory.cancel_all()
-        try:
-            await self._toolkit.close()
-        finally:
-            self._task_manager.reset()
-            self._toolkit.reset_task_directory()
-            self._manager_history.reset()
-            self._session_file = None
-            self._memory.reset_injection_snapshot()
-            self._session.take_notices()
-            self._session.queue.discard()
+        self._task_manager.reset()
+        self._toolkit.reset_task_directory()
+        self._manager_history.reset()
+        self._session_file = None
+        self._memory.reset_injection_snapshot()
+        self._memory.unbind_session()
+        self._storage_paused = False
+        self._session.take_notices()
+        self._session.queue.discard()
 
     @property
     def registry(self) -> AgentRegistry:
@@ -344,6 +193,101 @@ class AgentSystem:
     @property
     def has_current_goal_turn(self) -> bool:
         return bool(self._current_turn and self._current_turn.get("mode") == "goal")
+
+    @property
+    def is_compressing(self):
+        return self._compression_future is not None and not self._compression_future.done()
+
+    @property
+    def storage_paused(self):
+        return self._storage_paused
+
+    async def retry_saved_state(self):
+        """A new ordinary input permits a paused disk transaction to retry."""
+        self._storage_retry.set()
+
+    async def _durable_write(self, operation):
+        """Pause failed I/O without repeating model or tool execution."""
+        storage = self._session_file
+        while True:
+            self._storage_retry.clear()
+            try:
+                if storage is not None:
+                    await finish_file_io(asyncio.to_thread(storage.retry_pending))
+                result = await finish_file_io(asyncio.to_thread(operation))
+                if inspect.isawaitable(result):
+                    result = await result
+                self._storage_paused = False
+                return result
+            except OSError as exc:
+                self._storage_paused = True
+                print_warning(f"保存失败，任务已暂停，输入已保留: {exc}。恢复存储后提交普通输入重试。")
+                if asyncio.current_task().cancelling():
+                    raise asyncio.CancelledError() from exc
+                await self._storage_retry.wait()
+
+    async def cancel_compression(self):
+        """Invalidate the queued control operation without cancelling ordinary tasks."""
+        future = self._compression_future
+        if future is not None and not future.done():
+            self._session.reset()
+            future.cancel()
+            await self._session.queue.cancel()
+
+    async def compress_context(self, history):
+        """Serialize detached compression and persist its candidate before publishing it."""
+        if self.is_compressing:
+            return ["上下文压缩正在处理中。"]
+        if self.has_current_turn or self._session.queue.pending:
+            return ["当前任务正在运行，请先停止或等待完成。"]
+        future = self._session.queue.submit(lambda: self._compress_context(history))
+        self._compression_future = future
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            return ["上下文压缩已取消，未提交候选不再写回。"]
+        finally:
+            if self._compression_future is future:
+                self._compression_future = None
+
+    async def _compress_context(self, history):
+        from pydantic_ai.messages import ModelMessagesTypeAdapter
+        from redlotus.tools.references import reference_message_data
+
+        storage, generation = self._session_file, self._session.generation
+        sources = {"coordinator": history, "manager": self._manager_history}
+        revisions = {role: source.revision for role, source in sources.items()}
+        candidates = {}
+
+        def current():
+            return (storage is self._session_file and generation == self._session.generation
+                    and all(source.revision == revisions[role] for role, source in sources.items()))
+
+        for role, source in sources.items():
+            candidates[role] = await prepare_compression(
+                source, role=role, force=True, retain_tail=False,
+                task_state=self.structured_task_status(),
+            )
+            if not current():
+                return ["会话已改变，压缩候选已丢弃。"]
+        if not any(candidates.values()):
+            return ["当前上下文无需压缩。"]
+        if storage is None:
+            return ["当前没有可保存的会话，未应用压缩。"]
+        coordinator = candidates["coordinator"] or history
+        manager = candidates["manager"] or self._manager_history
+        metadata = {
+            "tasks": self._task_manager.snapshot(),
+            "manager_context": [reference_message_data(row) for row in
+                                ModelMessagesTypeAdapter.dump_python(manager.messages, mode="json")],
+        }
+        await self._durable_write(lambda: storage.save_context(coordinator.messages, turn_id=None, metadata=metadata))
+        if not current():
+            return ["会话已改变，压缩候选不再应用。"]
+        for role, candidate in candidates.items():
+            if candidate is not None:
+                sources[role].set_messages(candidate.messages)
+        return [f"{role}: {'已压缩并保存' if candidate else '无需压缩'}" for role, candidate in candidates.items()]
 
     @property
     def current_goal_iteration(self) -> int:
@@ -538,7 +482,10 @@ class AgentSystem:
         )
         encoded = json.dumps(receipt, ensure_ascii=False)
         if self._session_file:
-            self._session_file.update(metadata={"last_control_result": receipt})
+            try:
+                self._session_file.update(metadata={"last_control_result": receipt})
+            except OSError as exc:
+                print_warning(f"控制回执尚未保存: {exc}")
         self._session.add_notice(
             [
                 TextContent(
@@ -548,10 +495,26 @@ class AgentSystem:
         )
         return receipt
 
-    async def bind_loaded_snapshot(self, agent, path, meta) -> None:
+    async def bind_loaded_snapshot(self, agent, path, meta):
         storage = SessionFile.load(path)
         await self.bind_session(storage.session_id, storage=storage)
-        self._task_manager.restore(storage.metadata.get("tasks", []))
+        metadata = storage.metadata
+        messages = storage.model_messages()
+        repaired = repair_interrupted_tool_calls(messages)
+        active = metadata.get("active_turn")
+        if active or repaired != messages:
+            await self._durable_write(lambda: storage.save_context(
+                repaired, turn_id=active.get("turn_id", active["id"]) if active else None,
+                metadata={"active_turn": None, "interrupted_turn": dict(active, status="interrupted") if active else None},
+            ))
+        if metadata.get("manager_context"):
+            from pydantic_ai.messages import ModelMessagesTypeAdapter
+            from redlotus.tools.references import reference_message_data
+            self._manager_history.set_messages(ModelMessagesTypeAdapter.validate_python(
+                [reference_message_data(row, restore=True) for row in metadata["manager_context"]]
+            ))
+        self._task_manager.restore(metadata.get("tasks", []))
+        return repaired
 
     def structured_task_status(self) -> str:
         return self._task_manager.structured_status()
@@ -613,7 +576,7 @@ class AgentSystem:
                         [*event.reference_ids, *(ref.id for ref in message.references)]
                     )
                 )
-                self._memory.observations.save(event)
+                await self._durable_write(lambda: self._memory.observations.save(event))
                 self._current_attachments.extend(
                     part for ref in message.references for part in ref.to_prompt()
                 )
@@ -624,35 +587,33 @@ class AgentSystem:
         ]
 
     async def switch_workspace(self, path) -> None:
-        """Dispose the old session before publishing the new immutable workspace."""
-        previous_memory = self._memory
-        await self.reset_session()
-        handler = self._toolkit._ask_user_handler
-        review_store = self.review_store
-        self.workspace = WorkspaceContext.from_path(path)
-        self._coordinator_agent = None
-        self._memory = MemoryService(
-            workspace=self.workspace,
+        """Prepare the target before releasing or replacing the current conversation."""
+        workspace = WorkspaceContext.from_path(path)
+        if not workspace.root.is_dir():
+            raise NotADirectoryError(workspace.root)
+        skills = SkillsManager(workspace=workspace)
+        memory = MemoryService(
+            workspace=workspace,
             owner_memory_allowed=self._owner_memory_allowed,
             factory=self._factory,
         )
-        self._memory.bind_runner(
+        memory.bind_runner(
             self._registry, input_source=lambda: self._session.user_inputs
         )
-        self._toolkit = BasicToolkit(
-            self._skills_manager,
-            workspace=self.workspace,
-            extra_worker_tools=self._memory.worker_tools,
+        toolkit = BasicToolkit(
+            skills, workspace=workspace, extra_worker_tools=memory.worker_tools,
         )
-        self._toolkit.set_ask_user_handler(handler)
-        self._toolkit._review_store = review_store
-        self._toolkit._file_lock = review_store._lock
+        toolkit.set_ask_user_handler(self._toolkit._ask_user_handler)
+        review_store = self.review_store
+        toolkit._review_store, toolkit._file_lock = review_store, review_store._lock
+        await self.reset_session(close_memory=True)
+        self.workspace, self._memory, self._toolkit, self._skills_manager = workspace, memory, toolkit, skills
+        self._coordinator_agent = None
         review_store.clear()
-        self._orchestrator._toolkit = self._toolkit
+        self._orchestrator._toolkit = toolkit
         from redlotus.core.session import set_workspace
 
-        set_workspace(path)
-        await previous_memory.close()
+        set_workspace(workspace.root)
 
     @asynccontextmanager
     async def _outer_turn(self, message: UserMessage, turn_id: str):
@@ -667,13 +628,13 @@ class AgentSystem:
                 if self._session_key is None:
                     await self.bind_session(uuid.uuid4().hex)
                 if not self._session_file.metadata.get("title"):
-                    self._session_file.update(metadata={"title": message.text or "session"})
-                job = await self._memory.begin_turn(
+                    await self._durable_write(lambda: self._session_file.update(metadata={"title": message.text or "session"}))
+                job = await self._durable_write(lambda: self._memory.begin_turn(
                     self._session_key,
                     turn_id,
                     self._session.user_inputs[0],
                     references=message.references,
-                )
+                ))
                 status, error = "success", ""
                 self._cli_turn_id = turn_id
                 self._current_attachments = [
@@ -695,13 +656,18 @@ class AgentSystem:
                 finally:
                     self._cli_turn_id, self._current_attachments = None, []
                     paths = [str(self._session_file.path)]
-                    await self._memory.finish_turn(
-                        job,
-                        status=status,
-                        user_inputs=self._session.user_inputs,
-                        evidence_paths=paths,
-                        error=error,
-                    )
+                    def finish():
+                        return self._memory.finish_turn(
+                            job, status=status, user_inputs=self._session.user_inputs,
+                            evidence_paths=paths, error=error,
+                        )
+                    if status == "cancelled":
+                        try:
+                            await finish()
+                        except OSError as exc:
+                            print_warning(f"取消状态尚未保存，已提交进度保留: {exc}")
+                    else:
+                        await self._durable_write(finish)
                     if not self._shutdown_done:
                         self._memory.schedule_processing()
 
@@ -904,12 +870,12 @@ class AgentSystem:
 
     async def _checkpoint(self, history, turn_id):
         """Append context and task changes to the session's sole recovery file."""
-        await asyncio.to_thread(
-            self._session_file.save_context,
-            history.messages,
+        storage, messages = self._session_file, list(history.messages)
+        await self._durable_write(lambda: storage.save_context(
+            messages,
             turn_id=turn_id,
             metadata={"tasks": self._task_manager.snapshot()},
-        )
+        ))
 
     async def prepare_cli_session(self) -> tuple[str, ...]:
         return await self._cli_controller.prepare_session()

@@ -24,7 +24,7 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from redlotus.core.console import input_completions
+from redlotus.core.console import SnapshotAction, SnapshotSelection, input_completions
 from redlotus.core.presentation import (
     ContextUsageItem,
     OutputSink,
@@ -39,7 +39,7 @@ from redlotus.core.presentation import (
 )
 from redlotus.core import config as logger
 from redlotus.core.agents import current_short_agent_id
-from redlotus.core.session import WorkspaceSnapshot
+from redlotus.core.cli_commands import WorkspaceSnapshot
 
 READY_LABEL = "就绪"
 WORKING_LABEL = "工作中"
@@ -52,15 +52,13 @@ class TuiRunMode(str, Enum):
     GOAL = "goal"
 
     def next(self) -> "TuiRunMode":
-        modes = list(TuiRunMode)
-        return modes[(modes.index(self) + 1) % len(modes)]
+        return list(TuiRunMode)[(list(TuiRunMode).index(self) + 1) % len(TuiRunMode)]
 
 
 class AgentInputSuggester(Suggester):
     async def get_suggestion(self, value: str) -> str | None:
         for completion in input_completions(value):
-            start = len(value) + completion.start_position
-            candidate = value[:start] + completion.text
+            candidate = value[: len(value) + completion.start_position] + completion.text
             if candidate != value:
                 return candidate
         return None
@@ -77,7 +75,7 @@ class AgentInput(Input):
     ]
 
 
-class SnapshotPickScreen(ModalScreen[WorkspaceSnapshot | None]):
+class SnapshotPickScreen(ModalScreen[SnapshotSelection]):
     BINDINGS = [Binding("escape", "cancel", "取消", show=False)]
 
     DEFAULT_CSS = """
@@ -122,6 +120,7 @@ class SnapshotPickScreen(ModalScreen[WorkspaceSnapshot | None]):
                     Option(snapshot.label, id=str(index))
                     for index, snapshot in enumerate(self._snapshots)
                 ],
+                Option("取消", id="cancel"),
                 id="snapshot-list",
             )
 
@@ -130,13 +129,17 @@ class SnapshotPickScreen(ModalScreen[WorkspaceSnapshot | None]):
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         option_id = event.option.id
-        if option_id is None or option_id == "new":
-            self.dismiss(None)
-            return
-        self.dismiss(self._snapshots[int(option_id)])
+        if option_id == "new":
+            self.dismiss(SnapshotSelection(SnapshotAction.NEW))
+        elif option_id is None or option_id == "cancel":
+            self.dismiss(SnapshotSelection(SnapshotAction.CANCEL))
+        else:
+            self.dismiss(
+                SnapshotSelection(SnapshotAction.RESTORE, self._snapshots[int(option_id)])
+            )
 
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        self.dismiss(SnapshotSelection(SnapshotAction.CANCEL))
 
 
 class TextualOutputSink(OutputSink):
@@ -288,18 +291,17 @@ class RedLotusTui(App[None]):
     async def pick_snapshot(
         self,
         snapshots: list[WorkspaceSnapshot],
-    ) -> WorkspaceSnapshot | None:
-        if not snapshots:
-            return None
-
+    ) -> SnapshotSelection:
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[WorkspaceSnapshot | None] = loop.create_future()
+        future: asyncio.Future[SnapshotSelection] = loop.create_future()
         generation = self.system._session.generation
 
-        def _on_result(result: WorkspaceSnapshot | None) -> None:
+        def _on_result(result: SnapshotSelection) -> None:
             if not future.done():
                 future.set_result(
-                    result if generation == self.system._session.generation else None
+                    result
+                    if generation == self.system._session.generation
+                    else SnapshotSelection(SnapshotAction.CANCEL)
                 )
 
         screen = SnapshotPickScreen(snapshots)
@@ -563,17 +565,17 @@ class RedLotusTui(App[None]):
             return
         self.query_one("#status", Static).update(self._status_text())
         controller = self.system._cli_controller
-        if controller.last_rejected_input and self._ask_future is None:
-            input_box = self.query_one("#input", AgentInput)
+        input_box = self.query_one("#input", AgentInput)
+        input_box.disabled = controller.is_transitioning
+        if not input_box.disabled and controller.last_rejected_input and self._ask_future is None:
             if not input_box.value:
                 input_box.value = controller.last_rejected_input
                 controller.last_rejected_input = None
 
     def _is_working(self) -> bool:
-        if self._ask_future is not None and not self._ask_future.done():
-            return True
         return bool(
-            self._active_line_handlers > 0
+            (self._ask_future is not None and not self._ask_future.done())
+            or self._active_line_handlers > 0
             or self._status_is_working
             or self.system.has_current_turn
             or self.system._session.queue.pending
@@ -700,13 +702,14 @@ class RedLotusTui(App[None]):
         await self.on_input_submitted(Input.Submitted(inp, inp.value), urgent=True)
 
     async def on_input_submitted(self, event: Input.Submitted, *, urgent=False) -> None:
+        if self.system._cli_controller.is_transitioning:
+            return
         value = event.value.strip()
         event.input.value = ""
         if (
             self._ask_future is not None
             and not self._ask_future.done()
             and not value.startswith("/")
-            and (not urgent or not self._record_reply)
         ):
             if self._record_reply:
                 self._write_user_input(value, title="用户回复")

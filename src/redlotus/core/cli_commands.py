@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from datetime import datetime
+from enum import Enum
+from pydantic_ai.messages import BaseToolReturnPart, ModelRequest, ModelResponse, TextPart
+from redlotus.tools.interaction import UserMessage
+from redlotus.prompts.prompt import load_prompt
+from redlotus.prompts.message_text import split_messages_into_turns
 import inspect
 import time
 from decimal import Decimal
 from pathlib import Path
-from redlotus.core.session import current_workspace, conversations_root
+from redlotus.core.session import SessionFile, current_workspace, conversations_root
 from typing import Any
 
 from redlotus.core.config import (
@@ -25,7 +34,6 @@ from redlotus.core.agents import AgentInvocationState, TRACE_STORE
 from redlotus.core.gateway import ModelTarget
 from redlotus.core.history import (
     _lookup_openrouter_meta,
-    compress_history_async,
     context_usage_breakdown,
     lookup_model_context,
     lookup_model_max_output_tokens,
@@ -94,7 +102,7 @@ def print_cli_help() -> None:
     from redlotus.core.console import COMMAND_HELP
 
     rows = [
-        f"| `{command}` | {description} |"
+        f"| `{command}` | {description.replace('<', '&lt;').replace('>', '&gt;')} |"
         for command, description in COMMAND_HELP.items()
     ]
     print_markdown(
@@ -378,11 +386,10 @@ def _format_stm_snapshot(snapshot: dict) -> str:
     fields = {
         "db_path": "LanceDB",
         "table_name": "记忆表",
-        "row_count": "记录数",
-        "project_id": "项目",
-        "observed_turns": "已结束回合",
-        "consumed_turns": "已处理回合",
-        "pending_turns": "待处理回合",
+        "row_count": "项目记录数",
+        "observed_turns": "当前会话已结束回合",
+        "consumed_turns": "当前会话已处理回合",
+        "pending_turns": "当前会话待处理回合",
         "window_turns": "窗口大小",
         "overlap_turns": "重叠回合",
     }
@@ -514,7 +521,7 @@ class SlashCommands:
         memory = self.system._memory
         label = "LTM" if global_scope else "STM"
         snapshot = (
-            memory.long_term_snapshot if global_scope else memory.short_term_snapshot
+            memory.reader.long_term_snapshot if global_scope else memory.short_term_snapshot
         )
         render = _format_ltm_snapshot if global_scope else _format_stm_snapshot
         action = self.parts[1].lower() if len(self.parts) > 1 else "show"
@@ -649,21 +656,181 @@ class SlashCommands:
         return None if loaded is None else not loaded
 
     async def compress(self):
-        lines = []
-        for role, history in (
-            ("coordinator", self.state.history),
-            ("manager", self.system._manager_history),
-        ):
-            try:
-                changed = await compress_history_async(
-                    history,
-                    role=role,
-                    force=True,
-                    task_state=self.system.structured_task_status(),
-                )
-                lines.append(
-                    f"{role}: " + ("已压缩" if changed else "没有可压缩的历史")
-                )
-            except Exception as exc:
-                lines.append(f"{role}: 压缩失败: {exc}")
+        lines = await self.system.compress_context(self.state.history)
         print_panel("\n".join(lines), title="上下文压缩")
+
+
+class GoalSignal(str, Enum):
+    CONTINUE = "CONTINUE"
+    DONE = "DONE"
+
+
+GOAL_MARKER_RE = re.compile(
+    r"<!--\s*REDLOTUS_GOAL\s*:\s*(CONTINUE|DONE)\s*-->",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class GoalParseResult:
+    signal: GoalSignal
+    cleaned_text: str
+    marker_count: int
+
+    @property
+    def missing_marker(self) -> bool:
+        return self.marker_count == 0
+
+
+def parse_goal_output(text: str) -> GoalParseResult:
+    """Strip goal-mode sentinel markers and return the effective signal.
+
+    If no marker is present, goal mode treats the turn as CONTINUE so the next
+    prompt can remind the model to add an explicit status marker.
+    """
+    body = text or ""
+    matches = list(GOAL_MARKER_RE.finditer(body))
+    cleaned = GOAL_MARKER_RE.sub("", body).strip()
+    if not matches:
+        return GoalParseResult(GoalSignal.CONTINUE, cleaned, 0)
+    signal = GoalSignal(matches[-1].group(1).upper())
+    return GoalParseResult(signal, cleaned, len(matches))
+
+
+def summarize_last_coordinator_turn(messages: list) -> str:
+    """Build goal-mode previous_output from the latest turn's assistant text and tool returns."""
+    turns = split_messages_into_turns(messages)
+    if not turns:
+        return ""
+    sections: list[str] = []
+    for msg in turns[-1]:
+        if isinstance(msg, ModelResponse):
+            for part in msg.parts:
+                if isinstance(part, TextPart):
+                    text = (part.content or "").strip()
+                    if text:
+                        sections.append(text)
+        elif isinstance(msg, ModelRequest):
+            for part in msg.parts:
+                if isinstance(part, BaseToolReturnPart):
+                    content = (
+                        part.model_response_str()
+                        if hasattr(part, "model_response_str")
+                        else str(part.content)
+                    )
+                    tool_name = part.tool_name or "tool"
+                    sections.append(f"[{tool_name}]\n{content}")
+    return "\n\n".join(sections).strip()
+
+
+def build_goal_iteration_prompt(
+    *,
+    original_goal: str,
+    iteration: int,
+    previous_output: str = "",
+    missing_marker_reminder: bool = False,
+) -> str:
+    template = load_prompt("goal_iteration.md")
+    return template.format(
+        original_goal=original_goal.strip(),
+        iteration=iteration,
+        previous_output=previous_output.strip(),
+        user_updates="",
+        missing_marker_reminder=str(bool(missing_marker_reminder)).lower(),
+    )
+
+
+async def run_goal_loop(
+    system: Any,
+    *,
+    message: UserMessage,
+    history: Any,
+    turn_id: str | None,
+    conversation_log_hint: str,
+    set_iteration: Callable[[int], None] | None = None,
+) -> None:
+    original_goal = message.text or ""
+    previous_output = ""
+    missing_marker = False
+    iteration = 0
+
+    while True:
+        iteration += 1
+        if set_iteration is not None:
+            set_iteration(iteration)
+
+        prompt_text = build_goal_iteration_prompt(
+            original_goal=original_goal,
+            iteration=iteration,
+            previous_output=previous_output,
+            missing_marker_reminder=missing_marker,
+        )
+
+        parse_result: GoalParseResult | None = None
+
+        def output_transform(raw_output: str) -> str:
+            nonlocal parse_result
+            parse_result = parse_goal_output(raw_output)
+            return parse_result.cleaned_text
+
+        prompt_message = replace(message, text=prompt_text)
+        _history, output = await system.run_agent_system(
+            prompt_message,
+            history,
+            conversation_log_hint=conversation_log_hint,
+            conversation_log_extra={
+                "turn_id": turn_id,
+                "goal_mode": True,
+                "goal_iteration": iteration,
+            },
+            turn_id=turn_id,
+            output_transform=output_transform,
+            _inside_goal=True,
+        )
+
+        parsed = parse_result or parse_goal_output(output)
+        previous_output = summarize_last_coordinator_turn(_history.messages) or output
+        missing_marker = parsed.missing_marker
+
+        if parsed.signal == GoalSignal.DONE:
+            return
+
+
+MODEL_MESSAGES_GLOB = "*/model_messages.json"
+
+
+def read_saved_model_messages_file(path):
+    session = SessionFile.load(path)
+    return session.model_messages(), session.info()
+
+
+@dataclass(frozen=True)
+class WorkspaceSnapshot:
+    path: Path
+    meta: dict
+    saved_at: datetime
+    agent: str
+    date: str
+    topic: str
+    message_count: int
+
+    @property
+    def label(self):
+        saved = self.saved_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        return f"{saved} | {self.topic} #{self.meta['session_id']} | {self.message_count} msgs"
+
+
+def list_workspace_snapshots(*, root=None):
+    snapshots = []
+    for path in (root or conversations_root()).glob(MODEL_MESSAGES_GLOB):
+        try:
+            meta = SessionFile.load(path).info()
+        except (OSError, ValueError, KeyError) as exc:
+            from redlotus.core.presentation import print_warning
+            print_warning(f"会话无法加载: {path}: {exc}")
+            continue
+        snapshots.append(WorkspaceSnapshot(
+            path, meta, datetime.fromisoformat(meta["saved_at"]), "coordinator",
+            meta["date"], meta["topic"], meta["message_count"]
+        ))
+    return sorted(snapshots, key=lambda row: (row.saved_at, str(row.path)), reverse=True)

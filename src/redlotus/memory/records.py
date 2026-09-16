@@ -343,7 +343,6 @@ class ObservationStore:
         """Count exactly one finished outer turn, retaining its actual outcome."""
         event.finished_at = iso_utc_now()
         self.session.finish_turn(event.id, event.model_dump(mode="json"))
-        self.session.update(metadata={"active_turn": None})
 
     def order(self):
         return [row["id"] for row in self.session.pending_turns(0)] if self.session else []

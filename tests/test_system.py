@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+import pytest
 
 from pydantic_ai import Agent
 from pydantic_ai.models.function import FunctionModel, DeltaToolCall
@@ -281,7 +282,7 @@ def test_worker_output_fails_closed():
 async def test_loading_session_restores_completed_tasks_and_dependencies(
     tmp_path, monkeypatch
 ):
-    from redlotus.core.session import read_saved_model_messages_file
+    from redlotus.core.cli_commands import read_saved_model_messages_file
 
     system = configured_system(tmp_path, monkeypatch)
     system._task_manager.create_todo_list(
@@ -377,6 +378,43 @@ async def test_project_switch_cancels_current_perception_without_producing(tmp_p
         assert previous.workspace.root == tmp_path.resolve()
         assert system._memory._perception_factory is previous._perception_factory
         assert system._memory.session is None
+    finally:
+        await system.shutdown()
+
+
+@pytest.mark.parametrize("failure_stage", ["target_tools", "old_tools"])
+async def test_failed_workspace_switch_keeps_original_session(tmp_path, monkeypatch, failure_stage):
+    """A failed project change leaves the original conversation available to continue."""
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    system = configured_system(tmp_path, monkeypatch)
+    await system.bind_session("original")
+    system._manager_history.set_messages([ModelRequest(parts=[UserPromptPart("保留原任务")])])
+    original = (system.workspace, system._session_file, system._memory, system._toolkit, system._skills_manager)
+    target = tmp_path / "target"
+    target.mkdir()
+
+    async def failed_close():
+        raise OSError("old tool resources unavailable")
+
+    def failed_toolkit(skills, **kwargs):
+        skills.workspace = kwargs["workspace"]
+        raise OSError("target tools unavailable")
+
+    try:
+        with monkeypatch.context() as scoped:
+            if failure_stage == "target_tools":
+                scoped.setattr("redlotus.core.system.BasicToolkit", failed_toolkit)
+            else:
+                scoped.setattr(system._toolkit, "close", failed_close)
+            with pytest.raises(OSError, match="unavailable"):
+                await system.switch_workspace(target)
+        assert (system.workspace, system._session_file, system._memory, system._toolkit, system._skills_manager) == original
+        assert system.session_key == "original"
+        assert system._memory.session is original[1]
+        assert system._skills_manager.workspace == original[0]
+        assert system._manager_history.messages[0].parts[0].content == "保留原任务"
+        assert original[1]._use_lock is not None
     finally:
         await system.shutdown()
 

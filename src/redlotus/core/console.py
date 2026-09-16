@@ -7,9 +7,11 @@ import asyncio
 import sys
 import time
 from dataclasses import dataclass
-from typing import Literal, TYPE_CHECKING, Awaitable, Callable
+from enum import Enum
+from typing import Literal
 from redlotus.tools.interaction import iter_reference_spans, quote_reference_path, user_message_from_cli_input, load_file_refs
-from redlotus.core.session import current_workspace, WorkspaceSnapshot, list_workspace_snapshots, read_saved_model_messages_file
+from redlotus.core.session import current_workspace
+from redlotus.core.cli_commands import WorkspaceSnapshot, list_workspace_snapshots, read_saved_model_messages_file
 from redlotus.core.config import (
     settings,
     get_agent_roles,
@@ -153,36 +155,33 @@ class AgentCompleter(Completer):
 
 
 def input_completions(text):
-    context = completion_for_input(text)
-    if context is None:
-        return
-    if context.kind == "file_path":
-        yield from _iter_file_completions(context.prefix, at_mode=context.at_mode)
-        return
-    choices = {
-        "command": COMMANDS,
-        "agent_role": get_agent_roles(),
-        "literal_choice": context.choices,
-    }
-    if context.kind == "effort_value":
-        values = (
-            ("off", *role_supported_thinking_efforts(context.role))
-            if context.role in get_agent_roles()
-            else ("off", *supported_thinking_efforts(None))
-        )
-    else:
-        values = choices[context.kind]
-    for value in values:
-        if value.lower().startswith(context.prefix.lower()):
-            yield Completion(
-                value, start_position=-len(context.prefix), display_meta=context.kind
+    if context := completion_for_input(text):
+        if context.kind == "file_path":
+            yield from _iter_file_completions(context.prefix, at_mode=context.at_mode)
+            return
+        choices = {
+            "command": COMMANDS,
+            "agent_role": get_agent_roles(),
+            "literal_choice": context.choices,
+        }
+        if context.kind == "effort_value":
+            values = (
+                ("off", *role_supported_thinking_efforts(context.role))
+                if context.role in get_agent_roles()
+                else ("off", *supported_thinking_efforts(None))
             )
+        else:
+            values = choices[context.kind]
+        for value in values:
+            if value.lower().startswith(context.prefix.lower()):
+                yield Completion(
+                    value, start_position=-len(context.prefix), display_meta=context.kind
+                )
 
 
 def _resolve_parent(fragment: str) -> tuple[Path, str]:
     path = Path(fragment.replace("\\", "/")).expanduser()
-    if not path.is_absolute():
-        path = current_workspace() / path
+    path = path if path.is_absolute() else current_workspace() / path
     return (
         (path, "")
         if fragment.endswith(("/", "\\")) or not fragment
@@ -231,8 +230,7 @@ def _iter_file_completions(fragment: str, *, at_mode: bool):
 
 
 def _history_path() -> Path:
-    base = user_data_dir()
-    base.mkdir(parents=True, exist_ok=True)
+    (base := user_data_dir()).mkdir(parents=True, exist_ok=True)
     return base / "history"
 
 
@@ -241,11 +239,9 @@ def create_prompt_session() -> PromptSession:
 
     @kb.add("c-c")
     def _interrupt(event) -> None:
-        buffer = event.app.current_buffer
-        if buffer.text:
+        if event.app.current_buffer.text:
             # 有内容：仅清空当前行，不退出
-            buffer.reset()
-            return
+            return event.app.current_buffer.reset()
         # 空行：交给外层 KeyboardInterrupt 处理（支持连按两次退出）
         event.app.exit(exception=KeyboardInterrupt())
 
@@ -280,16 +276,11 @@ class InteractiveRepl:
     def _on_keyboard_interrupt(self) -> bool:
         """处理空行 Ctrl+C。返回 True 表示应退出 REPL。"""
         now = time.monotonic()
-        if now - self._last_interrupt_at > 2:
-            self._interrupt_hits = 1
-        else:
-            self._interrupt_hits += 1
+        self._interrupt_hits = 1 if now - self._last_interrupt_at > 2 else self._interrupt_hits + 1
         self._last_interrupt_at = now
-
-        if self._interrupt_hits >= 2:
-            return True
-        print_warning("再次按 Ctrl+C 退出，或输入 /exit、quit。")
-        return False
+        if self._interrupt_hits < 2:
+            print_warning("再次按 Ctrl+C 退出，或输入 /exit、quit。")
+        return self._interrupt_hits >= 2
 
     async def read_line(self, *, stop_event: asyncio.Event | None = None) -> str | None:
         if sys.stdin.isatty() and sys.stdout.isatty():
@@ -311,12 +302,8 @@ class InteractiveRepl:
                             await t
                         except asyncio.CancelledError:
                             pass
-                    if stop_task in done:
-                        return None
-                    return read_task.result().strip()
-            except EOFError:
-                return None
-            except asyncio.CancelledError:
+                    return None if stop_task in done else read_task.result().strip()
+            except (EOFError, asyncio.CancelledError):
                 return None
         try:
             return (await asyncio.to_thread(input, self.prompt)).strip()
@@ -340,9 +327,7 @@ class InteractiveRepl:
         handler: Callable[[str], Awaitable[str]],
         stop_event: asyncio.Event | None,
     ) -> None:
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                break
+        while stop_event is None or not stop_event.is_set():
             try:
                 line = await self.read_line(stop_event=stop_event)
                 if line is None:
@@ -368,28 +353,46 @@ class InteractiveRepl:
 ReadLineFn = Callable[[], Awaitable[str | None]]
 
 
+class SnapshotAction(str, Enum):
+    NEW = "new"
+    RESTORE = "restore"
+    CANCEL = "cancel"
+
+
+@dataclass(frozen=True)
+class SnapshotSelection:
+    action: SnapshotAction
+    snapshot: WorkspaceSnapshot | None = None
+
+
 def format_snapshot_choices(snapshots: list[WorkspaceSnapshot]) -> str:
-    lines = ["选择新建会话或恢复（新 → 旧）：", "", "  0. 新建会话"]
-    for index, snapshot in enumerate(snapshots, 1):
-        lines.append(f"  {index}. {snapshot.label}")
-    lines.extend(["", "输入序号恢复，输入 0 或留空新建。"])
-    return "\n".join(lines)
+    return "\n".join(
+        [
+            "选择新建会话或恢复（新 → 旧）：",
+            "",
+            "  0. 新建会话",
+            *(f"  {index}. {snapshot.label}" for index, snapshot in enumerate(snapshots, 1)),
+            "  c. 取消",
+            "",
+            "输入序号恢复，输入 0 新建，留空或 c 取消。",
+        ]
+    )
 
 
 async def legacy_pick_snapshot(
     snapshots: list[WorkspaceSnapshot],
     read_line: ReadLineFn,
-) -> WorkspaceSnapshot | None:
-    if not snapshots:
-        return None
+) -> SnapshotSelection:
     print_panel(format_snapshot_choices(snapshots), title="加载对话")
     while True:
         raw = await read_line()
         if raw is None:
-            return None
+            return SnapshotSelection(SnapshotAction.CANCEL)
         text = raw.strip()
-        if not text or text == "0":
-            return None
+        if not text or text.lower() in ("c", "cancel"):
+            return SnapshotSelection(SnapshotAction.CANCEL)
+        if text == "0":
+            return SnapshotSelection(SnapshotAction.NEW)
         if not text.isdigit():
             print_error("请输入有效序号。")
             continue
@@ -397,11 +400,7 @@ async def legacy_pick_snapshot(
         if index < 1 or index > len(snapshots):
             print_error(f"序号超出范围（1-{len(snapshots)}）。")
             continue
-        return snapshots[index - 1]
-
-
-if TYPE_CHECKING:
-    from redlotus.core.system import AgentSystem
+        return SnapshotSelection(SnapshotAction.RESTORE, snapshots[index - 1])
 
 
 @dataclass
@@ -437,17 +436,23 @@ class AgentCliController:
         self.system = system
         self._ready = asyncio.Event()
         self._ready.set()
+        self._admission_lock = asyncio.Lock()
+        self._transition = 0
         self._snapshot_picker: (
-            Callable[[list[WorkspaceSnapshot]], Awaitable[WorkspaceSnapshot | None]]
+            Callable[[list[WorkspaceSnapshot]], Awaitable[SnapshotSelection]]
             | None
         ) = None
         self._legacy_repl: InteractiveRepl | None = None
         self.config_prompt = None
         self.last_rejected_input: str | None = None
 
+    @property
+    def is_transitioning(self) -> bool:
+        return not self._ready.is_set()
+
     def set_snapshot_picker(
         self,
-        picker: Callable[[list[WorkspaceSnapshot]], Awaitable[WorkspaceSnapshot | None]]
+        picker: Callable[[list[WorkspaceSnapshot]], Awaitable[SnapshotSelection]]
         | None,
     ) -> None:
         self._snapshot_picker = picker
@@ -455,12 +460,12 @@ class AgentCliController:
     async def _pick_snapshot(
         self,
         snapshots: list[WorkspaceSnapshot],
-    ) -> WorkspaceSnapshot | None:
+    ) -> SnapshotSelection:
         if self._snapshot_picker is not None:
             return await self._snapshot_picker(snapshots)
         if self._legacy_repl is not None:
             return await legacy_pick_snapshot(snapshots, self._legacy_repl.read_line)
-        return None
+        return SnapshotSelection(SnapshotAction.CANCEL)
 
     async def enter_current_workspace(self, *, state=None, force_picker=False):
         generation = self.system._session.generation
@@ -472,31 +477,51 @@ class AgentCliController:
             root=session_data_dir(self.system.workspace),
         )
         if not snapshots:
-            if force_picker:
-                print_warning("当前工作区没有可加载的对话快照。")
-            return None
-        chosen = await self._pick_snapshot(snapshots)
-        if chosen is None or generation != self.system._session.generation:
-            return None
-        try:
-            messages, meta = await asyncio.to_thread(
-                read_saved_model_messages_file, chosen.path
-            )
-            if generation != self.system._session.generation:
+            if not force_picker:
                 return None
+            print_warning("当前工作区没有可加载的对话快照。可新建会话或取消。")
+        selection = await self._pick_snapshot(snapshots)
+        if generation != self.system._session.generation:
+            return None
+        if selection.action is SnapshotAction.CANCEL:
+            return None
+        if selection.action is SnapshotAction.NEW:
             await self.reset_session(state.history)
-            histories = {
-                "coordinator": state.history,
-                "manager": self.system._manager_history,
-            }
-            histories[chosen.agent].set_messages(messages)
-            await self.system.bind_loaded_snapshot(chosen.agent, chosen.path, meta)
-            state.is_first_input = False
-            if task_name := meta.get("task_name"):
-                self.system._toolkit.set_task_directory(task_name)
-            logger.setup_task_logger(
-                safe_name(chosen.topic, max_len=50, fallback="loaded")
-            )
+            state.is_first_input = True
+            return False
+        chosen = selection.snapshot
+        messages = meta = None
+        try:
+            async def prepare():
+                nonlocal messages, meta
+                messages, meta = await asyncio.to_thread(
+                    read_saved_model_messages_file, chosen.path
+                )
+                return generation == self.system._session.generation
+
+            async def restore():
+                repaired = await self.system.bind_loaded_snapshot(
+                    chosen.agent, chosen.path, meta
+                )
+                state.history.reset()
+                (
+                    state.history
+                    if chosen.agent == "coordinator"
+                    else self.system._manager_history
+                ).set_messages(
+                    repaired if repaired is not None else messages
+                )
+                state.is_first_input = False
+                if task_name := meta.get("task_name"):
+                    self.system._toolkit.set_task_directory(task_name)
+                logger.setup_task_logger(
+                    safe_name(chosen.topic, max_len=50, fallback="loaded")
+                )
+
+            if not await self.reset_session(
+                state.history, prepare=prepare, restore=restore
+            ):
+                return None
             print_success(f"已加载 {chosen.agent} 对话（{len(messages)} 条模型消息）。")
             return True
         except (OSError, ValueError) as exc:
@@ -506,19 +531,36 @@ class AgentCliController:
     def new_session_state(self) -> CliSessionState:
         return CliSessionState(history=ChatHistory())
 
-    async def reset_session(self, history: ChatHistory, *, workspace=None) -> None:
+    async def reset_session(
+        self,
+        history: ChatHistory,
+        *,
+        workspace=None,
+        prepare: Callable[[], Awaitable[bool]] | None = None,
+        restore: Callable[[], Awaitable[None]] | None = None,
+    ) -> bool:
         """Reset or switch a conversation and always reopen the input admission gate."""
         self.last_rejected_input = None
         self._ready.clear()
+        self._transition += 1
         try:
+            if prepare is not None and not await prepare():
+                return False
             if workspace is None:
                 await self.system.reset_session()
             else:
                 await self.system.switch_workspace(workspace)
-        finally:
-            history.reset()
+            if restore is None:
+                history.reset()
+            else:
+                await restore()
             clear_context_usage()
+        except Exception as exc:
+            print_warning(f"会话切换失败，已保留原会话: {exc}")
+            raise
+        finally:
             self._ready.set()
+        return True
 
     async def _prewarm_contexts(self) -> None:
         await prewarm_effective_max_contexts_by_role_async(reason="program startup")
@@ -540,12 +582,14 @@ class AgentCliController:
         return ()
 
     async def _publish_context_usage(self, history: ChatHistory) -> None:
-        manager = self.system._manager_history
-        if not history.messages and not manager.messages:
+        if not history.messages and not self.system._manager_history.messages:
             clear_context_usage()
             return
         items = []
-        for role, source in (("manager", manager), ("coordinator", history)):
+        for role, source in (
+            ("manager", self.system._manager_history),
+            ("coordinator", history),
+        ):
             usage = await asyncio.to_thread(
                 context_usage_breakdown, role, source.messages
             )
@@ -559,16 +603,19 @@ class AgentCliController:
     async def _handle_slash_command(
         self, raw_input: str, state: CliSessionState
     ) -> str:
-        system = self.system
-        if system.has_current_turn:
-            command = raw_input.split()[0].lower()
-            if command not in self.BUSY_SAFE_COMMANDS:
+        command = raw_input.split()[0].lower()
+        if self.system.has_current_turn:
+            if command not in self.BUSY_SAFE_COMMANDS and not (
+                self.system.is_compressing and command in {"/load", "/compress"}
+            ):
                 print_warning(
                     "A turn is currently running. Use /stop first or wait for it to finish."
                 )
                 return "continue"
+        if command == "/load" and self.system.is_compressing:
+            await self.system.cancel_compression()
 
-        await system._sync_skills_for_user_turn()
+        await self.system._sync_skills_for_user_turn()
         first_override = await SlashCommands(self, state, raw_input).run()
         if first_override is not None:
             state.is_first_input = first_override
@@ -585,12 +632,11 @@ class AgentCliController:
         admission,
     ) -> str:
         system = self.system
-        history = state.history
         await self._ready.wait()
         if not system._session.accepts(admission):
             references.cancel()
             return "continue"
-        await self._publish_context_usage(history)
+        await self._publish_context_usage(state.history)
         try:
             file_refs = await references
         except (OSError, ValueError) as exc:
@@ -614,13 +660,17 @@ class AgentCliController:
             logger.setup_task_logger(task_name)
             system._toolkit.set_task_directory(task_name)
             await system.bind_session(uuid4().hex)
-            system._session_file.update(metadata={"task_name": task_name, "title": task_name})
+            await system._durable_write(
+                lambda: system._session_file.update(
+                    metadata={"task_name": task_name, "title": task_name}
+                )
+            )
             state.is_first_input = False
 
         if not system._session.accepts(admission):
             return "continue"
         turn_task = system._start_user_turn(
-            message, history, goal_mode=goal_mode, turn_id=admission.id
+            message, state.history, goal_mode=goal_mode, turn_id=admission.id
         )
         if turn_task is None:
             raise RuntimeError("Another turn bypassed the session queue")
@@ -644,12 +694,10 @@ class AgentCliController:
         input_id: str | None = None,
         urgent: bool = False,
     ) -> str:
-        raw_input = raw_input.strip()
-        if not raw_input:
+        if not (raw_input := raw_input.strip()):
             return "continue"
 
-        command = raw_input.lower()
-        if command in self.EXIT_COMMANDS:
+        if (command := raw_input.lower()) in self.EXIT_COMMANDS:
             self.system._session.queue.discard()
             await self.system.shutdown()
             print_success("Bye.")
@@ -664,52 +712,60 @@ class AgentCliController:
             await self._publish_context_usage(state.history)
             return await self._handle_slash_command(raw_input, state)
 
-        admission = self.system._session.admit(
-            self.system.workspace, urgent=urgent, input_id=input_id
-        )
-        app_config.reload_config()
-        missing = app_config.missing_main_api_keys()
-        if missing:
-            print_warning(
-                "缺少主模型 API 配置: "
-                + ", ".join(missing)
-                + "。请先输入 /api，或在 .env/config.json 中配置。"
-            )
+        if not self._ready.is_set():
             return "continue"
-
-        references = asyncio.create_task(
-            load_file_refs(raw_input, workspace=admission.workspace)
-        )
-        references.add_done_callback(
-            lambda done: None if done.cancelled() else done.exception()
-        )
-        if admission.urgent:
-            await self.system.add_urgent_message(
-                user_message_from_cli_input(raw_input),
-                admission=admission,
-                references=references,
+        transition = self._transition
+        async with self._admission_lock:
+            if transition != self._transition or not self._ready.is_set():
+                return "continue"
+            if not urgent:
+                await self.system.retry_saved_state()
+                if transition != self._transition or not self._ready.is_set():
+                    return "continue"
+            admission = self.system._session.admit(
+                self.system.workspace, urgent=urgent, input_id=input_id
             )
-            print_success("加急输入已登记，将按提交顺序在下一次请求中处理。")
-            return "continue"
-        logger.debug(
-            "input admitted id=%s sequence=%s urgent=False",
-            admission.id,
-            admission.sequence,
-        )
-        future = self.system._session.queue.submit(
-            lambda: self._start_user_turn_from_raw_input(
-                raw_input,
-                state,
-                wait_for_turn=True,
-                goal_mode=goal_mode,
-                references=references,
-                admission=admission,
-            ),
-            data=raw_input,
-        )
-        future.add_done_callback(
-            lambda done: references.cancel() if done.cancelled() else None
-        )
+            app_config.reload_config()
+            if missing := app_config.missing_main_api_keys():
+                print_warning(
+                    "缺少主模型 API 配置: "
+                    + ", ".join(missing)
+                    + "。请先输入 /api，或在 .env/config.json 中配置。"
+                )
+                return "continue"
+            references = asyncio.create_task(
+                load_file_refs(raw_input, workspace=admission.workspace)
+            )
+            references.add_done_callback(
+                lambda done: None if done.cancelled() else done.exception()
+            )
+            if admission.urgent:
+                await self.system.add_urgent_message(
+                    user_message_from_cli_input(raw_input),
+                    admission=admission,
+                    references=references,
+                )
+                print_success("加急输入已登记，将按提交顺序在下一次请求中处理。")
+                return "continue"
+            logger.debug(
+                "input admitted id=%s sequence=%s urgent=False",
+                admission.id,
+                admission.sequence,
+            )
+            future = self.system._session.queue.submit(
+                lambda: self._start_user_turn_from_raw_input(
+                    raw_input,
+                    state,
+                    wait_for_turn=True,
+                    goal_mode=goal_mode,
+                    references=references,
+                    admission=admission,
+                ),
+                data=raw_input,
+            )
+            future.add_done_callback(
+                lambda done: references.cancel() if done.cancelled() else None
+            )
         if wait_for_turn:
             await future
         return "continue"
@@ -736,19 +792,16 @@ class AgentCliController:
         self._active_session_state = state
 
         async def on_cli_keyboard_interrupt() -> None:
-            if self.system.has_current_turn:
-                print_warning(await self.system.stop_current_turn())
-                return
-            raise KeyboardInterrupt
+            if not self.system.has_current_turn:
+                raise KeyboardInterrupt
+            print_warning(await self.system.stop_current_turn())
 
         repl = InteractiveRepl(on_interrupt_during_handler=on_cli_keyboard_interrupt)
         self._legacy_repl = repl
         self.set_snapshot_picker(
             lambda snapshots: legacy_pick_snapshot(snapshots, repl.read_line)
         )
-        loaded = await self.enter_current_workspace()
-        if loaded:
-            state.is_first_input = False
+        await self.enter_current_workspace()
 
         pending_answer = None
         question_lock = asyncio.Lock()

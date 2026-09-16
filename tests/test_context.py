@@ -18,7 +18,7 @@ from redlotus.core import history as checker
 from redlotus.core.agents import WorkspaceContext
 from redlotus.core.agents import workspace_context
 from redlotus.core.session import SessionFile
-from redlotus.core.session import read_saved_model_messages_file
+from redlotus.core.cli_commands import read_saved_model_messages_file
 from redlotus.core.history import messages_safe_for_new_prompt
 from redlotus.core.history import ChatHistory
 from redlotus.core.agents import AgentRunPolicy

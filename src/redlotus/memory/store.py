@@ -19,6 +19,9 @@ from redlotus.memory.retrieval import RAG
 from redlotus.core.config import missing_rag_api_keys, settings, file_lock, iso_utc_now
 
 
+MEMORY_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
 class MemoryStore:
     TABLE = "memory_records_v3"
 
@@ -78,7 +81,7 @@ class MemoryStore:
         return sorted(records, key=lambda item: (item.created_at, item.id))
 
     def get(self, identity):
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identity):
+        if not MEMORY_ID_PATTERN.fullmatch(identity):
             raise ValueError("Invalid memory id")
         table = self._table()
         rows = (
@@ -417,7 +420,12 @@ class MemoryReader:
         """Read a permitted complete memory; optionally include original referenced media."""
         if not self.owner_memory_allowed:
             return "Error: Personal memory unavailable."
-        record = self.store.get(id)
+        if not MEMORY_ID_PATTERN.fullmatch(id):
+            return "Error: Invalid memory id."
+        try:
+            record = self.store.get(id)
+        except KeyError:
+            return "Error: Memory not found or unavailable."
         if record.state != "active":
             return json.dumps(dict(id=record.id, state=record.state))
         if not include_references:
@@ -455,6 +463,8 @@ class MemoryReader:
         """Read one current-project episode with its original evidence sources."""
         if not self.owner_memory_allowed:
             return "Error: Personal memory unavailable."
+        if not MEMORY_ID_PATTERN.fullmatch(id):
+            return "Error: Invalid episode id."
         try:
             row = self.store.get(id)
         except KeyError:

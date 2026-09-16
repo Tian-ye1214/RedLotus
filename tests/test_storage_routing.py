@@ -9,7 +9,7 @@ from redlotus.core.agents import WorkspaceContext
 from redlotus.core.agents import workspace_context
 from redlotus.core.session import SessionFile
 from redlotus.core.session import conversations_root
-from redlotus.core.session import list_workspace_snapshots
+from redlotus.core.cli_commands import list_workspace_snapshots
 
 
 async def test_session_and_reference_files_are_separate_from_memory(
