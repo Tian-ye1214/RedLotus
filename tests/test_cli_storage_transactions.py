@@ -467,8 +467,20 @@ def test_terminal_corruption_ignores_commit_shaped_text_and_nested_metadata(tmp_
     damaged = store.path.read_bytes().replace(b'"title":"last"', b'"title":broken')
     store.path.write_bytes(damaged)
 
-    restored = SessionFile.load(store.path)
+    with pytest.raises(ValueError, match="事务|损坏"):
+        SessionFile.load(store.path)
+    assert store.path.read_bytes() == damaged
 
+
+def test_incomplete_tail_with_nested_commit_values_recovers_only_prior_commit(tmp_path):
+    store = SessionFile.create(tmp_path, "project")
+    store.update(metadata={"title": "first"})
+    embedded = {"metadata": {"title": "embedded"}}
+    embedded["commit"] = store._commit_tag(embedded, 99)
+    store.update(metadata={"literal": json.dumps(embedded), "nested": [embedded], "unfinished": "ending"})
+    raw = store.path.read_bytes()
+    store.path.write_bytes(raw[:raw.index(b'"ending"') + 4])
+    restored = SessionFile.load(store.path)
     assert restored.metadata["title"] == "first"
     assert restored.recovered_partial_write
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import asyncio
 from copy import deepcopy
@@ -132,34 +133,10 @@ class SessionFile:
 
     def _read(self):
         with self._mutex, self._lock:
-            self.recovered_partial_write = False
             previous_view = self._view
             previous_records = getattr(self, "_records", {})
-            raw = self.path.read_bytes()
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                if exc.reason != "unexpected end of data" or exc.end != len(raw):
-                    raise
-                text = raw[:exc.start].decode("utf-8")
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                data = self._recover(text)
-            if (not isinstance(data, dict) or not isinstance(data.get("updates"), list)
-                    or not all(isinstance(data.get(key), str) for key in ("session_id", "project_id", "title", "created_at"))):
-                raise ValueError(f"会话结构无效: {self.path}")
+            data, self.recovered_partial_write = self._inspect(self.path.read_bytes())
             updates = data["updates"]
-            for number, update in enumerate(updates, 1):
-                if not isinstance(update, dict):
-                    raise ValueError(f"会话事务结构无效: {self.path}, transaction={number}")
-                commit = update.get("commit")
-                if commit and commit != self._commit_tag(update, number):
-                    if number != len(updates):
-                        raise ValueError(f"会话中间事务校验失败: {self.path}, transaction={number}")
-                    updates.pop()
-                    self.recovered_partial_write = True
-                    break
             if self.recovered_partial_write:
                 if not self._recover_partial:
                     raise ValueError(f"会话含未完成事务，未修改原文件: {self.path}")
@@ -181,76 +158,105 @@ class SessionFile:
             self._last_commit = updates[-1].get("commit") if updates else None
             self._saved_version = self._version()
 
+    def _inspect(self, raw):
+        """Validate a recovery candidate without changing the file or published state."""
+        partial_character = False
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            if exc.reason != "unexpected end of data" or exc.end != len(raw):
+                raise
+            text = raw[:exc.start].decode("utf-8")
+            partial_character = True
+        repaired = False
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data, repaired = self._recover(text), True
+        else:
+            if partial_character:
+                raise ValueError(f"完整会话之后存在损坏字节，未修改原文件: {self.path}")
+        if (not isinstance(data, dict) or not isinstance(data.get("updates"), list)
+                or not all(isinstance(data.get(key), str) for key in ("session_id", "project_id", "title", "created_at"))):
+            raise ValueError(f"会话结构无效: {self.path}")
+        updates = data["updates"]
+        committed = False
+        for number, update in enumerate(updates, 1):
+            if not isinstance(update, dict):
+                raise ValueError(f"会话事务结构无效: {self.path}, transaction={number}")
+            commit = update.get("commit")
+            if (commit is not None and commit != self._commit_tag(update, number)) or (
+                commit is None and committed
+            ):
+                raise ValueError(f"会话事务校验失败，未修改原文件: {self.path}, transaction={number}")
+            committed = committed or commit is not None
+        return data, repaired
+
     def _recover(self, text):
-        """Discard only an incomplete trailing update, never invent a completed turn."""
+        """Produce a candidate only when no later committed batch would be discarded."""
         prefix, tail = text.split(',"updates":[', 1)
         data, updates = json.loads(prefix + "}"), []
         decoder, offset = json.JSONDecoder(), 0
 
-        def top_level_end(start):
-            """Find one journal row boundary without treating strings or nested dicts as rows."""
-            depth, quoted, escaped = 0, False, False
-            for index in range(start, len(tail)):
-                char = tail[index]
-                if quoted:
-                    if escaped:
-                        escaped = False
-                    elif char == "\\":
-                        escaped = True
-                    elif char == '"':
-                        quoted = False
-                    continue
-                if char == '"':
-                    quoted = True
-                elif char in "[{":
-                    depth += 1
-                elif char in "]}":
-                    if depth == 0:
-                        return None
-                    depth -= 1
-                    if depth == 0:
-                        return index + 1
-            return None
-
         def has_following_commit(start):
-            """Reject recovery when a later complete journal row survived the corruption."""
-            cursor = start
-            while cursor < len(tail):
-                while cursor < len(tail) and tail[cursor] in " \r\n\t,":
-                    cursor += 1
-                if cursor >= len(tail) or tail[cursor] != "{":
-                    return False
-                end = top_level_end(cursor)
-                if end is None:
-                    return False
+            """Find independently verifiable rows, even after a broken quote or brace."""
+            value_end = start
+            for match in re.finditer(r"[\[{]", tail[start:]):
+                cursor = start + match.start()
+                if cursor < value_end:
+                    continue
                 try:
-                    candidate, decoded_end = decoder.raw_decode(tail, cursor)
+                    candidate, end = decoder.raw_decode(tail, cursor)
                 except json.JSONDecodeError:
-                    candidate, decoded_end = None, cursor
+                    continue
+                before = cursor - 1
+                while before >= start and tail[before].isspace():
+                    before -= 1
+                if before >= start and tail[before] == ":":
+                    # A complete field value is data, including nested commit-shaped objects.
+                    value_end = end
+                    continue
                 commit = candidate.get("commit") if isinstance(candidate, dict) else None
                 if (
-                    decoded_end == end
-                    and isinstance(commit, dict)
+                    isinstance(commit, dict)
                     and isinstance(commit.get("sequence"), int)
                     and commit["sequence"] > len(updates)
                     and commit == self._commit_tag(candidate, commit["sequence"])
                 ):
                     return True
-                cursor = end
             return False
 
+        def incomplete(exc):
+            """Recognize a valid JSON prefix cut at EOF, not arbitrary invalid syntax."""
+            rest = tail[exc.pos:]
+            if not rest or exc.msg.startswith("Unterminated string"):
+                return True
+            if exc.msg.startswith("Invalid \\u"):
+                return bool(re.fullmatch(r"u[0-9a-fA-F]{0,3}", rest))
+            if exc.msg == "Expecting value":
+                return rest in {"t", "tr", "tru", "f", "fa", "fal", "fals", "n", "nu", "nul", "-"}
+            return (exc.pos > 0 and tail[exc.pos - 1].isdigit()
+                    and rest in {".", "e", "e+", "e-", "E", "E+", "E-"})
+
         while offset < len(tail):
-            while offset < len(tail) and tail[offset] in " \r\n\t,":
+            while offset < len(tail) and tail[offset].isspace():
                 offset += 1
+            if tail[offset:] in {"", "]", "]}"}:
+                break
+            if updates:
+                if tail[offset:offset + 1] != ",":
+                    raise ValueError(f"会话事务边界损坏，未修改原文件: {self.path}")
+                offset += 1
+                while offset < len(tail) and tail[offset].isspace():
+                    offset += 1
             try:
                 update, offset = decoder.raw_decode(tail, offset)
             except json.JSONDecodeError as exc:
-                if has_following_commit(offset):
-                    raise ValueError(f"会话中间事务损坏，未修改原文件: {self.path}") from exc
+                if has_following_commit(offset) or not incomplete(exc):
+                    raise ValueError(f"会话事务损坏，无法确认仅为尾部半写，未修改原文件: {self.path}") from exc
                 break
             updates.append(update)
         data["updates"] = updates
-        self.recovered_partial_write = True
         return data
 
     @staticmethod

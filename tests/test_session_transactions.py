@@ -35,9 +35,20 @@ def test_checksum_rejects_complete_but_damaged_last_transaction(tmp_path):
     raw = store.path.read_bytes().replace(b'"title":"later"', b'"title":"other"')
     store.path.write_bytes(raw)
 
-    restored = SessionFile.load(store.path)
-    assert restored.metadata['title'] == 'first'
-    assert restored.recovered_partial_write
+    with pytest.raises(ValueError, match='事务|transaction|校验'):
+        SessionFile.load(store.path)
+    assert store.path.read_bytes() == raw
+
+
+@pytest.mark.parametrize('suffix', [b'{"metadata":broken}', b'{"metadata":broken', b'null', b'???'])
+def test_unproven_tail_corruption_is_read_only(tmp_path, suffix):
+    store = SessionFile.create(tmp_path, 'project')
+    store.update(metadata={'title': 'first'})
+    raw = store.path.read_bytes()[:-3] + b',\n' + suffix
+    store.path.write_bytes(raw)
+    with pytest.raises(ValueError):
+        SessionFile.load(store.path)
+    assert store.path.read_bytes() == raw
 
 
 def test_middle_corruption_is_reported_without_rewriting_file(tmp_path):
@@ -61,6 +72,63 @@ def test_malformed_middle_json_is_not_mistaken_for_an_incomplete_tail(tmp_path):
     with pytest.raises(ValueError):
         SessionFile.load(store.path)
     assert store.path.read_bytes() == damaged
+
+
+def test_partial_utf8_after_a_complete_document_is_not_a_partial_transaction(tmp_path):
+    store = SessionFile.create(tmp_path, 'project')
+    store.update(metadata={'title': 'first'})
+    raw = store.path.read_bytes() + '中'.encode()[:2]
+    store.path.write_bytes(raw)
+    with pytest.raises(ValueError):
+        SessionFile.load(store.path)
+    assert store.path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("damage", ["quote", "brace"])
+@pytest.mark.parametrize("trailer", [True, False])
+@pytest.mark.parametrize("newlines", [True, False])
+def test_unbalanced_middle_record_never_erases_a_later_commit(
+    tmp_path, damage, trailer, newlines
+):
+    store = SessionFile.create(tmp_path, 'project')
+    for title in ('first', 'second', 'third'):
+        store.update(metadata={'title': title})
+    raw = store.path.read_bytes()
+    second = json.dumps(
+        json.loads(raw)['updates'][1], ensure_ascii=False, separators=(',', ':')
+    ).encode()
+    broken = (
+        second.replace(b'"second"', b'"second')
+        if damage == 'quote' else second[:-1]
+    )
+    damaged = raw.replace(second, broken)
+    if not trailer:
+        damaged = damaged[:-3]
+    if not newlines:
+        damaged = damaged.replace(b'\n', b' ')
+    store.path.write_bytes(damaged)
+
+    with pytest.raises(ValueError, match='事务|损坏'):
+        SessionFile.load(store.path)
+    assert store.path.read_bytes() == damaged
+
+
+def test_every_truncated_tail_recovers_only_complete_batches(tmp_path):
+    store = SessionFile.create(tmp_path, 'project')
+    store.update(metadata={'title': 'committed'})
+    prefix = store.path.read_bytes()[:-3]
+    store.update(metadata={'title': '新增中文', 'completed_turns': 1})
+    complete = store.path.read_bytes()
+    # Exercise delimiter, UTF-8, payload, checksum and closing-marker boundaries.
+    for end in range(len(prefix), len(complete)):
+        store.path.write_bytes(complete[:end])
+        loaded = SessionFile.load(store.path)
+        assert loaded.metadata['title'] in ('committed', '新增中文')
+        if loaded.metadata['title'] == '新增中文':
+            assert loaded.completed_turns == 1
+            assert b'"checksum"' in complete[:end]
+        else:
+            assert loaded.completed_turns == 0
 
 
 def test_failed_sync_never_advances_memory_and_retry_does_not_duplicate(tmp_path):

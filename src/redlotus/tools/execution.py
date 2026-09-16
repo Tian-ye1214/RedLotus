@@ -470,13 +470,13 @@ def _environment_state(environment: ExecutionEnvironment) -> str:
 
 
 def _shell_tokens(command: str) -> list[str]:
-    lexer = shlex.shlex(command, posix=False, punctuation_chars=";&|\n")
+    lexer = shlex.shlex(command, posix=False, punctuation_chars=";&|\n{}")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""
     tokens = []
     for token in lexer:
-        tokens.append(token)
+        tokens.extend(re.findall(r"&&|\|\||[;&|\n{}]", token) if token and all(c in ";&|\n{}" for c in token) else [token])
         if _program_name(tokens[0]) in {"cmd", "cmd.exe"} and token.lower() in {
             "/c",
             "/k",
@@ -498,12 +498,19 @@ def _command_invocations(command, *, posix_shell=None):
         )
     segment = []
     for token in [*tokens, ";"]:
-        if token not in _SEPARATORS:
+        if token not in _SEPARATORS | {"{", "}"}:
             segment.append(str(token))
             continue
         if not segment:
             continue
         yield segment
+        if segment[0].lower() in {"if", "elseif", "while", "until", "switch"}:
+            condition = " ".join(segment[1:]).strip()
+            if condition.startswith("(") and condition.endswith(")"):
+                condition = condition[1:-1].strip()
+                # Scalar/variable tests are values; a command in the condition still executes.
+                if condition and not re.match(r'''^(?:\$[\w]+|\d|["'])''', condition):
+                    yield from _command_invocations(condition, posix_shell=posix_shell)
         if _program_name(segment[0]) in {
             "cmd",
             "cmd.exe",
@@ -516,7 +523,11 @@ def _command_invocations(command, *, posix_shell=None):
             "zsh",
         }:
             for index, value in enumerate(segment):
-                if value.lower() in {"/c", "/k", "-c", "-command"}:
+                option = value.lower()
+                powershell = _program_name(segment[0]).removesuffix(".exe") in {"powershell", "pwsh"}
+                if option in {"/c", "/k", "-c", "-command"} or (
+                    powershell and option.startswith("-c") and "-command".startswith(option)
+                ):
                     yield from _command_invocations(
                         _unquote_shell_word(" ".join(segment[index + 1 :])),
                         posix_shell=_program_name(segment[0]) in {"sh", "bash", "zsh"},
@@ -528,7 +539,7 @@ def _command_invocations(command, *, posix_shell=None):
 def validate_agent_command(command, *, cwd: str) -> None:
     """One policy entry for commands, inline programs and executed scripts."""
     from redlotus.core.agents import current_execution_role
-    from redlotus.tools.registry import PythonCommandCheck
+    from redlotus.tools.registry import PythonCommandCheck, JavaScriptCommandCheck
     from redlotus.tools.registry import code_without_literals
     from redlotus.tools.registry import read_script
 
@@ -539,7 +550,7 @@ def validate_agent_command(command, *, cwd: str) -> None:
     restricted = role in policy.get("restricted_roles", [])
     visited = set()
 
-    def source(text, *, python=False, shell=False):
+    def source(text, *, python=False, javascript=False, shell=False):
         if python:
             try:
                 PythonCommandCheck(policy, inspect, restricted=restricted).check(text)
@@ -548,6 +559,8 @@ def validate_agent_command(command, *, cwd: str) -> None:
         else:
             if shell:
                 inspect(text)
+            if javascript:
+                JavaScriptCommandCheck(policy, inspect, restricted=restricted).check(text)
             if restricted and any(
                 re.search(pattern, code_without_literals(text), re.I | re.M)
                 for pattern in policy["blocked_script_patterns"]
@@ -561,6 +574,10 @@ def validate_agent_command(command, *, cwd: str) -> None:
             name = _program_name(values[0]).removesuffix(".exe")
             words = [_unquote_shell_word(item) for item in values]
             lower = [item.lower() for item in words]
+            if restricted and policy.get("require_explicit_commands") and (
+                words[0].startswith(("$", "%")) and "=" not in words and "=" not in words[0]
+            ):
+                raise PermissionError("Use an explicit command; the executable cannot be resolved before execution.")
             if name in policy["background_commands"] and not (
                 name == "start-process" and "-wait" in lower
             ):
@@ -571,7 +588,11 @@ def validate_agent_command(command, *, cwd: str) -> None:
                 name in policy["blocked_commands"]
                 or (
                     name in {"powershell", "pwsh"}
-                    and any(item in policy["blocked_shell_options"] for item in lower)
+                    and any(
+                        item in policy["blocked_shell_options"]
+                        or (item.startswith("-e") and "-encodedcommand".startswith(item))
+                        for item in lower
+                    )
                 )
                 or (
                     name == "wmic"
@@ -583,12 +604,41 @@ def validate_agent_command(command, *, cwd: str) -> None:
                 raise PermissionError(
                     f"Permission denied for {role}: process-control commands are reserved for the runtime."
                 )
+            if name == "start-process":
+                target, arguments = None, []
+                index = 1
+                while index < len(words):
+                    option = lower[index]
+                    if option.startswith("-f") and "-filepath".startswith(option):
+                        index += 1
+                        target = words[index] if index < len(words) else None
+                    elif option.startswith("-a") and "-argumentlist".startswith(option):
+                        index += 1
+                        start = index
+                        while index < len(words) and not lower[index].startswith("-"):
+                            index += 1
+                        raw_arguments = " ".join(values[start:index])
+                        # PowerShell's comma-separated string array becomes one OS command line.
+                        lexer = shlex.shlex(raw_arguments, posix=False, punctuation_chars=",")
+                        lexer.whitespace_split, lexer.commenters = True, ""
+                        arguments = _shell_tokens(" ".join(
+                            _unquote_shell_word(part) for part in lexer if part != ","
+                        )) if raw_arguments else None
+                        index -= 1
+                    elif not option.startswith("-") and target is None:
+                        target = words[index]
+                    index += 1
+                if not target or arguments is None or any("$" in part for part in [target, *arguments]):
+                    if restricted and policy.get("require_explicit_commands"):
+                        raise PermissionError("Use an explicit command for Start-Process, including its arguments.")
+                else:
+                    inspect([target, *arguments])
             python = name in {"python", "python3", "py"}
             inline = "-c" if python else "-e" if name in {"node", "nodejs"} else None
             if inline and inline in lower:
                 index = lower.index(inline)
                 if index + 1 < len(words):
-                    source(words[index + 1], python=python)
+                    source(words[index + 1], python=python, javascript=not python)
                 continue
             programs = {
                 "python",
@@ -619,6 +669,7 @@ def validate_agent_command(command, *, cwd: str) -> None:
                 source(
                     read_script(path),
                     python=extension in {".py", ".pyw"},
+                    javascript=extension in {".js", ".mjs", ".cjs"},
                     shell=extension in {".ps1", ".sh", ".bat", ".cmd"},
                 )
                 break

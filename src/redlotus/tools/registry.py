@@ -78,10 +78,35 @@ class PythonCommandCheck(ast.NodeVisitor):
     def literal(self, node):
         if isinstance(node, ast.Name):
             return self.values.get(node.id)
+        if isinstance(node, (ast.List, ast.Tuple)):
+            items = []
+            for item in node.elts:
+                value = self.literal(item.value if isinstance(item, ast.Starred) else item)
+                if value is None or (isinstance(item, ast.Starred) and not isinstance(value, (list, tuple))):
+                    return None
+                items.extend(value if isinstance(item, ast.Starred) else [value])
+            return items
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = self.literal(node.left), self.literal(node.right)
+            if isinstance(left, (str, list, tuple)) and type(left) is type(right):
+                return left + right
+            return None
         try:
             return ast.literal_eval(node)
         except (ValueError, TypeError):
             return None
+
+    def command(self, value):
+        """Known launch APIs require a completely resolved command before execution."""
+        explicit = isinstance(value, str) and bool(value)
+        explicit = explicit or (
+            isinstance(value, (list, tuple)) and bool(value)
+            and all(isinstance(part, str) for part in value) and bool(value[0])
+        )
+        if explicit:
+            self.inspect_command(value)
+        elif self.restricted and self.policy.get("require_explicit_commands"):
+            raise PermissionError("Use an explicit command: the process target or arguments cannot be resolved before execution.")
 
     def visit_Import(self, node):
         for alias in node.names:
@@ -127,9 +152,16 @@ class PythonCommandCheck(ast.NodeVisitor):
                     None,
                 )
             )
+            if name in self.policy.get("argv_command_wrappers", []):
+                argument = ast.List(elts=node.args)
             command = self.literal(argument)
-            if isinstance(command, (str, list, tuple)):
-                self.inspect_command(command)
+            for item in node.keywords:
+                if item.arg == "executable":
+                    executable = self.literal(item.value)
+                    self.command([executable])
+                if item.arg == "shell" and self.literal(item.value) is True and isinstance(command, list):
+                    command = " ".join(command)
+            self.command(command)
         if name == "subprocess.Popen":
             self.unwaited.add(id(node))
         if isinstance(node.func, ast.Attribute) and node.func.attr in {
@@ -171,6 +203,124 @@ class PythonCommandCheck(ast.NodeVisitor):
             )
 
     visit_AsyncFunctionDef = visit_FunctionDef
+
+
+class JavaScriptCommandCheck(PythonCommandCheck):
+    """Resolve known child_process imports and literal arguments; never execute source."""
+
+    def check(self, source):
+        tokens = re.findall(
+            r'''//[^\n]*|/\*[\s\S]*?\*/|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`|[\w$]+|\.\.\.|=>|\n|[^\s]''',
+            source,
+        )
+        tokens = [token for token in tokens if not token.startswith(("//", "/*"))]
+        wrappers = self.policy.get("javascript_command_wrappers", {})
+        for index, token in enumerate(tokens):
+            if token == "import":
+                end = next((n for n in range(index + 1, len(tokens)) if tokens[n] == "from"), None)
+                if end is not None and self._module(tokens[end + 1:end + 2]):
+                    self._bind(tokens[index + 1:end], imported=True)
+            if token == "=":
+                end = self._expression_end(tokens, index + 1)
+                expression = tokens[index + 1:end]
+                if index and tokens[index - 1] == "}":
+                    start = index - 2
+                    while start >= 0 and tokens[start] != "{":
+                        start -= 1
+                    if self._qualified(expression) == "child_process":
+                        self._bind(tokens[start:index])
+                elif index and re.fullmatch(r"[\w$]+", tokens[index - 1]):
+                    name = tokens[index - 1]
+                    self.names.pop(name, None)
+                    self.values.pop(name, None)
+                    self.names[name] = self._qualified(expression)
+                    self.values[name] = self._value(expression)
+            if token != "(":
+                continue
+            name = self._callee(tokens, index)
+            if not name or not name.startswith("child_process."):
+                continue
+            kind = wrappers.get(name.split(".")[-1])
+            if kind is None:
+                continue
+            arguments, _ = self._arguments(tokens, index + 1)
+            program = self._value(arguments[0]) if arguments else None
+            if kind == "shell":
+                self.command(program)
+                continue
+            argv = self._value(arguments[1]) if len(arguments) > 1 else []
+            if len(arguments) > 1 and ("=>" in arguments[1] or arguments[1][:1] == ["function"]):
+                argv = []
+            command = [program, *argv] if isinstance(program, str) and isinstance(argv, list) else None
+            if kind == "script" and command:
+                command.insert(0, "node")
+            options = arguments[2] if len(arguments) > 2 else []
+            if command and any(options[n:n + 3] == ["shell", ":", "true"] for n in range(len(options))):
+                command = " ".join(command)
+            self.command(command)
+
+    def _module(self, tokens):
+        return self._value(tokens) in self.policy.get("javascript_modules", [])
+
+    def _qualified(self, tokens):
+        if tokens[:2] == ["require", "("] and len(tokens) >= 4 and self._module(tokens[2:3]) and tokens[3] == ")":
+            base, rest = "child_process", tokens[4:]
+        elif tokens:
+            base, rest = self.names.get(tokens[0]), tokens[1:]
+        else:
+            return None
+        return base + "." + rest[1] if base and len(rest) >= 2 and rest[0] == "." else base
+
+    def _callee(self, tokens, end):
+        start = end - 1
+        if start >= 2 and tokens[start - 1] == ".":
+            start -= 2
+            if tokens[start] == ")" and start >= 3:
+                start -= 3
+        return self._qualified(tokens[start:end]) if start >= 0 else None
+
+    def _bind(self, tokens, *, imported=False):
+        if tokens[:1] == ["{"]:
+            for group in " ".join(tokens[1:-1]).split(","):
+                names = group.split()
+                if names:
+                    self.names[names[-1]] = "child_process." + names[0]
+        elif tokens:
+            self.names[tokens[-1] if imported and tokens[0] == "*" else tokens[0]] = "child_process"
+
+    @staticmethod
+    def _expression_end(tokens, start):
+        depth = 0
+        for index in range(start, len(tokens)):
+            token = tokens[index]
+            if depth == 0 and token in {";", ",", "\n"}:
+                return index
+            depth += (token in {"(", "[", "{"}) - (token in {")", "]", "}"})
+            if depth < 0:
+                return index
+        return len(tokens)
+
+    @staticmethod
+    def _arguments(tokens, start):
+        groups, current, depth = [], [], 0
+        for index in range(start, len(tokens)):
+            token = tokens[index]
+            if depth == 0 and token in {",", ")"}:
+                groups.append(current)
+                current = []
+                if token == ")":
+                    return groups, index
+                continue
+            current.append(token)
+            depth += (token in {"(", "[", "{"}) - (token in {")", "]", "}"})
+        return [], len(tokens)
+
+    def _value(self, tokens):
+        try:
+            expression = " ".join("*" if token == "..." else token for token in tokens)
+            return self.literal(ast.parse(expression, mode="eval").body)
+        except SyntaxError:
+            return None
 
 
 def runtime_repo_root() -> Path:

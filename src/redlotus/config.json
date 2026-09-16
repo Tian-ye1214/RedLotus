@@ -209,6 +209,18 @@
       "npm_config_userconfig"
     ],
     "permissions": {
+      "require_explicit_commands": true,
+      "argv_command_wrappers": ["asyncio.create_subprocess_exec"],
+      "javascript_modules": ["child_process", "node:child_process"],
+      "javascript_command_wrappers": {
+        "exec": "shell",
+        "execSync": "shell",
+        "spawn": "argv",
+        "spawnSync": "argv",
+        "execFile": "argv",
+        "execFileSync": "argv",
+        "fork": "script"
+      },
       "restricted_roles": [
         "worker",
         "manager"
