@@ -136,11 +136,15 @@ Common shortcuts:
 
 | Shortcut | Action |
 |----------|--------|
+| `Enter` | Submit normally; pending outer turns appear as dimmed queued messages |
+| `Ctrl+Enter` | Add to the active inner loop at the next model request; start a normal turn when idle |
 | `Shift+Tab` | Switch run mode |
 | `Ctrl+R` | Open the pending-change review |
 | `Ctrl+C` | Stop the current turn |
 | `Ctrl+Q` | Exit |
 | `@path` | Reference documents and images, with Tab completion; up to 20 files. Video validation is deferred. |
+
+Urgent messages keep normal brightness and an explicit label. The `/urgent` text command has been removed. Both LF and extended Ctrl+Enter encodings are accepted. Terminals that encode Ctrl+Enter exactly like Enter need a terminal-side mapping; see [keyboard behavior and verification](docs/keyboard-input.md).
 
 References can be adjacent or separated by punctuation, for example `@review.md,@image.png`. Tab completes the current reference and automatically quotes paths containing spaces or delimiters; `@"path"`, `@'path'`, and `@{path}` also work. Files are deduplicated in first-appearance order. More than 20 distinct files produces an error instead of a partial upload.
 

@@ -91,12 +91,12 @@ async def test_slow_urgent_keeps_submission_order_through_final_response(
             await system.process_cli_line("begin", state, wait_for_turn=False)
             await model_started.wait()
             first = asyncio.create_task(
-                system.process_cli_line("/urgent urgent-1", state, wait_for_turn=False)
+                system.process_cli_line("urgent-1", state, wait_for_turn=False, urgent=True)
             )
             await parse_started.wait()
             for number in range(2, 7):
                 await system.process_cli_line(
-                    f"/urgent urgent-{number}", state, wait_for_turn=False
+                    f"urgent-{number}", state, wait_for_turn=False, urgent=True
                 )
             model_release.set()
             await asyncio.sleep(0.05)
@@ -158,7 +158,7 @@ async def test_late_urgent_cannot_become_a_new_task(tmp_path, monkeypatch, contr
             await system.process_cli_line("old task", state, wait_for_turn=False)
             await started.wait()
             late = asyncio.create_task(
-                system.process_cli_line("/urgent OLD_ONLY", state, wait_for_turn=False)
+                system.process_cli_line("OLD_ONLY", state, wait_for_turn=False, urgent=True)
             )
             await parsing.wait()
             await system.process_cli_line("QUEUED_TASK", state, wait_for_turn=False)
@@ -224,7 +224,7 @@ async def test_failed_urgent_does_not_drop_input_registered_at_later_boundary(
             await system.process_cli_line("begin", state, wait_for_turn=False)
             await started.wait()
             await system.process_cli_line(
-                "/urgent bad attachment", state, wait_for_turn=False
+                "bad attachment", state, wait_for_turn=False, urgent=True
             )
             await parsing.wait()
             release_model.set()
@@ -232,7 +232,7 @@ async def test_failed_urgent_does_not_drop_input_registered_at_later_boundary(
             while system._session._urgent:
                 await asyncio.sleep(0)
             await system.process_cli_line(
-                "/urgent keep this", state, wait_for_turn=False
+                "keep this", state, wait_for_turn=False, urgent=True
             )
             release_parse.set()
             await system._session.queue.join()
@@ -242,7 +242,7 @@ async def test_failed_urgent_does_not_drop_input_registered_at_later_boundary(
             for part in request.parts
             if isinstance(part, UserPromptPart)
         )
-        assert system._cli_controller.last_rejected_input == "/urgent bad attachment"
+        assert system._cli_controller.last_rejected_input == "bad attachment"
     finally:
         release_parse.set()
         release_model.set()

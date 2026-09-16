@@ -8,7 +8,7 @@
 | 功能及入口 | 必须保持的结果 | 本地行为证据 | 本轮真实覆盖及缺口 |
 |---|---|---|---|
 | 普通输入、连续输入 | FIFO，回复归属正确，不丢失或重复 | `test_system`、`test_entries`、`test_acceptance_driver` | `live-v3` 完成同一会话 60 个真实用户回合 |
-| `/urgent` 与附件解析 | 原始边界和提交顺序保留；不进入已切换会话 | `test_runner`、`test_usage_input`、`test_reference_admission` | 第 10 回合分六次提交加急，登记及消费顺序一致，同属一个回合；慢附件组合仅辅助验证 |
+| `Ctrl+Enter` 与附件解析 | 原始边界和提交顺序保留；不进入已切换会话 | `test_runner`、`test_usage_input`、`test_reference_admission`、`test_entries` | 原六条加急的历史验收记录保留；新增按键与两城市天气真实验证见 [输入说明](keyboard-input.md)；慢附件组合仅辅助验证 |
 | `/stop`、Ctrl+C、`/clear`、`/cd` | 取消实际所属任务，保留独立普通队列；迟到回调失效 | `test_entries`、`test_control_receipts`、`test_usage_input` | 真实退出取消未完成感知；其他组合未全部实测 |
 | `/load`、项目进入选择 | 恢复原 session ID、上下文、提示词、任务、计数和引用 | `test_recovery`、`test_session_file`、`test_entries` | 第 19 回合退出并真实加载；加载没有模型请求；下一回合形成 1–20 窗口 |
 | `@` 引用、补全及去重 | 中文/空格/相邻引用；20 个可接纳、21 个拒绝；错误可修改 | `test_file_refs`、`test_reference_spaces`、`test_reference_admission` | 真实 CSV、Markdown、含空格路径和随机图片；20/21 边界仅辅助验证 |

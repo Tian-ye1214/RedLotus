@@ -2,10 +2,11 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
+import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.function import FunctionModel, DeltaToolCall
 from pydantic_ai.messages import ToolReturnPart
-from textual.widgets import Input
+from textual.widgets import Input, RichLog
 
 from redlotus.api.base import BotBase
 from redlotus.tools.interaction import UserMessage
@@ -49,6 +50,123 @@ async def tui_session(app, system):
     finally:
         set_output_sink(None)
         await system.shutdown()
+
+
+@pytest.mark.parametrize("sequence,turn_count", [("\r", 2), ("\x1b[13;5u", 1), ("\n", 1)],
+                         ids=["enter", "ctrl-enter-csi", "ctrl-enter-lf"])
+async def test_tui_keyboard_queue_and_urgent_have_distinct_turns_and_styles(
+    tmp_path, monkeypatch, sequence, turn_count
+):
+    """A supplementary city must join the running tool batch only with Ctrl+Enter."""
+    from pydantic_ai.messages import UserPromptPart
+    from textual._xterm_parser import XTermParser
+
+    system = configured_system(tmp_path, monkeypatch)
+    configure_cli_hooks(system, monkeypatch, preparer="system", enter_workspace=True)
+    started, release = asyncio.Event(), asyncio.Event()
+    requests = []
+
+    async def weather():
+        started.set()
+        await release.wait()
+        return "北京资料已就绪"
+
+    async def model(messages, info):
+        requests.append(list(messages[-1].parts))
+        if len(requests) == 1:
+            yield {0: DeltaToolCall(name="weather", json_args="{}", tool_call_id="weather-1")}
+        else:
+            yield "北京和成都" if any(
+                "还有成都的" in str(part.content)
+                for message in messages for part in message.parts
+                if isinstance(part, UserPromptPart)
+            ) else "北京"
+
+    async def create(*args, **kwargs):
+        return Agent(FunctionModel(stream_function=model), tools=[weather])
+
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
+    app = RedLotusTui(system)
+    app.state.is_first_input = False
+    async with tui_session(app, system) as pilot:
+        try:
+            inp = app.query_one("#input", AgentInput)
+            inp.value = "查询一下北京天气"
+            await pilot.press("enter")
+            await asyncio.wait_for(started.wait(), 5)
+            inp.value = "还有成都的"
+            for event in XTermParser().feed(sequence):
+                app._driver.process_message(event)
+            await pilot.pause()
+            assert inp.value == ""
+            assert len(system._session.queue.pending) == turn_count - 1
+            assert len(system._session._urgent) == 2 - turn_count
+            echo = [line for line in app.query_one("#output", RichLog).lines if "还有成都的" in line.text]
+            assert echo
+            dimmed = any(segment.style and segment.style.dim for line in echo
+                         for segment in line if "还有成都的" in segment.text)
+            assert dimmed is (turn_count == 2)
+            release.set()
+            await asyncio.wait_for(system._session.queue.join(), 5)
+            assert len(system._memory.observations.order()) == turn_count
+            if turn_count == 1:
+                assert len(requests) == 2
+                assert isinstance(requests[1][0], ToolReturnPart)
+                assert [part.content[0] for part in requests[1] if isinstance(part, UserPromptPart)] == ["还有成都的"]
+                turns = system._session_file.pending_turns(0)
+                assert turns[0]["user_inputs"] == ["查询一下北京天气", "还有成都的"]
+        finally:
+            release.set()
+
+
+async def test_tui_ctrl_enter_when_idle_starts_one_normal_turn(tmp_path, monkeypatch):
+    system = configured_system(tmp_path, monkeypatch)
+    configure_cli_hooks(system, monkeypatch, preparer="system", enter_workspace=True)
+
+    async def create(*args, **kwargs):
+        async def model(messages, info):
+            yield "收到"
+        return Agent(FunctionModel(stream_function=model))
+
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
+    app = RedLotusTui(system)
+    app.state.is_first_input = False
+    async with tui_session(app, system) as pilot:
+        inp = app.query_one("#input", AgentInput)
+        inp.value = "空闲时开始任务"
+        await pilot.press("ctrl+enter")
+        await until(lambda: len(system._memory.observations.order()) == 1 and not system.has_current_turn)
+        assert inp.value == ""
+        assert system._session_file.pending_turns(0)[0]["user_inputs"] == ["空闲时开始任务"]
+
+
+async def test_removed_urgent_command_cannot_submit_a_turn(tmp_path, monkeypatch):
+    from redlotus.core.console import input_completions
+
+    system = configured_system(tmp_path, monkeypatch)
+    configure_cli_hooks(system, monkeypatch)
+    try:
+        await system.process_cli_line("/urgent 补充", system.new_cli_session_state(), wait_for_turn=False)
+        assert not system.has_current_turn
+        assert not system._session.queue.pending
+        assert not system._memory.observations.order()
+        assert not list(input_completions("/ur"))
+    finally:
+        await system.shutdown()
+
+
+async def test_ctrl_enter_in_config_prompt_does_not_send_configuration_to_model(tmp_path, monkeypatch):
+    system = configured_system(tmp_path, monkeypatch)
+    configure_cli_hooks(system, monkeypatch, preparer="system", enter_workspace=True)
+    app = RedLotusTui(system)
+    async with tui_session(app, system) as pilot:
+        question = asyncio.create_task(app.ask_config("测试配置输入", secret=True))
+        await until(lambda: app._ask_future is not None)
+        app.query_one("#input", AgentInput).value = "test-only-configuration"
+        await pilot.press("ctrl+enter")
+        assert await asyncio.wait_for(question, 5) == "test-only-configuration"
+        assert not system._session.user_inputs
+        assert not system._memory.observations.order()
 
 
 class LocalBot(BotBase):
@@ -205,7 +323,8 @@ async def test_tui_urgent_and_stop_do_not_answer_pending_question(
         await app.on_input_submitted(Input.Submitted(inp, "ask me"))
         await until(lambda: app._ask_future is not None)
         answer = app._ask_future
-        await app.on_input_submitted(Input.Submitted(inp, "/urgent preserve evidence"))
+        inp.value = "preserve evidence"
+        await app.action_submit_urgent()
         await until(
             lambda: (
                 bool(system._session._urgent) and system._session._urgent[0][1].done()
@@ -345,7 +464,7 @@ async def test_urgent_after_final_response_is_queued_instead_of_lost(
     monkeypatch.setattr(system._memory, "finish_turn", delayed_finish)
     await cli.process_line("first", state, wait_for_turn=False)
     await asyncio.wait_for(entered.wait(), 5)
-    await cli.process_line("/urgent follow-up", state, wait_for_turn=False)
+    await cli.process_line("follow-up", state, wait_for_turn=False, urgent=True)
     assert [q[2] for q in system._session.queue.pending] == ["follow-up"]
     release.set()
     await until(lambda: len(inputs) == 2 and not system.has_current_turn)

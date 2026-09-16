@@ -580,7 +580,7 @@ class AgentSystem:
                 return message if self._session.accepts(admission) else None
             except (OSError, ValueError) as exc:
                 if self._session.accepts(admission):
-                    self._cli_controller.last_rejected_input = "/urgent " + (
+                    self._cli_controller.last_rejected_input = (
                         message.original_text or message.text
                     )
                     print_warning(str(exc))
@@ -922,6 +922,7 @@ class AgentSystem:
         wait_for_turn: bool,
         goal_mode: bool = False,
         input_id: str | None = None,
+        urgent: bool = False,
     ) -> str:
         return await self._cli_controller.process_line(
             raw_input,
@@ -929,6 +930,7 @@ class AgentSystem:
             wait_for_turn=wait_for_turn,
             goal_mode=goal_mode,
             input_id=input_id,
+            urgent=urgent,
         )
 
     async def run_interactive(self, *, stop_event: asyncio.Event | None = None) -> None:

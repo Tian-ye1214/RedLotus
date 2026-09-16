@@ -3,7 +3,7 @@ import time
 import asyncio
 import contextvars
 import mimetypes
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from redlotus.core import config as app_config, config as logger
@@ -266,17 +266,6 @@ class BotBase:
             )
             await self._safe_send(send_reply, "已结束当前任务并清空上下文。")
             return
-        if user_text == "/urgent" or user_text.startswith("/urgent "):
-            user_text = user_text[len("/urgent") :].strip()
-            if not user_text:
-                await self._safe_send(send_reply, "用法：/urgent <内容>")
-                return
-            message = replace(message, text=user_text, original_text=user_text)
-            if state.agent and await state.agent.add_urgent_message(message):
-                await self._safe_send(
-                    send_reply, "已加入当前回合，将与工具结果一起处理。"
-                )
-                return
         if state.question and not state.question.done():
             state.question.set_result(user_text)
             state.agent._session.user_inputs.append(user_text)

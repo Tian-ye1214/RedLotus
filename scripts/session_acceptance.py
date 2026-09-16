@@ -326,8 +326,8 @@ async def live(args, evidence):
                     await asyncio.sleep(0.01)
                 for item in range(6):
                     await driver.system.process_cli_line(
-                        f"/urgent 补充{item + 1}：最终核对时请按收到顺序列出编号{item + 1}。",
-                        driver.state, wait_for_turn=False,
+                        f"补充{item + 1}：最终核对时请按收到顺序列出编号{item + 1}。",
+                        driver.state, wait_for_turn=False, urgent=True,
                     )
                 result = await pending
             else:

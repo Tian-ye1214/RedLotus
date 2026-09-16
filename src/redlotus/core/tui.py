@@ -67,7 +67,14 @@ class AgentInputSuggester(Suggester):
 
 
 class AgentInput(Input):
-    BINDINGS = [*Input.BINDINGS, Binding("tab", "cursor_right", "Complete", show=False)]
+    BINDINGS = [
+        *Input.BINDINGS,
+        Binding("tab", "cursor_right", "Complete", show=False),
+        # Traditional terminals encode Ctrl+Enter as LF (Textual's ctrl+j).
+        Binding(
+            "ctrl+enter,ctrl+j", "app.submit_urgent", "加急", key_display="Ctrl+Enter"
+        ),
+    ]
 
 
 class SnapshotPickScreen(ModalScreen[WorkspaceSnapshot | None]):
@@ -609,10 +616,10 @@ class RedLotusTui(App[None]):
             text.append(f"{WORKING_LABEL}{suffix}")
         return text
 
-    def _write_user_input(self, value: str, *, title="用户") -> None:
+    def _write_user_input(self, value: str, *, title="用户", **style) -> None:
         """Echo an admitted user message or question reply with the same panel style."""
         self.query_one("#output", RichLog).write(
-            user_text_panel(value, title),
+            user_text_panel(value, title, **style),
             scroll_end=True,
         )
 
@@ -687,13 +694,19 @@ class RedLotusTui(App[None]):
     async def ask_config(self, question: str, *, secret=False):
         return await self.ask_user(question, record_reply=False, secret=secret)
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def action_submit_urgent(self) -> None:
+        """Submit Ctrl+Enter through the same input path with explicit priority."""
+        inp = self.query_one("#input", AgentInput)
+        await self.on_input_submitted(Input.Submitted(inp, inp.value), urgent=True)
+
+    async def on_input_submitted(self, event: Input.Submitted, *, urgent=False) -> None:
         value = event.value.strip()
         event.input.value = ""
         if (
             self._ask_future is not None
             and not self._ask_future.done()
             and not value.startswith("/")
+            and (not urgent or not self._record_reply)
         ):
             if self._record_reply:
                 self._write_user_input(value, title="用户回复")
@@ -710,18 +723,31 @@ class RedLotusTui(App[None]):
         if self._panel_mode:
             self._exit_panel()
         if not value.startswith("/") and value.lower() not in self.system._cli_controller.EXIT_COMMANDS:
-            self._write_user_input(value)
+            inner = (
+                urgent and self.system._session.active and self.system._session.accepting_urgent
+            )
+            queued = not inner and (
+                self.system.has_current_turn or self._active_line_handlers > 0
+            )
+            title = "排队" if queued else "加急" if inner else "用户"
+            self._write_user_input(
+                value,
+                title=title,
+                text_style="dim" if queued else "bold white",
+                border_style="grey50" if queued else "bright_blue",
+            )
         self._active_line_handlers += 1
         self.refresh_status()
-        asyncio.create_task(self._handle_line(value))
+        asyncio.create_task(self._handle_line(value, urgent=urgent))
 
-    async def _handle_line(self, value: str) -> None:
+    async def _handle_line(self, value: str, *, urgent=False) -> None:
         try:
             action = await self.system.process_cli_line(
                 value,
                 self.state,
                 wait_for_turn=False,
                 goal_mode=self._run_mode == TuiRunMode.GOAL,
+                urgent=urgent,
             )
             if action == "break":
                 self.exit()

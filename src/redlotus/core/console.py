@@ -59,7 +59,6 @@ COMMAND_HELP = {
     "/compress": "压缩 Manager / Coordinator 上下文",
     "/cancel": "/cancel <invocation_id> 或 /cancel agent <agent_id>：取消调用",
     "/stop": "停止当前任务，保留会话",
-    "/urgent": "/urgent <内容>：加入当前回合，工具继续执行，下一次模型请求统一处理",
     "/load": "选择并加载当前项目对话快照",
     "/trace": "/trace <turn_id>：查看追踪记录",
     "/tasks": "查看任务状态与依赖",
@@ -643,6 +642,7 @@ class AgentCliController:
         wait_for_turn: bool,
         goal_mode: bool = False,
         input_id: str | None = None,
+        urgent: bool = False,
     ) -> str:
         raw_input = raw_input.strip()
         if not raw_input:
@@ -660,15 +660,7 @@ class AgentCliController:
             state.is_first_input = True
             return "continue"
 
-        urgent = command == "/urgent" or command.startswith("/urgent ")
-        if urgent:
-            text = raw_input[len("/urgent") :].strip()
-            if not text:
-                print_warning("用法：/urgent <内容>")
-                return "continue"
-            raw_input = text
-
-        if raw_input.startswith("/") and not urgent:
+        if raw_input.startswith("/"):
             await self._publish_context_usage(state.history)
             return await self._handle_slash_command(raw_input, state)
 
