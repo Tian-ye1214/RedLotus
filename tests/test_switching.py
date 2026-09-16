@@ -3,9 +3,9 @@ import json
 import httpx
 from pydantic_ai import FunctionToolset
 
-from redlotus.config import app_config
-from redlotus.ModelGateway.agent_factory import create_agent
-from redlotus.ModelGateway.model_factory import ModelTarget
+from redlotus.core import config as app_config
+from redlotus.core.gateway import create_agent
+from redlotus.core.gateway import ModelTarget
 
 
 async def test_switch_at_tool_boundary_reuses_completed_result(tmp_path, monkeypatch):
@@ -83,7 +83,7 @@ async def test_switch_at_tool_boundary_reuses_completed_result(tmp_path, monkeyp
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         monkeypatch.setattr(
-            "redlotus.ModelGateway.model_factory.get_client",
+            "redlotus.core.gateway.get_client",
             lambda key, factory: client,
         )
         agent = create_agent(

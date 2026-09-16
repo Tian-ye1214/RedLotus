@@ -16,14 +16,14 @@ async def test_driver_never_assigns_new_reply_to_a_cancelled_input(
     tmp_path, monkeypatch, control
 ):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
-    from real_acceptance import ApplicationDriver
+    from session_acceptance import ApplicationDriver
 
     system = configured_system(tmp_path, monkeypatch)
     configure_cli_hooks(system, monkeypatch)
     monkeypatch.setattr(
-        "redlotus.agent_core.system.AgentSystem", lambda **kwargs: system
+        "redlotus.core.system.AgentSystem", lambda **kwargs: system
     )
-    monkeypatch.setattr("redlotus.workspace.workspace.set_workspace", lambda path: None)
+    monkeypatch.setattr("redlotus.core.session.set_workspace", lambda path: None)
     monkeypatch.setattr(
         system,
         "generate_task_title",
@@ -43,7 +43,7 @@ async def test_driver_never_assigns_new_reply_to_a_cancelled_input(
 
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     try:
         async with asyncio.timeout(10):
             old = asyncio.create_task(driver.say("old input"))

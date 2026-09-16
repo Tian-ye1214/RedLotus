@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import lancedb
+
 import pytest
 from pydantic_ai.messages import (
     ModelMessagesTypeAdapter,
@@ -16,87 +16,24 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from redlotus.infra.subprocess_runner import (
-    ensure_execution_environment,
-    get_execution_environment,
-    run_subprocess,
-)
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.tools.memory.migration import migrate_observations
-from redlotus.tools.memory.observations import ObservationStore
+from redlotus.tools.execution import ensure_execution_environment
+from redlotus.tools.execution import get_execution_environment
+from redlotus.tools.execution import run_subprocess
+from redlotus.core.agents import WorkspaceContext
 
 
-async def test_legacy_migration_is_idempotent_and_excludes_unknown_projects(tmp_path):
-    project, db_path = tmp_path / "project", Path(os.environ["RAG_DB_PATH"])
-    root = project / ".redlotus"
-    root.mkdir(parents=True)
-    for role in ("coordinator", "manager", "worker"):
-        messages = [
-            ModelRequest(parts=[UserPromptPart("修复数据库")]),
-            ModelResponse(parts=[TextPart("结果待核验")]),
-        ]
-        (root / f"{role}_ModelMessages.json").write_text(
-            json.dumps(
-                dict(
-                    meta=dict(agent=role, date="20250101", topic="迁移"),
-                    model_messages=ModelMessagesTypeAdapter.dump_python(
-                        messages, mode="json"
-                    ),
-                ),
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-    db = lancedb.connect(str(db_path))
-    db.create_table(
-        "conversation_turns",
-        data=[
-            dict(
-                source=str(root / "coordinator_ModelMessages.json") + "#old",
-                text="重复的旧索引",
-                vector=[1.0, 0.0],
-            ),
-            dict(source="unowned.json#old", text="无法确定项目", vector=[1.0, 0.0]),
-            dict(
-                source=str(tmp_path / "another" / ".redlotus" / "old.json") + "#old",
-                text="别人的项目",
-                vector=[1.0, 0.0],
-            ),
-            dict(
-                source=str(root / "deleted.json") + "#hash#c0",
-                text="仅存在索引的第一块",
-                vector=[1.0, 0.0],
-            ),
-            dict(
-                source=str(root / "deleted.json") + "#hash#c1",
-                text="仅存在索引的第二块",
-                vector=[1.0, 0.0],
-            ),
-        ],
-    )
-    store = ObservationStore(WorkspaceContext.from_path(project))
-    await migrate_observations(store, rag_config=dict(db_path=str(db_path)))
-    before = {p.name: p.read_bytes() for p in store.turns.glob("*.json")}
-    await migrate_observations(store, rag_config=dict(db_path=str(db_path)))
-    assert before == {p.name: p.read_bytes() for p in store.turns.glob("*.json")}
-    assert len(before) == 2
-    episodes = [json.loads(body) for body in before.values()]
-    assert any(len(ep["evidence_paths"]) >= 1 for ep in episodes)
-    assert all(ep["status"] == "unverified" for ep in episodes)
-    assert not any(
-        "别人的项目" in json.dumps(ep, ensure_ascii=False)
-        or "重复的旧索引" in json.dumps(ep, ensure_ascii=False)
-        for ep in episodes
-    )
-    assert (
-        store.root / "migration_backup" / "coordinator_ModelMessages.json"
-    ).is_file()
-    assert (
-        store.root / "migration_backup" / "unassigned_legacy_vectors.json"
-    ).is_file()
-    assert (db_path / "migration_backup" / "conversation_turns.lance").is_dir()
-    assert db.open_table("conversation_turns").count_rows() == 5
 
+
+def test_legacy_session_archives_are_not_loaded_or_migrated(tmp_path):
+    from redlotus.core.session import list_workspace_snapshots
+    from redlotus.core.session import SessionFile
+
+    old = tmp_path / "coordinator_old_ModelMessages.json"
+    old.write_text('{"meta":{"agent":"coordinator"},"model_messages":[]}', encoding="utf-8")
+    session = SessionFile.create(tmp_path, "project", session_id="new")
+    snapshots = list_workspace_snapshots(root=tmp_path)
+    assert [row.path for row in snapshots] == [session.path]
+    assert not list(tmp_path.rglob("migration*"))
 
 def process_alive(pid):
     if sys.platform == "win32":

@@ -2,9 +2,9 @@ import sys
 
 import pytest
 
-from redlotus.infra.subprocess_runner import validate_agent_command
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.tools.BasicTools import BasicToolkit
+from redlotus.tools.execution import validate_agent_command
+from redlotus.core.agents import WorkspaceContext
+from redlotus.tools.toolkit import BasicToolkit
 
 
 async def test_python_start_method_is_not_a_background_shell_command(tmp_path):

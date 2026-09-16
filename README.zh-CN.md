@@ -240,4 +240,4 @@ pip install ".[build]"
 pyinstaller build.spec
 ```
 
-项目主要代码位于 `src/redlotus/`，命令入口为 `redlotus.agent_core.entrypoint:main`。
+项目主要代码位于 `src/redlotus/`，分为 `core`、`tools`、`api`、`prompts`、`memory` 五个板块；命令入口为 `redlotus.core.config:main`。

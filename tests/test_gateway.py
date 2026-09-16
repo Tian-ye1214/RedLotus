@@ -5,17 +5,17 @@ import pydantic_ai.models
 import pytest
 from pydantic_ai import Agent
 
-from redlotus.ModelGateway.model_factory import create_model
+from redlotus.core.gateway import create_model
 
 
 def configure_gateway(monkeypatch, respond, base):
     client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
     monkeypatch.setattr(pydantic_ai.models, "ALLOW_MODEL_REQUESTS", True)
     monkeypatch.setattr(
-        "redlotus.ModelGateway.model_factory.get_client", lambda key, factory: client
+        "redlotus.core.gateway.get_client", lambda key, factory: client
     )
     monkeypatch.setattr(
-        "redlotus.ModelGateway.model_factory.get_env",
+        "redlotus.core.gateway.get_env",
         lambda key, **kw: {"BASE_URL": base, "API_KEY": "test-only"}.get(
             key, kw.get("default", "")
         ),
@@ -120,7 +120,7 @@ async def test_anthropic_parallel_mapping(monkeypatch):
     ["https://rag.example", "https://rag.example/v1", "https://rag.example/custom/v1/"],
 )
 async def test_embedding_rerank_wire_and_prefix(base, monkeypatch):
-    from redlotus.RAG import embedding_function as embedding
+    from redlotus.memory import retrieval as embedding
 
     requests = []
 

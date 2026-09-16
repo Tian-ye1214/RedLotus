@@ -11,9 +11,10 @@ import pytest
 
 
 async def test_first_environment_creation_can_be_cancelled_and_retried(tmp_path):
-    from redlotus.infra import subprocess_runner
-    from redlotus.runtime.context import WorkspaceContext
-    from redlotus.runtime.subagents import SubagentFactory, SubagentSpec
+    from redlotus.tools import execution as subprocess_runner
+    from redlotus.core.agents import WorkspaceContext
+    from redlotus.core.agents import SubagentFactory
+    from redlotus.core.agents import SubagentSpec
 
     environment = subprocess_runner.get_execution_environment(cwd=tmp_path)
     factory = SubagentFactory(1)
@@ -44,7 +45,7 @@ async def test_first_environment_creation_can_be_cancelled_and_retried(tmp_path)
 
 def _config(runtime: Path) -> dict:
     from copy import deepcopy
-    from redlotus.config.app_config import settings
+    from redlotus.core.config import settings
 
     config = deepcopy(settings()["execution"])
     config.update(
@@ -58,7 +59,7 @@ def _config(runtime: Path) -> dict:
 async def test_python_command_is_provisioned_in_the_configured_project_environment(
     tmp_path, monkeypatch
 ):
-    from redlotus.infra import subprocess_runner
+    from redlotus.tools import execution as subprocess_runner
 
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(
@@ -82,7 +83,7 @@ async def test_python_command_is_provisioned_in_the_configured_project_environme
 def test_environment_only_inherits_allowlisted_values_and_keeps_explicit_overrides(
     tmp_path, monkeypatch
 ):
-    from redlotus.infra import subprocess_runner
+    from redlotus.tools import execution as subprocess_runner
 
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(
@@ -107,7 +108,7 @@ def test_environment_only_inherits_allowlisted_values_and_keeps_explicit_overrid
 
 
 def test_pip_rejects_an_explicit_external_interpreter_or_install_target(tmp_path):
-    from redlotus.infra.subprocess_runner import validate_pip_command
+    from redlotus.tools.execution import validate_pip_command
 
     selected = tmp_path / "venv" / "Scripts" / "python.exe"
     with pytest.raises(ValueError, match="其他 Python"):
@@ -150,7 +151,7 @@ def test_pip_rejects_an_explicit_external_interpreter_or_install_target(tmp_path
 async def test_existing_environment_rejects_a_changed_base_interpreter(
     tmp_path, monkeypatch
 ):
-    from redlotus.infra import subprocess_runner
+    from redlotus.tools import execution as subprocess_runner
 
     runtime = tmp_path / "runtime"
     config = _config(runtime)
@@ -169,9 +170,9 @@ async def test_existing_environment_rejects_a_changed_base_interpreter(
 async def test_skill_scripts_delegate_bare_python_to_the_shared_runner(
     tmp_path, monkeypatch
 ):
-    from redlotus.runtime.context import WorkspaceContext
-    from redlotus.skills import SkillsManager as skills_module
-    from redlotus.skills.SkillsManager import SkillsManager
+    from redlotus.core.agents import WorkspaceContext
+    from redlotus.tools import registry as skills_module
+    from redlotus.tools.registry import SkillsManager
 
     skill_root = tmp_path / "skills" / "demo"
     skill_root.mkdir(parents=True)
@@ -185,7 +186,7 @@ async def test_skill_scripts_delegate_bare_python_to_the_shared_runner(
     calls = {}
 
     async def run(args, **kwargs):
-        from redlotus.infra.subprocess_runner import CommandResult
+        from redlotus.tools.execution import CommandResult
 
         calls["args"] = args
         calls["kwargs"] = kwargs
@@ -200,15 +201,15 @@ async def test_skill_scripts_delegate_bare_python_to_the_shared_runner(
 async def test_clawhub_command_passes_only_explicit_environment_override(
     tmp_path, monkeypatch
 ):
-    from redlotus.runtime.context import WorkspaceContext
-    from redlotus.tools import BasicTools as basic_tools
-    from redlotus.tools.BasicTools import BasicToolkit
+    from redlotus.core.agents import WorkspaceContext
+    from redlotus.tools import toolkit as basic_tools
+    from redlotus.tools.toolkit import BasicToolkit
 
     toolkit = BasicToolkit(None, workspace=WorkspaceContext.from_path(tmp_path))
     calls = {}
 
     async def run(args, **kwargs):
-        from redlotus.infra.subprocess_runner import CommandResult
+        from redlotus.tools.execution import CommandResult
 
         calls["args"] = args
         calls["kwargs"] = kwargs

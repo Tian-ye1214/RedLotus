@@ -239,4 +239,4 @@ pip install ".[build]"
 pyinstaller build.spec
 ```
 
-The main package lives in `src/redlotus/`. The `redlotus` command maps to `redlotus.agent_core.entrypoint:main`.
+The main package lives in `src/redlotus/`, organized into `core`, `tools`, `api`, `prompts`, and `memory`. The `redlotus` command maps to `redlotus.core.config:main`.

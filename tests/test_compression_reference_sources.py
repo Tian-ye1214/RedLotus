@@ -1,6 +1,6 @@
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from redlotus.tools.memory.message_text import pydantic_messages_to_text
+from redlotus.prompts.message_text import pydantic_messages_to_text
 
 
 def test_checkpoint_uses_reference_provenance_without_recopying_original_body():

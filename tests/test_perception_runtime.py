@@ -6,12 +6,12 @@ import threading
 import httpx
 import pytest
 
-from redlotus.agent_core.memory_service import MemoryService
-from redlotus.ModelGateway.model_factory import ModelTarget
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.runtime.lifecycle import AgentRegistry
-from redlotus.runtime.subagents import SubagentFactory
-from redlotus.tools.memory.perception import MemoryPerception
+from redlotus.memory.service import MemoryService
+from redlotus.core.gateway import ModelTarget
+from redlotus.core.agents import WorkspaceContext
+from redlotus.core.agents import AgentRegistry
+from redlotus.core.agents import SubagentFactory
+from redlotus.memory.perception import MemoryPerception
 
 
 @pytest.mark.parametrize("first_tool", ["read_memory", "search_memory", "search_episodes", "search_episodes_default_kind"])
@@ -26,8 +26,8 @@ async def test_perception_can_retrieve_project_requested_memory_without_other_pr
         ToolReturnPart,
     )
     from pydantic_ai.models.function import FunctionModel
-    from redlotus.tools.memory.models import MemoryRecord
-    from redlotus.tools.memory.store import MemoryStore
+    from redlotus.memory.records import MemoryRecord
+    from redlotus.memory.store import MemoryStore
 
     workspace = WorkspaceContext.from_path(tmp_path / "current")
     foreign = WorkspaceContext.from_path(tmp_path / "other")
@@ -153,12 +153,12 @@ async def test_perception_can_retrieve_project_requested_memory_without_other_pr
         kwargs.pop("role")
         return Agent(FunctionModel(function=model), **kwargs)
 
-    monkeypatch.setattr("redlotus.tools.memory.perception.create_agent", create)
+    monkeypatch.setattr("redlotus.memory.perception.create_agent", create)
     monkeypatch.setattr(
-        "redlotus.tools.memory.perception.get_effective_max_context_async", context
+        "redlotus.memory.perception.get_effective_max_context_async", context
     )
     monkeypatch.setattr(
-        "redlotus.tools.memory.store.missing_rag_api_keys", lambda: ["offline fixture"]
+        "redlotus.memory.store.missing_rag_api_keys", lambda: ["offline fixture"]
     )
     factory = SubagentFactory(1)
     perception = MemoryPerception(workspace, factory, AgentRegistry())
@@ -166,7 +166,7 @@ async def test_perception_can_retrieve_project_requested_memory_without_other_pr
         result = await perception.produce(
             "project-correction",
             dict(
-                mode="explicit_request",
+                mode="explicit_request", session_id="session",
                 requested_scope="project",
                 new_turn_ids=["new"],
                 events=[
@@ -201,7 +201,7 @@ async def test_perception_can_retrieve_project_requested_memory_without_other_pr
 async def test_perception_uses_worker_target_in_owned_child_thread(
     tmp_path, monkeypatch
 ):
-    from redlotus.config.app_config import settings
+    from redlotus.core.config import settings
 
     baseline = dict(settings())
     config = tmp_path / "config.json"
@@ -288,10 +288,10 @@ async def test_perception_uses_worker_target_in_owned_child_thread(
         )
 
     monkeypatch.setattr(
-        "redlotus.tools.memory.perception.get_effective_max_context_async", context
+        "redlotus.memory.perception.get_effective_max_context_async", context
     )
     monkeypatch.setattr(
-        "redlotus.ModelGateway.model_factory.create_async_http_client",
+        "redlotus.core.gateway.create_async_http_client",
         lambda **kwargs: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     factory = SubagentFactory(1)
@@ -301,7 +301,7 @@ async def test_perception_uses_worker_target_in_owned_child_thread(
         result = await perception.produce(
             "job",
             dict(
-                mode="perception",
+                mode="perception", session_id="session",
                 new_turn_ids=["turn"],
                 events=[dict(id="turn", user_inputs=["hello"], operations=[])],
             ),
@@ -317,7 +317,7 @@ async def test_perception_uses_worker_target_in_owned_child_thread(
         scoped = await perception.produce(
             "scoped-job",
             dict(
-                mode="explicit_request",
+                mode="explicit_request", session_id="session",
                 explicit_request="Remember the global code preference only",
                 requested_scope="global",
                 new_turn_ids=["turn"],
@@ -337,7 +337,7 @@ async def test_perception_uses_worker_target_in_owned_child_thread(
         assert len(requests) == 5, "Wrong scope must be corrected within the same perception run"
         repeated = await perception.produce(
             "repeat-job",
-            dict(mode="explicit_request", explicit_request="Remember the same code preference", requested_scope="global", new_turn_ids=["turn"], existing_records=[{**preference, "id": "preference", "project_id": workspace.project_id, "origin": "explicit"}], events=[dict(id="turn", user_inputs=["Remember my code preference"], operations=[])]),
+            dict(mode="explicit_request", session_id="session", explicit_request="Remember the same code preference", requested_scope="global", new_turn_ids=["turn"], existing_records=[{**preference, "id": "preference", "project_id": workspace.project_id, "origin": "explicit"}], events=[dict(id="turn", user_inputs=["Remember my code preference"], operations=[])]),
             [],
         )
         assert repeated.records[0].target_id == "preference"

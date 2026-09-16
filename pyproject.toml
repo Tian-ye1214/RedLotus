@@ -52,29 +52,29 @@ all = [
 ]
 
 [project.scripts]
-redlotus = "redlotus.agent_core.entrypoint:main"
+redlotus = "redlotus.core.config:main"
 
 [tool.setuptools]
 include-package-data = false
 
 [tool.setuptools.package-data]
 redlotus = [
-    "config.default.json",
+    "core/config.json",
     "prompts/*.md",
-    "skills/**/*",
-    "API/config.yaml.example",
+    "tools/skills/**/*",
+    "api/config.yaml.example",
 ]
 
 [tool.setuptools.exclude-package-data]
 redlotus = [
     "config.json",
-    "API/config.yaml",
+    "api/config.yaml",
     "prompts/LongTermMemory/*",
-    "skills/**/.env",
-    "skills/**/*.log",
-    "skills/**/*.log.*",
-    "skills/**/__pycache__/*",
-    "skills/**/*.py[cod]",
+    "tools/skills/**/.env",
+    "tools/skills/**/*.log",
+    "tools/skills/**/*.log.*",
+    "tools/skills/**/__pycache__/*",
+    "tools/skills/**/*.py[cod]",
 ]
 
 [tool.setuptools.packages.find]

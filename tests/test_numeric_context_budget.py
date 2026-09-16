@@ -1,6 +1,6 @@
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from redlotus.ModelGateway.ModelChecker import estimate_context_tokens
+from redlotus.core.history import estimate_context_tokens
 
 
 def test_numeric_csv_is_not_estimated_as_english_prose():

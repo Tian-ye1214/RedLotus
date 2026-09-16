@@ -4,8 +4,8 @@ import httpx
 import pytest
 from pydantic_ai import BinaryContent
 
-from redlotus.ModelGateway.agent_factory import create_agent
-from redlotus.ModelGateway.model_factory import ModelTarget
+from redlotus.core.gateway import create_agent
+from redlotus.core.gateway import ModelTarget
 
 
 async def test_encoded_attachment_budget_rejects_before_network(tmp_path, monkeypatch):
@@ -31,14 +31,14 @@ async def test_encoded_attachment_budget_rejects_before_network(tmp_path, monkey
     monkeypatch.setenv("BASE_URL", "https://example.test/v1")
     monkeypatch.setenv("API_KEY", "test-only")
     monkeypatch.setattr("pydantic_ai.models.ALLOW_MODEL_REQUESTS", True)
-    from redlotus.ModelGateway.input_policy import InputLimitError
+    from redlotus.core.gateway import InputLimitError
 
     def unexpected(request):
         pytest.fail("Oversized encoded content reached the network")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as client:
         monkeypatch.setattr(
-            "redlotus.ModelGateway.model_factory.get_client",
+            "redlotus.core.gateway.get_client",
             lambda key, factory: client,
         )
         agent = create_agent(ModelTarget.for_role("coordinator"), role="coordinator")

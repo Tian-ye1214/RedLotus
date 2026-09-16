@@ -5,13 +5,14 @@ import threading
 from pydantic_ai import Agent
 from pydantic_ai.models.function import FunctionModel, DeltaToolCall
 
-from redlotus.agent_core.input_messages import UserMessage
-from redlotus.agent_core.system import AgentSystem
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.tools.memory import ChatHistory
-from redlotus.tools.memory.ltm import LongTermMemory
-from redlotus.tools.ManagementTools import TaskManager, TaskStatus
-from redlotus.runtime.worker_result import SubagentResult
+from redlotus.tools.interaction import UserMessage
+from redlotus.core.system import AgentSystem
+from redlotus.core.agents import WorkspaceContext
+from redlotus.core.history import ChatHistory
+from redlotus.memory.records import LongTermMemory
+from redlotus.tools.interaction import TaskManager
+from redlotus.tools.interaction import TaskStatus
+from redlotus.core.agents import SubagentResult
 
 
 async def noop(*args, **kwargs):
@@ -54,7 +55,7 @@ async def test_system_serializes_turns_freezes_session_memory_and_records_raw(
 
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     history = ChatHistory()
     await asyncio.gather(
         *(
@@ -67,16 +68,14 @@ async def test_system_serializes_turns_freezes_session_memory_and_records_raw(
     assert "偏好中文" not in injections[0]
     assert system._memory.injection_for_session() == injections[0]
     assert len(system._memory.observations.order()) == 3
-    journals = list(system._memory.observations.root.parent.glob("*.jsonl"))
-    rows = [
-        json.loads(line)
-        for line in journals[0].read_text(encoding="utf-8").splitlines()
-    ]
+    from redlotus.core.session import SessionFile
+    saved = SessionFile.load(system._session_file.path)
+    assert not list(saved.path.parent.rglob("*.jsonl"))
     assert [
-        p["content"][0]
-        for row in rows
-        for p in row["message"]["parts"]
-        if p["part_kind"] == "user-prompt"
+        part.content[0]
+        for message in saved.model_messages()
+        for part in message.parts
+        if part.part_kind == "user-prompt"
     ] == inputs
     await system._cli_controller.reset_session(history)
     await system.run_agent_system(UserMessage(text="新会话"), history)
@@ -88,7 +87,7 @@ async def test_missing_current_reply_is_recorded_as_a_failed_turn(tmp_path, monk
     import pytest
     from pydantic_ai.exceptions import UnexpectedModelBehavior
     from pydantic_ai.models.function import DeltaThinkingPart
-    from redlotus.ModelGateway.agent_factory import create_agent
+    from redlotus.core.gateway import create_agent
 
     system = configured_system(tmp_path, monkeypatch)
     requests = 0
@@ -104,7 +103,7 @@ async def test_missing_current_reply_is_recorded_as_a_failed_turn(tmp_path, monk
     async def create(*args, **kwargs):
         return create_agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     history = ChatHistory()
     try:
         await system.run_agent_system(UserMessage(text="Earlier task"), history)
@@ -123,22 +122,36 @@ async def test_shutdown_drains_resources_when_the_first_waiter_is_cancelled(
     tmp_path, monkeypatch
 ):
     import pytest
-    from redlotus.runtime.subagents import SubagentSpec
+    from redlotus.core.agents import SubagentSpec
 
     system = configured_system(tmp_path, monkeypatch)
-    started, release = asyncio.Event(), asyncio.Event()
+    started, release = threading.Event(), threading.Event()
+    cleanup_started = threading.Event()
 
     async def pending(*args, **kwargs):
         started.set()
-        await release.wait()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
 
-    system._spawn_background(pending())
+    handle = system._factory.start_background(
+        SubagentSpec("closing", None, system.workspace), pending
+    )
+    async with asyncio.timeout(3):
+        while not started.is_set():
+            await asyncio.sleep(0.01)
     first = asyncio.create_task(system.shutdown())
-    await asyncio.wait_for(started.wait(), 3)
+    async with asyncio.timeout(3):
+        while not cleanup_started.is_set():
+            await asyncio.sleep(0.01)
     first.cancel()
     await asyncio.gather(first, return_exceptions=True)
     release.set()
     await system.shutdown()
+    assert not handle.thread.is_alive()
     with pytest.raises(asyncio.CancelledError):
         await system._orchestrator.factory.run(
             SubagentSpec("closed", None, system.workspace), noop
@@ -157,7 +170,7 @@ async def test_display_transformation_preserves_the_model_response_for_replay(
 
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     history, shown = await system.run_agent_system(
         UserMessage(text="Complete this task"),
         ChatHistory(),
@@ -173,7 +186,6 @@ async def test_subagent_creation_and_model_run_are_inside_child_thread(
 ):
     system = configured_system(tmp_path, monkeypatch)
     await system.bind_session("session")
-    system._session_logs.ensure("child")
     parent_thread = threading.get_ident()
     threads = []
 
@@ -197,12 +209,12 @@ async def test_subagent_creation_and_model_run_are_inside_child_thread(
     import importlib
 
     monkeypatch.setattr(
-        importlib.import_module("redlotus.tools.WorkerOrchestrator"),
+        importlib.import_module("redlotus.tools.toolkit"),
         "create_agent",
         create,
     )
     monkeypatch.setattr(
-        "redlotus.ModelGateway.ModelChecker.prepare_model_request", noop
+        "redlotus.core.history.prepare_model_request", noop
     )
     success, output = await system._orchestrator.execute_task_with_worker(
         "test", turn_id="turn"
@@ -224,7 +236,7 @@ async def test_cli_fifo_does_not_merge_inputs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "_start_user_turn_from_raw_input", start)
     monkeypatch.setattr(
-        "redlotus.agent_core.cli_controller.app_config.missing_main_api_keys",
+        "redlotus.core.console.app_config.missing_main_api_keys",
         lambda: (),
     )
     await cli.process_line("first", state, wait_for_turn=False)
@@ -269,7 +281,7 @@ def test_worker_output_fails_closed():
 async def test_loading_session_restores_completed_tasks_and_dependencies(
     tmp_path, monkeypatch
 ):
-    from redlotus.tools.conversation_log import read_saved_model_messages_file
+    from redlotus.core.session import read_saved_model_messages_file
 
     system = configured_system(tmp_path, monkeypatch)
     system._task_manager.create_todo_list(
@@ -284,12 +296,16 @@ async def test_loading_session_restores_completed_tasks_and_dependencies(
 
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     await system.run_agent_system(UserMessage(text="保存当前状态"), ChatHistory())
-    path = system._session_logs.for_agent("coordinator").model_messages_path()
+    path = system._session_file.path
     messages, meta = read_saved_model_messages_file(path)
     system._task_manager.reset()
-    system.bind_loaded_snapshot("coordinator", path, meta)
+    original_id = system.session_key
+    await system.end_session_agents(original_id)
+    await system.bind_loaded_snapshot("coordinator", path, meta)
+    assert system.session_key == original_id
+    assert system._session_file.completed_turns == 1
     assert system._task_manager.tasks["a"].result == "verified artifact"
     assert system._task_manager.tasks["a"].status == TaskStatus.COMPLETED
     assert [task.id for task in system._task_manager.get_all_ready_tasks()] == ["b"]
@@ -302,7 +318,7 @@ async def test_rejected_first_request_keeps_trace_but_does_not_poison_next_turn(
 ):
     import pytest
     from pydantic_ai.capabilities import AbstractCapability
-    from redlotus.ModelGateway.input_policy import InputLimitError
+    from redlotus.core.gateway import InputLimitError
 
     system = configured_system(tmp_path, monkeypatch)
     seen = []
@@ -320,7 +336,7 @@ async def test_rejected_first_request_keeps_trace_but_does_not_poison_next_turn(
 
         return Agent(FunctionModel(stream_function=model), capabilities=[Budget()])
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     history = ChatHistory()
     try:
         with pytest.raises(InputLimitError):
@@ -330,80 +346,61 @@ async def test_rejected_first_request_keeps_trace_but_does_not_poison_next_turn(
             UserMessage(text="smaller corrected input"), history
         )
         assert seen == ["smaller corrected input"]
-        journals = list(system._memory.observations.root.parent.glob("*.jsonl"))
-        assert any("OVERSIZED" in path.read_text(encoding="utf-8") for path in journals)
+        assert "OVERSIZED" in system._session_file.path.read_text(encoding="utf-8")
     finally:
         await system.shutdown()
 
 
-async def test_project_switch_does_not_wait_for_scoped_memory_production(
-    tmp_path, monkeypatch
-):
+async def test_project_switch_cancels_current_perception_without_producing(tmp_path, monkeypatch):
+    from redlotus.core.agents import SubagentSpec
     system = configured_system(tmp_path, monkeypatch)
+    await system.bind_session("session")
     previous = system._memory
-    from redlotus.agent_core.memory_service import MemoryService
+    started, stopped = threading.Event(), threading.Event()
 
-    started, finish = threading.Event(), threading.Event()
+    async def pending():
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        finally:
+            stopped.set()
 
-    async def produce(producer, **kwargs):
-        if producer.workspace.project_id == previous.workspace.project_id:
-            started.set()
-            await asyncio.to_thread(finish.wait)
-
-    monkeypatch.setattr(
-        previous,
-        "schedule_processing",
-        MemoryService.schedule_processing.__get__(previous),
-    )
-    monkeypatch.setattr(MemoryService, "process_pending", produce)
+    handle = system._factory.start_background(
+        SubagentSpec("session", None, system.workspace, role="perception"), pending)
+    assert await asyncio.to_thread(started.wait, 3)
     target = tmp_path / "next-project"
     target.mkdir()
-    switching = asyncio.create_task(system.switch_workspace(target))
     try:
-        assert await asyncio.to_thread(started.wait, 3)
-        await asyncio.sleep(0.05)
-        assert switching.done(), "Directory switching is blocked by background memory"
-        await switching
+        await asyncio.wait_for(system.switch_workspace(target), 3)
+        assert stopped.is_set() and not handle.thread.is_alive()
         assert system.workspace.root == target.resolve()
         assert previous.workspace.root == tmp_path.resolve()
         assert system._memory._perception_factory is previous._perception_factory
+        assert system._memory.session is None
     finally:
-        finish.set()
-        await asyncio.gather(switching, return_exceptions=True)
         await system.shutdown()
-        for memory in (previous, system._memory):
-            assert (
-                memory._background is None or not memory._background.thread.is_alive()
-            )
 
 
-async def test_exit_seals_unfinished_memory_without_starting_production(
-    tmp_path, monkeypatch
-):
-    from redlotus.infra.persist_utils import read_locked_json
-    from redlotus.runtime.subagents import SubagentSpec
-
+async def test_exit_cancels_perception_without_sealing_a_short_window(tmp_path, monkeypatch):
+    from redlotus.core.agents import SubagentSpec
+    from redlotus.core.session import SessionFile
     system = configured_system(tmp_path, monkeypatch)
-    event = system._memory.observations.begin(
-        "session", "turn", "unfinished project", []
-    )
+    await system.bind_session("session")
+    event = system._memory.observations.begin("session", "turn", "unfinished project", [])
     event.status = "success"
     system._memory.observations.finish(event)
+    path = system._session_file.path
     started = threading.Event()
 
     async def pending():
         started.set()
         await asyncio.sleep(30)
 
-    handle = system._memory_factory.start_background(
-        SubagentSpec("memory", None, system.workspace, role="perception"), pending
-    )
+    handle = system._factory.start_background(
+        SubagentSpec("session", None, system.workspace, role="perception"), pending)
     assert await asyncio.to_thread(started.wait, 3)
     await asyncio.wait_for(system.shutdown(), 3)
     assert handle._future.cancelled() and not handle.thread.is_alive()
-    jobs = list(system._memory.jobs_dir.glob("*.json"))
-    assert len(jobs) == 1
-    job = read_locked_json(jobs[0])
-    assert job["window"]["new_turn_ids"] == [event.id]
-    assert not job["done"] and job["result"] is None
-    assert system._memory.observations.cursor() == 0
+    saved = SessionFile.load(path)
+    assert saved.completed_turns == 1 and not saved.pending_jobs()
+    assert saved.metadata.get("perception_consumed", 0) == 0

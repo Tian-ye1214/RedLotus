@@ -9,8 +9,8 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from redlotus.ModelGateway import ModelChecker as checker
-from redlotus.tools.memory.chat_history import messages_safe_for_new_prompt
+from redlotus.core import history as checker
+from redlotus.core.history import messages_safe_for_new_prompt
 
 
 async def test_compression_can_summarize_completed_steps_within_a_long_turn(
@@ -58,9 +58,6 @@ async def test_compression_can_summarize_completed_steps_within_a_long_turn(
             h + "\n当前任务仍需交付，资料已核验。"
             for h in checker._COMPRESS_REQUIRED_HEADINGS
         ),
-    )
-    monkeypatch.setattr(
-        checker, "_save_compress_debug_artifacts", lambda **kwargs: None
     )
     compacted = await checker.compact_request_messages(
         messages, role="coordinator", target=target

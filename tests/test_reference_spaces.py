@@ -1,6 +1,6 @@
 import pytest
 
-from redlotus.cli.file_ref import parse_file_paths
+from redlotus.tools.interaction import parse_file_paths
 
 
 @pytest.mark.parametrize("absolute", [False, True])

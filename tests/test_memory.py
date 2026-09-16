@@ -2,11 +2,12 @@
 
 import json
 
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.tools.memory.models import MemoryRecord
-from redlotus.tools.memory.observations import ObservationStore
-from redlotus.tools.memory.ltm import LongTermMemory
-from redlotus.agent_core.memory_service import MemoryService, MemoryJob
+from redlotus.core.agents import WorkspaceContext
+from redlotus.memory.records import MemoryRecord
+from memory_helpers import bound_observations
+from redlotus.memory.records import LongTermMemory
+from memory_helpers import new_memory
+from redlotus.memory.service import MemoryJob
 
 
 async def test_output_budget_failure_does_not_repeat_until_explicit_retry(
@@ -14,7 +15,7 @@ async def test_output_budget_failure_does_not_repeat_until_explicit_retry(
 ):
     from pydantic_ai.exceptions import UnexpectedModelBehavior
 
-    memory = MemoryService(workspace=WorkspaceContext.from_path(tmp_path))
+    memory = new_memory(workspace=WorkspaceContext.from_path(tmp_path))
     attempts = []
 
     async def produce(job):
@@ -23,7 +24,7 @@ async def test_output_budget_failure_does_not_repeat_until_explicit_retry(
             "Model token limit (4096) exceeded before any response was generated."
         )
 
-    monkeypatch.setattr(memory, "_produce", produce)
+    monkeypatch.setattr("redlotus.memory.service.produce_job", lambda service, job: produce(job))
     event = memory.observations.begin("session", "turn", "store a verified result", [])
     event.status = "success"
     memory.observations.finish(event)
@@ -36,9 +37,9 @@ async def test_output_budget_failure_does_not_repeat_until_explicit_retry(
     await memory.close()
 
 
-def test_window_boundary_overlap_flush_and_restart(tmp_path):
+def test_window_boundary_overlap_and_restart_without_partial_flush(tmp_path):
     workspace = WorkspaceContext.from_path(tmp_path)
-    store = ObservationStore(workspace)
+    store = bound_observations(workspace)
     ids = []
     for index in range(19):
         event = store.begin("session", str(index), str(index), [])
@@ -61,12 +62,12 @@ def test_window_boundary_overlap_flush_and_restart(tmp_path):
     second = store.window()
     assert second.overlap_turn_ids == ids[17:20] and second.new_turn_ids == ids[20:40]
     store.commit(second)
-    assert ObservationStore(workspace).window(flush=True) is None
+    assert bound_observations(workspace).window() is None
     event = store.begin("session", "last", "last", [])
     event.status = "cancelled"
     store.finish(event)
     assert store.window() is None
-    assert store.window(flush=True).new_turn_ids == [event.id]
+    assert bound_observations(workspace).window() is None
 
 
 def test_core_has_no_character_cap_and_preserves_manual_preamble(tmp_path):
@@ -97,10 +98,10 @@ def test_core_has_no_character_cap_and_preserves_manual_preamble(tmp_path):
 
 async def test_project_text_search_and_repository_replay(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "redlotus.tools.memory.store.missing_rag_api_keys", lambda: ("key",)
+        "redlotus.memory.store.missing_rag_api_keys", lambda: ("key",)
     )
-    a = MemoryService(workspace=WorkspaceContext.from_path(tmp_path / "a"))
-    b = MemoryService(workspace=WorkspaceContext.from_path(tmp_path / "b"))
+    a = new_memory(workspace=WorkspaceContext.from_path(tmp_path / "a"))
+    b = new_memory(workspace=WorkspaceContext.from_path(tmp_path / "b"))
     record = MemoryRecord(
         id="one",
         project_id=a.workspace.project_id,
@@ -111,19 +112,20 @@ async def test_project_text_search_and_repository_replay(tmp_path, monkeypatch):
     a.store.save([record])
     a.store.save([record])
     assert len(a.store.all("project")) == 1
-    assert len(json.loads(await a.search_episodes("迁移失败"))["episodes"]) == 1
-    assert json.loads(await b.search_episodes("迁移失败"))["episodes"] == []
-    assert (await b.read_episode("one")).startswith("Error:")
+    assert len(json.loads(await a.reader.search_episodes("迁移失败"))["episodes"]) == 1
+    assert json.loads(await b.reader.search_episodes("迁移失败"))["episodes"] == []
+    assert (await b.reader.read_episode("one")).startswith("Error:")
     await a.close()
     await b.close()
 
 
 async def test_non_owner_does_not_produce_or_offer_personal_memory(tmp_path):
-    memory = MemoryService(
+    memory = new_memory(
         workspace=WorkspaceContext.from_path(tmp_path), owner_memory_allowed=False
     )
     assert await memory.begin_turn("other", "turn", "hi") is None
-    assert memory.worker_tools == [] and not memory.observations.turns.exists()
+    assert memory.worker_tools == [] and memory.session.completed_turns == 0
+    assert memory.session.pending_turns(0) == [] and memory.session.pending_jobs() == []
     assert (await memory.remember("remember")).startswith("Error:")
     await memory.close()
 
@@ -135,81 +137,27 @@ def test_legacy_user_document_is_pending_perception(tmp_path):
     assert (tmp_path / "migration_backup" / "USER.md").is_file()
 
 
-async def test_core_migration_reuses_production_after_partial_commit(
-    tmp_path, monkeypatch
-):
-    from redlotus.tools.memory.models import MemoryDraft, PerceptionResult
-
-    monkeypatch.setattr(
-        "redlotus.tools.memory.store.missing_rag_api_keys", lambda: ("key",)
-    )
-    memory = MemoryService(workspace=WorkspaceContext.from_path(tmp_path / "project"))
+async def test_existing_core_document_is_preserved_without_startup_production(tmp_path):
+    memory = new_memory(workspace=WorkspaceContext.from_path(tmp_path))
+    body = "# MEMORY\n\n## 用户偏好\n\n默认中文。\n\n## 项目简况\n\n项目使用独立数据库。\n"
     memory.long_term.path.parent.mkdir(parents=True, exist_ok=True)
-    memory.long_term.path.write_text(
-        "# MEMORY\n\n## 用户偏好\n\n默认中文。\n\n项目使用独立数据库。\n\n## 经验\n",
-        encoding="utf-8",
-    )
-    calls = []
-
-    class AuxiliaryProducer:
-        async def produce(self, job_id, payload, references, **kwargs):
-            calls.append(job_id)
-            source = payload["new_turn_ids"]
-            return PerceptionResult(
-                request_authorized=True,
-                reason="auxiliary persistence check",
-                records=[
-                    MemoryDraft(
-                        scope="global",
-                        kind="requested",
-                        goal="项目资料",
-                        content="项目使用独立数据库。",
-                        core_old_text="项目使用独立数据库。",
-                        source_turn_ids=source,
-                    ),
-                    MemoryDraft(
-                        scope="global",
-                        kind="requested",
-                        goal="回复语言",
-                        content="默认中文。",
-                        core_old_text="默认中文。",
-                        projection="profile",
-                        source_turn_ids=source,
-                    ),
-                ],
-            )
-
-    memory.perception = AuxiliaryProducer()
-    original = memory.long_term.apply_record
-    interrupted = False
-
-    def interrupt_once(record, *args, **kwargs):
-        nonlocal interrupted
-        if record.projection == "profile" and not interrupted:
-            interrupted = True
-            raise OSError("auxiliary interruption before core write")
-        return original(record, *args, **kwargs)
-
-    monkeypatch.setattr(memory.long_term, "apply_record", interrupt_once)
-    await memory._migrate_core()
-    assert not (
-        memory.long_term.directory / "migration_backup/core_records_v3.json"
-    ).exists()
-    await memory._migrate_core()
-    assert len(calls) == 1 and len(memory.store.all("global")) == 2
-    assert memory.long_term.read().count("默认中文。") == 1
-    assert "项目使用独立数据库。" not in memory.long_term.read()
+    memory.long_term.path.write_text(body, encoding="utf-8")
+    await memory.process_pending()
+    assert memory.long_term.read() == body
+    assert memory.session.pending_jobs() == []
+    assert not list(memory.workspace.root.rglob("*.jsonl"))
     await memory.close()
 
 
 async def test_clear_prevents_old_production_and_request_replay(tmp_path, monkeypatch):
-    from redlotus.tools.memory.models import MemoryDraft, PerceptionResult
+    from redlotus.memory.records import MemoryDraft
+    from redlotus.memory.records import PerceptionResult
 
     monkeypatch.setattr(
-        "redlotus.tools.memory.store.missing_rag_api_keys", lambda: ("key",)
+        "redlotus.memory.store.missing_rag_api_keys", lambda: ("key",)
     )
-    memory = MemoryService(workspace=WorkspaceContext.from_path(tmp_path / "a"))
-    old = await memory.begin_turn("s", "old", "记住旧称呼")
+    memory = new_memory(workspace=WorkspaceContext.from_path(tmp_path / "a"))
+    old = await memory.begin_turn("session", "old", "记住旧称呼")
     draft = MemoryDraft(
         scope="global",
         kind="requested",
@@ -243,7 +191,7 @@ async def test_clear_prevents_old_production_and_request_replay(tmp_path, monkey
     await memory.finish_turn(
         old, status="success", user_inputs=old.user_inputs, evidence_paths=[]
     )
-    fresh = await memory.begin_turn("s", "new", "记住新称呼")
+    fresh = await memory.begin_turn("session", "new", "记住新称呼")
     produced.records[0] = draft.model_copy(
         update=dict(source_turn_ids=[fresh.id], content="新称呼")
     )
@@ -256,9 +204,10 @@ async def test_clear_prevents_old_production_and_request_replay(tmp_path, monkey
 
 
 async def test_explicit_correction_order_uses_user_event_time_not_commit_time(tmp_path):
-    from redlotus.tools.memory.models import MemoryDraft, ObservedTurn
+    from redlotus.memory.records import MemoryDraft
+    from redlotus.memory.records import ObservedTurn
 
-    memory = MemoryService(workspace=WorkspaceContext.from_path(tmp_path))
+    memory = new_memory(workspace=WorkspaceContext.from_path(tmp_path))
     existing = MemoryRecord(
         id="preference",
         project_id=memory.workspace.project_id,
@@ -291,7 +240,7 @@ async def test_explicit_correction_order_uses_user_event_time_not_commit_time(tm
         goal="new preference",
         source_turn_ids=[event.id],
     )
-    record = memory._record(job, draft, 0)
+    record = memory.store.materialize(job, draft, 0, memory._cleared_at)
     assert record and record.source_updated_at == event.created_at
     memory.store.save(
         [
@@ -305,25 +254,27 @@ async def test_explicit_correction_order_uses_user_event_time_not_commit_time(tm
             )
         ]
     )
-    assert memory._record(job, draft, 0) is None
+    assert memory.store.materialize(job, draft, 0, memory._cleared_at) is None
     job.created_at = "2026-09-13T13:30:00Z"
-    assert memory._record(job, draft, 0) is not None
+    assert memory.store.materialize(job, draft, 0, memory._cleared_at) is not None
     event.created_at = "2026-09-13T11:00:00Z"
-    assert memory._record(job, draft, 0) is None
+    assert memory.store.materialize(job, draft, 0, memory._cleared_at) is None
     await memory.close()
 
 
 async def test_same_pending_job_reuses_one_production_result(tmp_path, monkeypatch):
     import asyncio
-    from redlotus.tools.memory.models import ObservedTurn, PerceptionResult
+    from redlotus.memory.records import ObservedTurn
+    from redlotus.memory.records import PerceptionResult
 
-    memory = MemoryService(workspace=WorkspaceContext.from_path(tmp_path))
+    memory = new_memory(workspace=WorkspaceContext.from_path(tmp_path))
     event = ObservedTurn(
         id="event",
         project_id=memory.workspace.project_id,
         session_id="s",
         turn_id="one",
     )
+    memory.observations.save(event)
     job = MemoryJob(id="same-job", events=[event], request="remember")
     started, release = asyncio.Event(), asyncio.Event()
     calls = []
@@ -336,7 +287,7 @@ async def test_same_pending_job_reuses_one_production_result(tmp_path, monkeypat
         current.done = True
         memory._save_job(current)
 
-    monkeypatch.setattr(memory, "_produce", produce)
+    monkeypatch.setattr("redlotus.memory.service.produce_job", lambda service, job: produce(job))
     first = asyncio.create_task(memory._execute(job))
     await started.wait()
     copy = job.model_copy(deep=True)
@@ -348,116 +299,48 @@ async def test_same_pending_job_reuses_one_production_result(tmp_path, monkeypat
     await memory.close()
 
 
-async def test_restart_retries_paused_job_once_without_changing_configuration(
-    tmp_path, monkeypatch
-):
-    from redlotus.infra.persist_utils import save_locked_json
-    from redlotus.tools.memory.models import ObservedTurn, PerceptionResult
-
+async def test_restart_preserves_paused_job_until_explicit_retry(tmp_path, monkeypatch):
+    from redlotus.memory.records import PerceptionResult
     workspace = WorkspaceContext.from_path(tmp_path)
-    memory = MemoryService(workspace=workspace)
-    memory._recovered = True
-    memory._save_job(
-        MemoryJob(
-            id="pending",
-            request="remember",
-            events=[
-                ObservedTurn(
-                    id="event",
-                    project_id=workspace.project_id,
-                    session_id="s",
-                    turn_id="one",
-                )
-            ],
-        )
-    )
-    save_locked_json(
-        memory.state_path,
-        {"blocked_route": memory._route(), "error": "service unavailable"},
-    )
-    await memory.process_pending()
-    assert memory._paused()
+    memory = new_memory(workspace=workspace)
+    event = memory.observations.begin("session", "one", "remember", [])
+    memory.observations.finish(event)
+    memory._save_job(MemoryJob(id="pending", request="remember", events=[event]))
+    memory._processor({"blocked_route": memory._route(), "error": "service unavailable"})
     await memory.close()
-    restarted = MemoryService(workspace=workspace)
+    restarted = new_memory(workspace=workspace)
     calls = []
 
-    async def produce(job):
+    async def produce(service, job):
         calls.append(job.id)
         job.result = PerceptionResult(records=[], reason="recovered")
         job.done = True
-        restarted._save_job(job)
+        service._save_job(job)
 
-    monkeypatch.setattr(restarted, "_produce", produce)
+    monkeypatch.setattr("redlotus.memory.service.produce_job", produce)
     await restarted.process_pending()
+    assert not calls and restarted._paused()
+    await restarted.process_pending(recover=True)
     await restarted.process_pending()
     assert calls == ["pending"] and not restarted._paused()
     await restarted.close()
 
 
-async def test_legacy_pending_requests_and_short_window_reuse_production(
-    tmp_path, monkeypatch
-):
-    from redlotus.infra.persist_utils import save_locked_json
-    from redlotus.tools.memory.models import PerceptionResult, MemoryDraft
+async def test_index_retry_reuses_saved_current_session_production(tmp_path, monkeypatch):
+    from redlotus.memory.records import PerceptionResult
+    memory = new_memory(workspace=WorkspaceContext.from_path(tmp_path))
+    event = memory.observations.begin("session", "one", "A completed task", [])
+    memory.observations.finish(event)
+    memory._save_job(MemoryJob(id="saved-result", events=[event], done=True,
+        result=PerceptionResult(records=[], reason="Already produced")))
 
-    memory = MemoryService(workspace=WorkspaceContext.from_path(tmp_path))
-    first = memory.observations.begin("s", "first", "请记住项目资料", [])
-    first.status = "success"
-    memory.observations.finish(first)
-    window = memory.observations.window(flush=True)
-    root = memory.observations.root
-    request_id = "legacy-request"
-    save_locked_json(
-        root / "requests" / f"{request_id}.json",
-        {
-            "id": request_id,
-            "event": first.model_dump(mode="json"),
-            "request": "保存资料",
-            "scope": "project",
-        },
-    )
-    result = PerceptionResult(
-        request_authorized=True,
-        reason="已生产",
-        records=[
-            MemoryDraft(
-                kind="requested",
-                goal="旧版本已由模型提炼的资料",
-                source_turn_ids=[first.id],
-            )
-        ],
-    )
-    save_locked_json(
-        root / "production" / f"{request_id}.json",
-        {"result": result.model_dump(), "sources": {}, "reference_ids": []},
-    )
-    save_locked_json(
-        root / "production" / f"{window.id}.json",
-        {
-            "result": PerceptionResult(
-                records=[], reason="无需重复自动记忆"
-            ).model_dump(),
-            "sources": {},
-            "reference_ids": [],
-        },
-    )
-    second = memory.observations.begin("s", "second", "新增未满一窗的事件", [])
-    second.status = "success"
-    memory.observations.finish(second)
+    async def unexpected_production(*args):
+        raise AssertionError("Index retry must not produce again")
 
-    async def unexpected_production(job):
-        raise AssertionError("Successful legacy production must not call the LLM again")
-
-    async def no_index():
-        pass
-
-    monkeypatch.setattr(memory, "_produce", unexpected_production)
-    monkeypatch.setattr(memory.store, "reconcile", no_index)
+    monkeypatch.setattr("redlotus.memory.service.produce_job", unexpected_production)
     await memory.process_pending()
-    assert memory.observations.cursor() == 1
-    assert len(memory.store.all("project")) == 1
-    assert (root / "migration_backup/jobs-v2/requests/legacy-request.json").is_file()
-    assert MemoryJob.model_validate_json(
-        (memory.jobs_dir / f"{window.id}.json").read_text(encoding="utf-8")
-    ).done
+    await memory.process_pending()
+    assert memory.session.job("saved-result")["indexed"]
+    assert memory.session.pending_jobs() == []
+    assert memory.observations.cursor() == 0
     await memory.close()

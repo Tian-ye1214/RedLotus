@@ -1,4 +1,4 @@
-from redlotus.cli.file_ref import parse_file_paths
+from redlotus.tools.interaction import parse_file_paths
 
 
 def test_missing_reference_stops_at_chinese_punctuation(tmp_path):

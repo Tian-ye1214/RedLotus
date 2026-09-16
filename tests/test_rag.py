@@ -2,9 +2,9 @@
 
 import importlib
 
-from redlotus.RAG.DataBase import EmbedDataBase
-from redlotus.RAG.RAG import RAG
-from redlotus.config.app_config import settings
+from redlotus.memory.retrieval import EmbedDataBase
+from redlotus.memory.retrieval import RAG
+from redlotus.core.config import settings
 
 
 async def test_lancedb_scoped_upsert_search_count_and_clear(tmp_path):
@@ -42,7 +42,7 @@ async def test_lancedb_scoped_upsert_search_count_and_clear(tmp_path):
 
 
 async def test_rag_chunking_rerank_dedup_and_fallback(tmp_path, monkeypatch):
-    module = importlib.import_module("redlotus.RAG.RAG")
+    module = importlib.import_module("redlotus.memory.retrieval")
     rerank_calls = []
 
     async def embed(texts, **kwargs):
@@ -105,11 +105,11 @@ async def test_rag_chunking_rerank_dedup_and_fallback(tmp_path, monkeypatch):
 
 
 async def test_missing_vectors_recovered_despite_old_checkpoint(tmp_path, monkeypatch):
-    from redlotus.runtime.context import WorkspaceContext
-    from redlotus.tools.memory.store import MemoryStore
-    from redlotus.tools.memory.models import MemoryRecord
+    from redlotus.core.agents import WorkspaceContext
+    from redlotus.memory.store import MemoryStore
+    from redlotus.memory.records import MemoryRecord
 
-    module = importlib.import_module("redlotus.RAG.RAG")
+    module = importlib.import_module("redlotus.memory.retrieval")
     calls = []
 
     async def embed(texts, **kwargs):
@@ -119,8 +119,8 @@ async def test_missing_vectors_recovered_despite_old_checkpoint(tmp_path, monkey
         ]
 
     monkeypatch.setattr(module, "embed_texts", embed)
-    monkeypatch.setattr("redlotus.tools.memory.store.missing_rag_api_keys", lambda: ())
-    from redlotus.config.app_config import settings
+    monkeypatch.setattr("redlotus.memory.store.missing_rag_api_keys", lambda: ())
+    from redlotus.core.config import settings
 
     config = {
         **settings(),
@@ -130,7 +130,7 @@ async def test_missing_vectors_recovered_despite_old_checkpoint(tmp_path, monkey
             "use_rerank": False,
         },
     }
-    monkeypatch.setattr("redlotus.tools.memory.store.settings", lambda: config)
+    monkeypatch.setattr("redlotus.memory.store.settings", lambda: config)
     memory = MemoryStore(WorkspaceContext.from_path(tmp_path / "project"))
     rag = memory.indexes["project"]
 

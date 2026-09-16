@@ -1,8 +1,8 @@
 import fitz
 
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.tools.BasicTools import BasicToolkit
-from redlotus.skills.SkillsManager import SkillsManager
+from redlotus.core.agents import WorkspaceContext
+from redlotus.tools.toolkit import BasicToolkit
+from redlotus.tools.registry import SkillsManager
 
 
 async def test_pdf_text_and_images_stay_in_active_project(tmp_path):
@@ -25,9 +25,7 @@ async def test_pdf_text_and_images_stay_in_active_project(tmp_path):
 
 
 async def test_project_file_tools_and_skills_capabilities_survive(tmp_path):
-    from redlotus.ModelGateway.agent_factory import (
-        create_worker_toolsets_and_capabilities,
-    )
+    from redlotus.core.gateway import create_worker_toolsets_and_capabilities
 
     toolkit = BasicToolkit(
         SkillsManager(), workspace=WorkspaceContext.from_path(tmp_path)
@@ -51,10 +49,10 @@ async def test_project_file_tools_and_skills_capabilities_survive(tmp_path):
 
 
 def test_quoted_reference_completion_preserves_spaces_and_unicode(tmp_path):
-    from redlotus.cli.completion import completion_for_input
-    from redlotus.cli.completer import _iter_file_completions
-    from redlotus.cli.file_ref import parse_file_paths
-    from redlotus.workspace.workspace import set_workspace
+    from redlotus.core.console import completion_for_input
+    from redlotus.core.console import _iter_file_completions
+    from redlotus.tools.interaction import parse_file_paths
+    from redlotus.core.session import set_workspace
 
     set_workspace(tmp_path)
     target = tmp_path / "图片 文件.png"
@@ -68,8 +66,8 @@ def test_quoted_reference_completion_preserves_spaces_and_unicode(tmp_path):
 
 
 def test_panel_total_does_not_count_reasoning_twice():
-    from redlotus.ModelGateway.usage_accounting import UsageTotals
-    from redlotus.cli.panel import _session_total_tokens
+    from redlotus.core.history import UsageTotals
+    from redlotus.core.presentation import _session_total_tokens
 
     totals = UsageTotals(input_tokens=100, output_tokens=30, reasoning_tokens=20)
     assert _session_total_tokens(totals) == 130
@@ -86,12 +84,10 @@ async def test_usage_survives_compaction_without_double_counting_display_updates
         UserPromptPart,
     )
     from pydantic_ai.usage import RequestUsage
-    from redlotus.tools.conversation_log import ConversationLog
-    from redlotus.ModelGateway.usage_accounting import summarize_usage_files
+    from redlotus.core.session import SessionFile
+    from redlotus.core.history import summarize_usage_files
 
-    log = ConversationLog(
-        "coordinator", "today", "usage", workspace=WorkspaceContext.from_path(tmp_path)
-    )
+    log = SessionFile.create(tmp_path, WorkspaceContext.from_path(tmp_path).project_id)
     first = ModelResponse(
         parts=[TextPart("first")],
         provider_response_id="one",
@@ -102,15 +98,15 @@ async def test_usage_survives_compaction_without_double_counting_display_updates
         provider_response_id="two",
         usage=RequestUsage(input_tokens=200, output_tokens=20),
     )
-    await log.save([first, second])
-    await log.save(
+    log.save_context([first, second], turn_id="one")
+    log.save_context(
         [
             ModelRequest(parts=[UserPromptPart("summary")]),
             replace(second, parts=[TextPart("cleaned display")]),
-        ]
+        ], turn_id="one"
     )
     report = summarize_usage_files(
-        [log.model_messages_path()], price_resolver=lambda model: None
+        [log.path], price_resolver=lambda model: None
     )
     assert report.totals.responses == 2
     assert report.totals.input_tokens == 300 and report.totals.output_tokens == 30
@@ -119,7 +115,7 @@ async def test_usage_survives_compaction_without_double_counting_display_updates
 def test_review_uses_latest_snapshot_and_preserves_external_changes(tmp_path):
     import threading
     import pytest
-    from redlotus.cli.pending_review import PendingReviewStore
+    from redlotus.tools.interaction import PendingReviewStore
 
     path = tmp_path / "code.py"
     path.write_text("original\n", encoding="utf-8")
@@ -145,7 +141,7 @@ def test_review_uses_latest_snapshot_and_preserves_external_changes(tmp_path):
 def test_legacy_console_measures_visible_ansi_text():
     from io import StringIO
     from rich.console import Console
-    from redlotus.cli.output import LegacyOutputSink
+    from redlotus.core.presentation import LegacyOutputSink
 
     stream = StringIO()
     sink = LegacyOutputSink(Console(file=stream, width=80, force_terminal=False))

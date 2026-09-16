@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from redlotus.RAG.storage_path import resolve_lancedb_dir
+from redlotus.memory.retrieval import resolve_lancedb_dir
 
 
 def test_explicit_runtime_database_override_takes_precedence(monkeypatch):

@@ -1,7 +1,7 @@
 """Scheduling regressions; live model acceptance is recorded separately."""
 
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.tools.memory.observations import ObservationStore
+from redlotus.core.agents import WorkspaceContext
+from memory_helpers import bound_observations
 
 
 def add_turns(store, start, end):
@@ -15,7 +15,7 @@ def add_turns(store, start, end):
 
 
 def test_twenty_new_turns_are_required_after_overlap(tmp_path):
-    store = ObservationStore(
+    store = bound_observations(
         WorkspaceContext.from_path(tmp_path), window_turns=20, overlap_turns=3
     )
     first_ids = add_turns(store, 0, 20)
@@ -30,21 +30,20 @@ def test_twenty_new_turns_are_required_after_overlap(tmp_path):
     assert second.overlap_turn_ids == first_ids[-3:]
 
 
-def test_flush_cannot_consume_events_after_its_boundary(tmp_path):
-    store = ObservationStore(
-        WorkspaceContext.from_path(tmp_path), window_turns=20, overlap_turns=3
-    )
-    first_ids = add_turns(store, 0, 4)
-    add_turns(store, 4, 7)
-    window = store.window(flush=True, through=4)
+def test_partial_window_cannot_consume_events_or_cross_fixed_boundary(tmp_path):
+    store = bound_observations(WorkspaceContext.from_path(tmp_path))
+    first_ids = add_turns(store, 0, 20)
+    add_turns(store, 20, 27)
+    window = store.window(through=20)
     assert window.new_turn_ids == first_ids
     store.commit(window)
-    assert store.window(flush=True, through=4) is None
-    assert len(store.window(flush=True).new_turn_ids) == 3
+    assert store.window(through=20) is None
+    assert store.window() is None
+    assert store.session.completed_turns == 27 and store.cursor() == 20
 
 
 def test_completed_cursor_never_rewinds_or_drops_reservation(tmp_path):
-    store = ObservationStore(
+    store = bound_observations(
         WorkspaceContext.from_path(tmp_path), window_turns=20, overlap_turns=3
     )
     add_turns(store, 0, 40)

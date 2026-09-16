@@ -1,5 +1,5 @@
-from redlotus import prompt
-from redlotus.skills.SkillsManager import SkillsManager
+from redlotus.prompts import prompt
+from redlotus.tools.registry import SkillsManager
 
 
 def test_role_instructions_do_not_change_when_only_the_clock_changes(monkeypatch):
@@ -17,7 +17,7 @@ def test_role_instructions_do_not_change_when_only_the_clock_changes(monkeypatch
 
 
 def test_latest_time_is_separate_from_the_original_user_request(monkeypatch):
-    from redlotus.agent_core.input_messages import UserMessage
+    from redlotus.tools.interaction import UserMessage
 
     monkeypatch.setattr(
         prompt, "format_prompt_current_time", lambda: "2026-09-13 10:00:17"

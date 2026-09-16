@@ -1,0 +1,455 @@
+"""RAG embedding, native LanceDB and project-scoped recall."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import sys
+from pathlib import Path
+from redlotus.core import config as logger, config as app_config
+from redlotus.core.config import (
+    APP_NAME,
+    user_data_dir,
+    get_env,
+    settings,
+    get_client,
+    openai_base_url,
+)
+from typing import Any
+import httpx
+from datetime import timedelta
+from copy import deepcopy
+import lancedb
+import pyarrow as pa
+from filelock import AsyncFileLock
+from lancedb.index import IvfPq
+import json
+
+
+def _fit_windows_path(path: Path, table_name: str) -> str:
+    # Lance adds table, data/index directories and generated filenames. Its Windows
+    # writer currently drops the extended-path prefix before committing a file.
+    if (
+        not table_name
+        or sys.platform != "win32"
+        or len(str(path)) + len(table_name) + 110 < 248
+    ):
+        return str(path)
+    digest = hashlib.sha256(str(path).casefold().encode()).hexdigest()[:16]
+    local_root = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+    fallback = local_root / APP_NAME / "rag_lancedb" / digest
+    logger.info(
+        "LanceDB: 路径过深，向量索引改存 %s；原始记忆与配置保持原位。", fallback
+    )
+    return str(fallback)
+
+
+def resolve_lancedb_dir(configured_path: str, *, table_name: str = "") -> str:
+    """Use the configured database path, with an explicit process override for tests."""
+    p = Path(os.environ.get("RAG_DB_PATH") or configured_path).expanduser()
+    if not p.is_absolute():
+        p = (user_data_dir() / p).resolve()
+    else:
+        p = p.resolve()
+
+    return _fit_windows_path(p, table_name)
+
+
+_HTTP_KEY = "rag"
+
+
+def _require_rag_model(role: str) -> str:
+    name = settings()["RAG_models"][role].strip()
+    if not name:
+        raise RuntimeError(f"config.json 的 RAG_models 中缺少 {role!r}。")
+    return name
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    """当前事件循环的 embedding/rerank 连接池；配置地址变化时使用新池。"""
+    config = settings()["rag_service"]
+    kwargs = dict(
+        base_url=openai_base_url(get_env("SILICONFLOW_BASE", warn=False)),
+        http2=config["http2"],
+        timeout=config["timeout"],
+    )
+    return get_client(f"{_HTTP_KEY}:{kwargs}", lambda: httpx.AsyncClient(**kwargs))
+
+
+def _require_rag_api() -> None:
+    missing = app_config.missing_rag_api_keys()
+    if missing:
+        raise RuntimeError("缺少 RAG API 配置: " + ", ".join(missing))
+
+
+async def _rag_api_post(endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
+    """RAG 接口统一 POST：构造鉴权头、校验状态、解析 JSON。"""
+    response = await _get_shared_client().post(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+async def embed_texts(
+    texts: str | list[str],
+    *,
+    model: str | None = None,
+) -> list[list[float]]:
+    """异步获取文本向量；支持单条字符串或多条批量，超过上限自动分批请求。"""
+    _require_rag_api()
+    if isinstance(texts, str):
+        texts = [texts]
+    logger.debug("RAG embed: batch_size=%d", len(texts))
+    model = model or _require_rag_model("embedding")
+    batch_size = int(settings()["rag_service"]["embedding_batch_size"])
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), batch_size):
+        body = {"model": model, "input": texts[start : start + batch_size]}
+        data = await _rag_api_post("/embeddings", body)
+        items = data.get("data") or []
+        n = len(items)
+        if n > 1 and [x.get("index", 0) for x in items] != list(range(n)):
+            items = sorted(items, key=lambda x: x.get("index", 0))
+        vectors.extend(row["embedding"] for row in items)
+    return vectors
+
+
+async def rerank_documents(
+    query: str,
+    documents: list[str],
+    *,
+    top_n: int | None = None,
+) -> list[dict[str, Any]]:
+    """调用与 OpenAI 兼容的 /v1/rerank，返回按相关度排序的结果（含原始下标与分数）。"""
+    _require_rag_api()
+    if not documents:
+        return []
+    logger.debug("RAG rerank: n_docs=%d, top_n=%s", len(documents), top_n)
+    model = _require_rag_model("reranker")
+    body: dict[str, Any] = {
+        "model": model,
+        "query": query,
+        "documents": documents,
+        "return_documents": False,
+    }
+    if top_n is not None:
+        body["top_n"] = top_n
+
+    data = await _rag_api_post("/rerank", body)
+
+    return [
+        dict(
+            index=int(row["index"]),
+            text=documents[int(row["index"])],
+            relevance_score=float(row.get("relevance_score", 0)),
+        )
+        for row in data.get("results", [])
+    ]
+
+
+class EmbedDataBase:
+    """Native async LanceDB operations; no worker-thread or DataFrame conversion wrappers."""
+
+    COLUMNS = (
+        "id",
+        "record_id",
+        "project_id",
+        "text",
+        "source",
+        "created_at",
+        "agent",
+        "session_key",
+    )
+
+    def __init__(self, db_path, table_name, vector_dim=None, *, index_config=None):
+        self.db_path = resolve_lancedb_dir(db_path, table_name=table_name)
+        self.table_name, self.vector_dim = table_name, vector_dim
+        self._index_config = deepcopy(index_config or {})
+        self._db = None
+        self._rows_since_index = 0
+
+    async def _table(self):
+        if self._db is None:
+            Path(self.db_path).mkdir(parents=True, exist_ok=True)
+            self._db = await lancedb.connect_async(
+                self.db_path, read_consistency_interval=timedelta(0)
+            )
+        if self.table_name not in (await self._db.list_tables()).tables:
+            return None
+        return await self._db.open_table(self.table_name)
+
+    async def upsert_vectors(self, rows):
+        if not rows:
+            return 0
+        self.vector_dim = len(rows[0]["vector"])
+        schema = pa.schema(
+            [
+                *(pa.field(key, pa.string()) for key in self.COLUMNS),
+                pa.field("vector", pa.list_(pa.float32(), self.vector_dim)),
+            ]
+        )
+        data = pa.Table.from_pylist(
+            [
+                {
+                    **{key: row.get(key, "") or "" for key in self.COLUMNS},
+                    "vector": row["vector"],
+                }
+                for row in rows
+            ],
+            schema=schema,
+        )
+        Path(self.db_path).mkdir(parents=True, exist_ok=True)
+        async with AsyncFileLock(
+            Path(self.db_path) / (self.table_name + ".write.lock"),
+            run_in_executor=False,
+        ):
+            table = await self._table()
+            if table is None:
+                await self._db.create_table(self.table_name, data=data)
+            else:
+                await (
+                    table.merge_insert("id")
+                    .when_matched_update_all()
+                    .when_not_matched_insert_all()
+                    .execute(data)
+                )
+        self._rows_since_index += len(rows)
+        return len(rows)
+
+    async def row_count(self, where=None):
+        table = await self._table()
+        return await table.count_rows(where) if table else 0
+
+    async def keys(self, column, where):
+        table = await self._table()
+        if table is None:
+            return set()
+        data = await table.query().where(where).select([column]).to_arrow()
+        return set(data[column].to_pylist())
+
+    async def delete_where(self, where):
+        table = await self._table()
+        if table is not None:
+            await table.delete(where)
+            logger.debug(
+                "RAG DB: delete_where table=%s where=%s", self.table_name, where
+            )
+
+    async def ensure_vector_index(self):
+        if not self._index_config:
+            return False
+        table = await self._table()
+        if table is None:
+            return False
+        count = await table.count_rows()
+        if count < int(self._index_config["min_rows"]):
+            return False
+        if await table.list_indices() and self._rows_since_index < int(
+            self._index_config["rebuild_every_n_adds"]
+        ):
+            return False
+        dim = (await table.schema()).field("vector").type.list_size
+        await table.create_index(
+            "vector",
+            replace=True,
+            config=IvfPq(
+                distance_type=self._index_config["metric"],
+                num_partitions=max(
+                    1, count // self._index_config["rows_per_partition"]
+                ),
+                num_sub_vectors=max(
+                    1, dim // self._index_config["dimensions_per_sub_vector"]
+                ),
+            ),
+        )
+        self._rows_since_index = 0
+        return True
+
+    async def vector_search(self, query_embedding, top_k, *, where=None):
+        table = await self._table()
+        if table is None:
+            return []
+        query = table.query()
+        if where:
+            query = query.where(where)
+        rows = (
+            await query.nearest_to(query_embedding)
+            .distance_type(self._index_config["metric"])
+            .limit(top_k)
+            .to_arrow()
+        )
+        return rows.to_pylist()
+
+    async def close(self):
+        if self._db:
+            self._db.close()
+        self._db = None
+
+
+class RAG:
+    """Project-scoped chunking, embedding, vector search and optional reranking."""
+
+    def __init__(self, config: dict, *, project_id: str):
+        self.config = deepcopy(config)
+        self.project_id = project_id
+        self.embedding_model = settings()["RAG_models"]["embedding"]
+        space = hashlib.sha256(self.embedding_model.encode()).hexdigest()[:12]
+        table_name = str(config["table_name"]) + "_records_v2_" + space
+        self._db = EmbedDataBase(
+            str(config["db_path"]),
+            table_name=table_name,
+            index_config=config["index"],
+        )
+        self.index_key = json.dumps(
+            [
+                self._db.db_path,
+                table_name,
+                config["turn_token_limit"],
+                config["turn_chunk_overlap_tokens"],
+            ]
+        )
+        self.last_error = ""
+
+    @property
+    def where(self) -> str:
+        return "project_id = '" + self.project_id.replace("'", "''") + "'"
+
+    def _chunks(self, text: str) -> list[str]:
+        # A conservative multilingual budget keeps long imported episodes embeddable.
+        limit = int(self.config["turn_token_limit"])
+        overlap = int(self.config["turn_chunk_overlap_tokens"])
+        if not 0 <= overlap < limit:
+            raise ValueError("RAG chunk overlap must be smaller than its chunk budget")
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = min(start + limit, len(text))
+            if end < len(text):
+                boundary = max(
+                    text.rfind("\n", start + limit // 2, end),
+                    text.rfind("。", start + limit // 2, end),
+                )
+                if boundary > start:
+                    end = boundary + 1
+            chunks.append(text[start:end])
+            if end == len(text):
+                break
+            start = max(start + 1, end - overlap)
+        return chunks or [""]
+
+    async def upsert_records(self, records: list[dict]) -> int:
+        rows = []
+        for episode in records:
+            if episode["project_id"] != self.project_id:
+                raise ValueError("Cannot index an episode from another project")
+            for index, chunk in enumerate(self._chunks(episode["text"])):
+                rows.append(
+                    {
+                        **episode,
+                        "id": f"{self.project_id}:{episode['record_id']}:{index}",
+                        "text": chunk,
+                    }
+                )
+        if not rows:
+            return 0
+        record_ids = ",".join(
+            "'" + record["record_id"].replace("'", "''") + "'" for record in records
+        )
+        previous_ids = await self._db.keys(
+            "id", f"{self.where} AND record_id IN ({record_ids})"
+        )
+        vectors = await embed_texts(
+            [row["text"] for row in rows], model=self.embedding_model
+        )
+        if len(vectors) != len(rows):
+            raise ValueError("Embedding count does not match the submitted chunks")
+        for row, vector in zip(rows, vectors):
+            row["vector"] = vector
+        count = await self._db.upsert_vectors(rows)
+        if count != len(rows):
+            raise RuntimeError("The vector database did not confirm all chunk writes")
+        obsolete = previous_ids - {row["id"] for row in rows}
+        if obsolete:
+            ids = ",".join("'" + value.replace("'", "''") + "'" for value in obsolete)
+            await self._db.delete_where(f"{self.where} AND id IN ({ids})")
+        try:
+            await self._db.ensure_vector_index()
+        except Exception as exc:
+            # Exact vector search remains available without an acceleration index.
+            self.last_error = f"Index acceleration unavailable: {exc}"
+            logger.warning(self.last_error)
+        return len(records)
+
+    async def retrieve(self, query: str) -> list[dict]:
+        if not query.strip():
+            return []
+        vector = (
+            await embed_texts(
+                settings()["rag_service"]["query_instruction"] + query,
+                model=self.embedding_model,
+            )
+        )[0]
+        candidates = await self._db.vector_search(
+            vector, int(self.config["vector_search_limit"]), where=self.where
+        )
+        minimum = float(self.config["min_similarity"])
+        metric = self.config["index"]["metric"]
+        candidates = [
+            row
+            for row in candidates
+            if row["project_id"] == self.project_id
+            and row.get("_distance") is not None
+            and (1 / (1 + row["_distance"]) if metric == "l2" else 1 - row["_distance"])
+            >= minimum
+        ]
+        self.last_error = ""
+        if candidates and self.config["use_rerank"]:
+            try:
+                ranked = await rerank_documents(
+                    query, [row["text"] for row in candidates], top_n=len(candidates)
+                )
+                if not ranked:
+                    raise ValueError("Reranker returned no candidates")
+                ranked_rows = [
+                    {
+                        **candidates[row["index"]],
+                        "relevance_score": row["relevance_score"],
+                    }
+                    for row in ranked
+                ]
+                seen = {row["id"] for row in ranked_rows}
+                candidates = [
+                    *ranked_rows,
+                    *(row for row in candidates if row["id"] not in seen),
+                ]
+            except Exception as exc:
+                self.last_error = f"Rerank unavailable; using vector ranking: {exc}"
+                logger.warning(self.last_error)
+        # Chunk hits reference one complete episode; return it only once.
+        unique = {}
+        for row in candidates:
+            unique.setdefault(row["record_id"], row)
+        return list(unique.values())[: int(self.config["final_top_k"])]
+
+    async def row_count(self) -> int:
+        return await self._db.row_count(self.where)
+
+    async def indexed_record_ids(self) -> set[str]:
+        return await self._db.keys("record_id", self.where)
+
+    async def delete_records(self, record_ids: list[str]) -> None:
+        if record_ids:
+            ids = ",".join("'" + value.replace("'", "''") + "'" for value in record_ids)
+            await self._db.delete_where(f"{self.where} AND record_id IN ({ids})")
+
+    async def clear_project(self) -> None:
+        await self._db.delete_where(self.where)
+
+    async def close(self) -> None:
+        await self._db.close()

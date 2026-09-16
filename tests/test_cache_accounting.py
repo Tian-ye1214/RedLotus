@@ -1,6 +1,7 @@
 from pydantic_ai.usage import RequestUsage
 
-from redlotus.ModelGateway.usage_accounting import BillableTokens, UsageTotals
+from redlotus.core.history import BillableTokens
+from redlotus.core.history import UsageTotals
 
 
 def test_cache_totals_use_provider_counts_and_keep_unknown_input_separate():

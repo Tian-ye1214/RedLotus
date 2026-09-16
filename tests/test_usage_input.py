@@ -7,8 +7,8 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import UserPromptPart
 from pydantic_ai.models.function import FunctionModel
 
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.tools.BasicTools import BasicToolkit
+from redlotus.core.agents import WorkspaceContext
+from redlotus.tools.toolkit import BasicToolkit
 from test_entries import configure_cli_hooks
 from test_system import configured_system
 
@@ -19,7 +19,7 @@ async def test_expired_urgent_does_not_capture_attachments_after_slow_parse(
     import io
     from PIL import Image
     from pydantic_ai.messages import BinaryContent
-    from redlotus.agent_core.input_messages import UserMessage
+    from redlotus.tools.interaction import UserMessage
 
     system = configured_system(tmp_path, monkeypatch)
     parsing, release = asyncio.Event(), asyncio.Event()
@@ -84,8 +84,8 @@ async def test_slow_urgent_keeps_submission_order_through_final_response(
     async def create(*args, **kwargs):
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.cli_controller.load_file_refs", parse)
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.console.load_file_refs", parse)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     try:
         async with asyncio.timeout(10):
             await system.process_cli_line("begin", state, wait_for_turn=False)
@@ -148,8 +148,8 @@ async def test_late_urgent_cannot_become_a_new_task(tmp_path, monkeypatch, contr
     async def create(*args, **kwargs):
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.cli_controller.load_file_refs", parse)
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.console.load_file_refs", parse)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     monkeypatch.setattr(
         system, "generate_task_title", lambda text: asyncio.sleep(0, result="audit")
     )
@@ -217,8 +217,8 @@ async def test_failed_urgent_does_not_drop_input_registered_at_later_boundary(
 
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.cli_controller.load_file_refs", parse)
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.console.load_file_refs", parse)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     try:
         async with asyncio.timeout(10):
             await system.process_cli_line("begin", state, wait_for_turn=False)

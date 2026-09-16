@@ -16,9 +16,10 @@ from pydantic_ai.models.function import FunctionModel, DeltaToolCall, DeltaThink
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.usage import UsageLimits
 
-from redlotus.agent_core.runner import AgentRunner
-from redlotus.ModelGateway.agent_factory import create_agent, create_function_toolset
-from redlotus.tools.memory.chat_history import messages_safe_for_new_prompt
+from redlotus.core.agents import AgentRunner
+from redlotus.core.gateway import create_agent
+from redlotus.core.gateway import create_function_toolset
+from redlotus.core.history import messages_safe_for_new_prompt
 
 
 async def test_parallel_results_and_urgent_share_next_request():

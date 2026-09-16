@@ -2,10 +2,11 @@
 
 import pytest
 
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.runtime.subagents import SubagentFactory, SubagentSpec
-from redlotus.skills.SkillsManager import SkillsManager
-from redlotus.tools.BasicTools import BasicToolkit
+from redlotus.core.agents import WorkspaceContext
+from redlotus.core.agents import SubagentFactory
+from redlotus.core.agents import SubagentSpec
+from redlotus.tools.registry import SkillsManager
+from redlotus.tools.toolkit import BasicToolkit
 
 
 async def in_worker(tmp_path, execute):
@@ -82,7 +83,7 @@ async def test_ordinary_subagent_command_keeps_working(tmp_path):
 async def test_common_process_control_forms_are_rejected_before_execution(
     tmp_path, command
 ):
-    from redlotus.infra.subprocess_runner import validate_agent_command
+    from redlotus.tools.execution import validate_agent_command
 
     async def execute():
         validate_agent_command(command, cwd=str(tmp_path))

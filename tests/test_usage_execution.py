@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from redlotus.infra import subprocess_runner as runner
-from redlotus.runtime.context import execution_role
+from redlotus.tools import execution as runner
+from redlotus.core.agents import execution_role
 
 
 @pytest.mark.parametrize(
@@ -119,7 +119,7 @@ async def test_non_python_command_does_not_resolve_or_create_python(
 
 def test_runtime_root_does_not_depend_on_other_templates(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "redlotus.infra.paths.runtime_dir", lambda: tmp_path / "actual-runtime"
+        "redlotus.core.config.runtime_dir", lambda: tmp_path / "actual-runtime"
     )
     config = dict(
         environment_dir=str(tmp_path / "env"),
@@ -158,8 +158,8 @@ def test_environment_in_creation_is_not_reported_ready(tmp_path, monkeypatch):
     "command", ['start "" app.exe', 'powershell -Command "Start-Process app.exe"']
 )
 async def test_direct_background_command_is_rejected_at_shared_entry(tmp_path, command):
-    from redlotus.tools.BasicTools import BasicToolkit
-    from redlotus.runtime.context import WorkspaceContext
+    from redlotus.tools.toolkit import BasicToolkit
+    from redlotus.core.agents import WorkspaceContext
 
     toolkit = BasicToolkit(None, workspace=WorkspaceContext.from_path(tmp_path))
     try:

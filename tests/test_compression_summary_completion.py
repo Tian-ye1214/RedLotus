@@ -1,10 +1,8 @@
 import pytest
 
-from redlotus.ModelGateway.ModelChecker import (
-    _COMPRESS_REQUIRED_HEADINGS,
-    CompressionValidationError,
-    _lint_compression_summary,
-)
+from redlotus.core.history import _COMPRESS_REQUIRED_HEADINGS
+from redlotus.core.history import CompressionValidationError
+from redlotus.core.history import _lint_compression_summary
 
 
 def test_truncated_next_action_is_not_a_valid_checkpoint():

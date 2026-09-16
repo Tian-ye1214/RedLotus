@@ -14,8 +14,14 @@ def main():
             "REDLOTUS_CONFIG_FILE", str(root / "src/redlotus/config.json")
         )
         os.environ.setdefault("REDLOTUS_DOTENV_FILE", str(root / ".env"))
-        sys.path.insert(0, str(root / "src"))
-    from redlotus.agent_core.entrypoint import main as run
+        # A shared editable environment must not mix another checkout's packages.
+        source = root / "src"
+        sys.path[:] = [str(source), *[
+            path for path in sys.path
+            if Path(path).resolve() != source
+            and not (Path(path).name == "src" and (Path(path) / "redlotus").is_dir())
+        ]]
+    from redlotus.core.config import main as run
 
     run()
 

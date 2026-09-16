@@ -9,11 +9,13 @@ from pydantic_ai import Agent, BinaryContent
 from pydantic_ai.messages import UserPromptPart
 from pydantic_ai.models.function import FunctionModel
 
-from redlotus.cli.file_ref import load_file_refs
-from redlotus.ModelGateway.model_factory import ModelTarget, create_model
-from redlotus.infra.paths import user_data_dir
-from redlotus.references.readers import DocumentReader
-from redlotus.runtime.context import WorkspaceContext, workspace_context
+from redlotus.tools.interaction import load_file_refs
+from redlotus.core.gateway import ModelTarget
+from redlotus.core.gateway import create_model
+from redlotus.core.config import references_dir
+from redlotus.tools.references import DocumentReader
+from redlotus.core.agents import WorkspaceContext
+from redlotus.core.agents import workspace_context
 from test_system import configured_system
 from test_entries import configure_cli_hooks
 
@@ -37,7 +39,7 @@ async def test_all_originals_are_captured_before_slow_parsing(tmp_path, monkeypa
         task = asyncio.create_task(load_file_refs(" ".join(f'@"{p}"' for p in files)))
         try:
             await asyncio.wait_for(started.wait(), 5)
-            saved = list((user_data_dir() / "references/blobs").glob("*/source.txt"))
+            saved = list((references_dir() / "blobs").glob("*/source.txt"))
             assert len(saved) == 5
             files[-1].write_text("changed after admission", encoding="utf-8")
         finally:
@@ -60,14 +62,14 @@ async def test_queued_input_captures_references_while_previous_turn_is_waiting(
 
     monkeypatch.setattr(cli, "_start_user_turn_from_raw_input", start)
     monkeypatch.setattr(
-        "redlotus.agent_core.cli_controller.app_config.missing_main_api_keys",
+        "redlotus.core.console.app_config.missing_main_api_keys",
         lambda: (),
     )
     system._session.queue.submit(hold.wait)
     try:
         await cli.process_line(f'分析 @"{original}"', state, wait_for_turn=False)
         async with asyncio.timeout(5):
-            while not list((user_data_dir() / "references/blobs").glob("*/source.txt")):
+            while not list((references_dir() / "blobs").glob("*/source.txt")):
                 await asyncio.sleep(0.01)
         original.write_text("changed while queued", encoding="utf-8")
     finally:
@@ -95,7 +97,7 @@ async def test_twenty_first_file_is_rejected_before_snapshot_reads(tmp_path):
     text = "，".join(f"@file{number}.txt" for number in range(21))
     with pytest.raises(ValueError, match="20.*21"):
         await load_file_refs(text, workspace=WorkspaceContext.from_path(tmp_path))
-    assert not (user_data_dir() / "references" / "blobs").exists()
+    assert not (references_dir() / "blobs").exists()
 
 
 async def test_cli_first_http_request_contains_document_and_original_image(
@@ -157,7 +159,7 @@ async def test_cli_first_http_request_contains_document_and_original_image(
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             monkeypatch.setattr("pydantic_ai.models.ALLOW_MODEL_REQUESTS", True)
             monkeypatch.setattr(
-                "redlotus.ModelGateway.model_factory.get_client",
+                "redlotus.core.gateway.get_client",
                 lambda key, factory: client,
             )
 
@@ -165,7 +167,7 @@ async def test_cli_first_http_request_contains_document_and_original_image(
                 return Agent(create_model(target))
 
             monkeypatch.setattr(
-                "redlotus.agent_core.system.create_coordinator_agent", create
+                "redlotus.core.system.create_coordinator_agent", create
             )
             async with asyncio.timeout(5):
                 await system.process_cli_line(raw, state, wait_for_turn=True)
@@ -187,11 +189,7 @@ async def test_cli_first_http_request_contains_document_and_original_image(
         assert len(pictures) == 1
         assert pictures[0].startswith("data:image/png;base64,")
         assert base64.b64decode(pictures[0].split(",", 1)[1]) == original
-        event = json.loads(
-            next(system._memory.observations.turns.glob("*.json")).read_text(
-                encoding="utf-8"
-            )
-        )
+        event = system._session_file.pending_turns(0)[0]
         assert len(event["reference_ids"]) == 2 and event["status"] == "success"
         assert "已解析 2 个引用文件" in capsys.readouterr().out
     finally:
@@ -225,7 +223,7 @@ async def test_rejected_references_do_not_call_model_or_block_next_turn(
 
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     try:
         async with asyncio.timeout(5):
             await system.process_cli_line(raw, state, wait_for_turn=True)
@@ -274,7 +272,7 @@ async def test_cancelled_reference_preparation_does_not_block_queued_turn(
         return Agent(FunctionModel(stream_function=model))
 
     monkeypatch.setattr(DocumentReader, "read", read)
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     try:
         async with asyncio.timeout(5):
             await system.process_cli_line("@slow.md请阅读", state, wait_for_turn=False)
@@ -283,6 +281,6 @@ async def test_cancelled_reference_preparation_does_not_block_queued_turn(
             await system.cancel_current_turn()
             await system._session.queue.join()
         assert inputs == ["@next.md请阅读"]
-        assert not system._cli_controller._preparing and not system.has_current_turn
+        assert system._session.queue.current is None and not system.has_current_turn
     finally:
         await system.shutdown()

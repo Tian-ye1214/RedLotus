@@ -3,8 +3,9 @@ import threading
 
 import pytest
 
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.runtime.subagents import SubagentFactory, SubagentSpec
+from redlotus.core.agents import WorkspaceContext
+from redlotus.core.agents import SubagentFactory
+from redlotus.core.agents import SubagentSpec
 
 
 async def test_thread_limit_queue_and_disposal(tmp_path):
@@ -54,7 +55,7 @@ async def test_cancel_releases_active_and_discards_queued(tmp_path):
     assert all(isinstance(r, asyncio.CancelledError) for r in result)
     assert len(count) == 1
     assert released.is_set()
-    assert all(not h.thread.is_alive() for h in handles)
+    assert all(h.thread is None or not h.thread.is_alive() for h in handles)
     await factory.close()
 
 
@@ -96,7 +97,8 @@ async def test_repeated_cancel_keeps_slot_until_cleanup_finishes(tmp_path):
 
 async def test_child_exception_closes_its_http_pool(tmp_path):
     import httpx
-    from redlotus.infra.shared_http import get_client, close_all_clients
+    from redlotus.core.config import get_client
+    from redlotus.core.config import close_all_clients
 
     factory = SubagentFactory()
     spec = SubagentSpec("s", "t", WorkspaceContext.from_path(tmp_path))
@@ -118,7 +120,7 @@ async def test_child_exception_closes_its_http_pool(tmp_path):
 
 
 async def test_worker_memory_calls_progress_when_worker_slots_are_full(tmp_path):
-    from redlotus.agent_core.memory_service import MemoryService
+    from redlotus.memory.service import MemoryService
 
     workspace = WorkspaceContext.from_path(tmp_path)
     memory = MemoryService(workspace=workspace)

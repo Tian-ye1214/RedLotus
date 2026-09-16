@@ -2,12 +2,14 @@ import json
 import os
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from redlotus.config.app_config import settings
-from redlotus.infra import paths
-from redlotus.references.store import ReferenceStore
-from redlotus.runtime.context import WorkspaceContext, workspace_context
-from redlotus.tools.conversation_log import ConversationLog
-from redlotus.workspace.workspace import conversations_root, list_workspace_snapshots
+from redlotus.core.config import settings
+from redlotus.core import config as paths
+from redlotus.tools.references import ReferenceStore
+from redlotus.core.agents import WorkspaceContext
+from redlotus.core.agents import workspace_context
+from redlotus.core.session import SessionFile
+from redlotus.core.session import conversations_root
+from redlotus.core.session import list_workspace_snapshots
 
 
 async def test_session_and_reference_files_are_separate_from_memory(
@@ -29,10 +31,10 @@ async def test_session_and_reference_files_are_separate_from_memory(
     monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(selected))
     monkeypatch.delenv("REDLOTUS_DATA_DIR")
     workspace = WorkspaceContext.from_path(tmp_path / "project")
-    trace = ConversationLog("coordinator", "2026-09-14", "routing", workspace=workspace)
-    await trace.save([ModelRequest(parts=[UserPromptPart("original input")])])
+    trace = SessionFile.create(paths.session_data_dir(workspace), workspace.project_id)
+    trace.save_context([ModelRequest(parts=[UserPromptPart("original input")])], turn_id="one")
     assert paths.user_data_dir() == state
-    assert trace.model_messages_path().is_relative_to(sessions)
+    assert trace.path.is_relative_to(sessions)
     assert ReferenceStore(workspace).root == references
     assert (
         paths.project_data_dir(workspace) == state / "projects" / workspace.project_id
@@ -42,10 +44,16 @@ async def test_session_and_reference_files_are_separate_from_memory(
     with workspace_context(workspace):
         assert conversations_root() == sessions / workspace.project_id
         assert list_workspace_snapshots()
-    assert not list(state.rglob("*_ModelMessages.json"))
+    assert not list(state.rglob("model_messages.json"))
 
 
 def test_storage_defaults_preserve_existing_layout(monkeypatch, tmp_path):
+    config = settings()
+    config["storage"]["sessions_dir"] = ""
+    config["storage"]["references_dir"] = ""
+    selected = tmp_path / "defaults.json"
+    selected.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(selected))
     monkeypatch.setenv("REDLOTUS_DATA_DIR", str(tmp_path))
     workspace = WorkspaceContext.from_path(tmp_path / "project")
     with workspace_context(workspace):
@@ -53,7 +61,7 @@ def test_storage_defaults_preserve_existing_layout(monkeypatch, tmp_path):
     assert ReferenceStore(workspace).root == tmp_path / "references"
 
 
-def test_snapshot_discovery_preserves_old_location(tmp_path):
+def test_snapshot_discovery_only_offers_the_new_single_file_format(tmp_path):
     current, previous = tmp_path / "current", tmp_path / "previous"
     for root in (current, previous):
         root.mkdir()
@@ -61,8 +69,9 @@ def test_snapshot_discovery_preserves_old_location(tmp_path):
             json.dumps({"meta": {"agent": "coordinator"}, "model_messages": []}),
             encoding="utf-8",
         )
-    snapshots = list_workspace_snapshots(root=current, legacy_root=previous)
-    assert {item.path.parent for item in snapshots} == {current, previous}
+    session = SessionFile.create(current, "project")
+    snapshots = list_workspace_snapshots(root=current)
+    assert [item.path for item in snapshots] == [session.path]
 
 
 def test_config_detects_content_change_with_same_timestamp(tmp_path, monkeypatch):

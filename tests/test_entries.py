@@ -7,12 +7,13 @@ from pydantic_ai.models.function import FunctionModel, DeltaToolCall
 from pydantic_ai.messages import ToolReturnPart
 from textual.widgets import Input
 
-from redlotus.API.base import BotBase
-from redlotus.agent_core.input_messages import UserMessage
-from redlotus.cli.output import set_output_sink
-from redlotus.cli.tui import RedLotusTui, AgentInput
-from redlotus.tools.memory import ChatHistory
-from redlotus.runtime.context import active_workspace
+from redlotus.api.base import BotBase
+from redlotus.tools.interaction import UserMessage
+from redlotus.core.presentation import set_output_sink
+from redlotus.core.tui import RedLotusTui
+from redlotus.core.tui import AgentInput
+from redlotus.core.history import ChatHistory
+from redlotus.core.agents import active_workspace
 from test_system import configured_system, noop
 
 
@@ -34,7 +35,7 @@ def configure_cli_hooks(system, monkeypatch, *, preparer=None, enter_workspace=F
         monkeypatch.setattr(cli, "enter_current_workspace", noop)
     monkeypatch.setattr(cli, "_publish_context_usage", noop)
     monkeypatch.setattr(
-        "redlotus.agent_core.cli_controller.app_config.missing_main_api_keys",
+        "redlotus.core.console.app_config.missing_main_api_keys",
         lambda: (),
     )
 
@@ -59,7 +60,7 @@ class LocalBot(BotBase):
 async def test_bot_fifo_stop_and_owner_channel_binding(tmp_path, monkeypatch):
     bot = LocalBot()
     monkeypatch.setattr(
-        "redlotus.API.base.settings",
+        "redlotus.api.base.settings",
         lambda: {
             "bot": {
                 "owner_channels": {"qq": ["123"], "wechat": ["wxid_1"]},
@@ -76,9 +77,9 @@ async def test_bot_fifo_stop_and_owner_channel_binding(tmp_path, monkeypatch):
     bot.platform_tag = "QQ"
     system = configured_system(tmp_path, monkeypatch)
     bot._session("private_123").agent = system
-    monkeypatch.setattr("redlotus.API.base.app_config.reload_config", lambda: None)
+    monkeypatch.setattr("redlotus.api.base.app_config.reload_config", lambda: None)
     monkeypatch.setattr(
-        "redlotus.API.base.app_config.missing_main_api_keys", lambda: ()
+        "redlotus.api.base.app_config.missing_main_api_keys", lambda: ()
     )
     started, hold = asyncio.Event(), asyncio.Event()
     seen, sent = [], []
@@ -97,7 +98,7 @@ async def test_bot_fifo_stop_and_owner_channel_binding(tmp_path, monkeypatch):
     async def reply(text):
         sent.append(text)
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     for text in ("first", "second", "third"):
         await bot.dispatch_user_message("private_123", UserMessage(text=text), reply)
     await asyncio.wait_for(started.wait(), 5)
@@ -109,14 +110,12 @@ async def test_bot_fifo_stop_and_owner_channel_binding(tmp_path, monkeypatch):
         "reply:second",
         "reply:third",
     ]
-    jobs = [
-        json.loads(p.read_text(encoding="utf-8"))
-        for p in system._memory.observations.turns.glob("*.json")
-    ]
+    jobs = system._session_file.pending_turns(0)
     assert (
         next(j for j in jobs if j["user_inputs"] == ["first"])["status"] == "cancelled"
     )
     assert bot._sessions["private_123"].history.messages
+    assert system._session_file.metadata["last_control_result"]["status"] == "cancelled"
     await bot.release_all_resources_async()
 
 
@@ -139,7 +138,7 @@ async def test_tui_accepts_fifo_input_while_preparing(tmp_path, monkeypatch):
 
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     async with tui_session(app, system):
         inp = app.query_one("#input", AgentInput)
         for value in ("第一条", "第二条", "第三条"):
@@ -149,6 +148,32 @@ async def test_tui_accepts_fifo_input_while_preparing(tmp_path, monkeypatch):
         release.set()
         await until(lambda: len(inputs) == 3 and not system.has_current_turn)
         assert inputs == ["第一条", "第二条", "第三条"]
+
+
+async def test_tui_stop_during_title_preparation_keeps_app_and_records_receipt(
+    tmp_path, monkeypatch
+):
+    system = configured_system(tmp_path, monkeypatch)
+    configure_cli_hooks(system, monkeypatch, preparer="system", enter_workspace=True)
+    app, started = RedLotusTui(system), asyncio.Event()
+
+    async def title(text):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(system, "generate_task_title", title)
+    async with tui_session(app, system) as pilot:
+        inp = app.query_one("#input", AgentInput)
+        await app.on_input_submitted(Input.Submitted(inp, "准备中的用户任务"))
+        await asyncio.wait_for(started.wait(), 5)
+        assert system.has_current_turn
+        await pilot.press("ctrl+c")
+        await until(lambda: not system.has_current_turn)
+        assert app.is_running and not system._shutdown_done
+        assert not app.state.history.messages
+        receipt = system._session.take_notices()[0][0]
+        assert '"status": "cancelled"' in receipt.content
+        assert '"accepted": true' in receipt.content
 
 
 async def test_tui_urgent_and_stop_do_not_answer_pending_question(
@@ -172,7 +197,7 @@ async def test_tui_urgent_and_stop_do_not_answer_pending_question(
 
         return Agent(FunctionModel(stream_function=model), tools=[system.ask_user])
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     app = RedLotusTui(system)
     app.state.is_first_input = False
     async with tui_session(app, system):
@@ -210,6 +235,10 @@ async def test_goal_iterations_form_one_episode_from_original_user(
 ):
     system = configured_system(tmp_path, monkeypatch)
     prompts = []
+    refreshes = []
+
+    async def refresh_skills():
+        refreshes.append(system._session.turn_id)
 
     async def create(*args, **kwargs):
         async def model(messages, info):
@@ -219,7 +248,8 @@ async def test_goal_iterations_form_one_episode_from_original_user(
 
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
+    monkeypatch.setattr(system, "_sync_skills_for_user_turn", refresh_skills)
     history = ChatHistory()
     state = system.new_cli_session_state()
     hold = asyncio.Event()
@@ -236,10 +266,8 @@ async def test_goal_iterations_form_one_episode_from_original_user(
         conversation_log_hint="goal",
     )
     assert len(prompts) == 2
-    jobs = [
-        json.loads(p.read_text(encoding="utf-8"))
-        for p in system._memory.observations.turns.glob("*.json")
-    ]
+    assert refreshes == ["goal"]
+    jobs = system._session_file.pending_turns(0)
     assert len(jobs) == 1 and jobs[0]["user_inputs"] == ["完成验证"]
     assert "下一项任务" not in "".join(prompts)
     assert len(system._session.queue.pending) == 1
@@ -250,8 +278,8 @@ async def test_goal_iterations_form_one_episode_from_original_user(
 async def test_workspace_switch_waits_for_children_and_preserves_review_subscription(
     tmp_path, monkeypatch
 ):
-    from redlotus.runtime.subagents import SubagentSpec
-    from redlotus.agent_core.memory_service import MemoryService
+    from redlotus.core.agents import SubagentSpec
+    from redlotus.memory.service import MemoryService
 
     system = configured_system(tmp_path / "a", monkeypatch)
     monkeypatch.setattr(MemoryService, "process_pending", noop)
@@ -305,7 +333,7 @@ async def test_urgent_after_final_response_is_queued_instead_of_lost(
 
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
     finish = system._memory.finish_turn
 
     async def delayed_finish(*args, **kwargs):
@@ -329,6 +357,7 @@ async def test_clear_cancels_input_preparation_before_it_can_start_old_task(
     tmp_path, monkeypatch
 ):
     system = configured_system(tmp_path, monkeypatch)
+    configure_cli_hooks(system, monkeypatch)
     cli, started = system._cli_controller, asyncio.Event()
     state = cli.new_session_state()
 
@@ -338,23 +367,36 @@ async def test_clear_cancels_input_preparation_before_it_can_start_old_task(
         return "late title"
 
     monkeypatch.setattr(system, "generate_task_title", title)
-    monkeypatch.setattr(cli, "_publish_context_usage", noop)
     task = asyncio.create_task(
-        cli._start_user_turn_from_raw_input(
-            "old input",
-            state,
-            wait_for_turn=False,
-            references=asyncio.sleep(0, result=[]),
-            admission=system._session.admit(system.workspace),
-        )
+        cli.process_line("old input", state, wait_for_turn=True)
     )
     await asyncio.wait_for(started.wait(), 5)
     await cli.reset_session(state.history)
     await asyncio.gather(task, return_exceptions=True)
-    assert task.cancelled() and not cli._preparing
+    assert task.cancelled() and system._session.queue.current is None
     assert not system.has_current_turn and not state.history.messages
     assert not (tmp_path / "WorkDatabase" / "late title").exists()
     await system.shutdown()
+
+
+async def test_reset_failure_does_not_leave_input_admission_closed(tmp_path, monkeypatch):
+    import pytest
+
+    system = configured_system(tmp_path, monkeypatch)
+    cli = system._cli_controller
+    close = system._toolkit.close
+
+    async def failed_close():
+        raise OSError("resource release failed")
+
+    monkeypatch.setattr(system._toolkit, "close", failed_close)
+    try:
+        with pytest.raises(OSError, match="resource release failed"):
+            await cli.reset_session(ChatHistory())
+        assert cli._ready.is_set()
+    finally:
+        monkeypatch.setattr(system._toolkit, "close", close)
+        await system.shutdown()
 
 
 async def test_legacy_cli_keeps_reading_while_model_waits(tmp_path, monkeypatch):
@@ -378,7 +420,7 @@ async def test_legacy_cli_keeps_reading_while_model_waits(tmp_path, monkeypatch)
 
         return Agent(FunctionModel(stream_function=model))
 
-    monkeypatch.setattr("redlotus.agent_core.system.create_coordinator_agent", create)
+    monkeypatch.setattr("redlotus.core.system.create_coordinator_agent", create)
 
     class Repl:
         def __init__(self, **kwargs):
@@ -399,6 +441,6 @@ async def test_legacy_cli_keeps_reading_while_model_waits(tmp_path, monkeypatch)
             await handler("/exit")
             await asyncio.wait_for(stop_event.wait(), 5)
 
-    monkeypatch.setattr("redlotus.agent_core.cli_controller.InteractiveRepl", Repl)
+    monkeypatch.setattr("redlotus.core.console.InteractiveRepl", Repl)
     await cli.run_interactive()
     assert inputs == ["first", "second"]

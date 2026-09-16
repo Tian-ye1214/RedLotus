@@ -5,11 +5,14 @@ from PIL import Image
 from prompt_toolkit.document import Document
 from textual.app import App
 
-from redlotus.cli.completer import AgentCompleter, input_completions
-from redlotus.cli.completion import completion_for_input
-from redlotus.cli.file_ref import parse_file_paths
-from redlotus.cli.tui import AgentInput, AgentInputSuggester
-from redlotus.runtime.context import WorkspaceContext, workspace_context
+from redlotus.core.console import AgentCompleter
+from redlotus.core.console import input_completions
+from redlotus.core.console import completion_for_input
+from redlotus.tools.interaction import parse_file_paths
+from redlotus.core.tui import AgentInput
+from redlotus.core.tui import AgentInputSuggester
+from redlotus.core.agents import WorkspaceContext
+from redlotus.core.agents import workspace_context
 
 
 @pytest.fixture

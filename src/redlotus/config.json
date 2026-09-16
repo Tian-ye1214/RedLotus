@@ -122,7 +122,6 @@
     "window_turns": 20,
     "overlap_turns": 3,
     "model_role": "worker",
-    "max_concurrent": 1,
     "input_context_ratio": 0.65,
     "existing_record_limit": 12,
     "query_max_chars": 1200,
@@ -162,7 +161,7 @@
     "query_instruction": "Instruct: Retrieve related project goals, decisions and outcomes.\nQuery: "
   },
   "agent_run_policy": {
-    "max_worker_concurrent": 3,
+    "max_concurrent_threads_per_session": 16,
     "max_tool_output_chars": 20000,
     "max_command_timeout_seconds": 60
   },

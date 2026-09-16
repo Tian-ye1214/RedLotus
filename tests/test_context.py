@@ -13,17 +13,17 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import FunctionModel, DeltaToolCall
 from pydantic_ai.usage import UsageLimits
 
-from redlotus.agent_core.runner import AgentRunner
-from redlotus.ModelGateway import ModelChecker as checker
-from redlotus.runtime.context import WorkspaceContext, workspace_context
-from redlotus.tools.conversation_log import (
-    ConversationLog,
-    read_saved_model_messages_file,
-)
-from redlotus.tools.memory.chat_history import messages_safe_for_new_prompt
-from redlotus.tools.memory.chat_history import ChatHistory
-from redlotus.runtime.runtime_state import AgentRunPolicy
-from redlotus.runtime.tool_telemetry import _model_result, tool_result_succeeded
+from redlotus.core.agents import AgentRunner
+from redlotus.core import history as checker
+from redlotus.core.agents import WorkspaceContext
+from redlotus.core.agents import workspace_context
+from redlotus.core.session import SessionFile
+from redlotus.core.session import read_saved_model_messages_file
+from redlotus.core.history import messages_safe_for_new_prompt
+from redlotus.core.history import ChatHistory
+from redlotus.core.agents import AgentRunPolicy
+from redlotus.tools.registry import _model_result
+from redlotus.tools.registry import tool_result_succeeded
 
 
 async def run_test_agent(model, *, tools=(), **kwargs):
@@ -50,9 +50,6 @@ async def test_large_tool_batch_compacts_before_request_and_retains_original(
         lambda role: dict(auto_compress_ratio=0.7, head_turns=2, tail_turns=2),
     )
     monkeypatch.setattr(
-        checker, "_save_compress_debug_artifacts", lambda **kwargs: None
-    )
-    monkeypatch.setattr(
         checker,
         "_call_compressor_llm",
         lambda **kwargs: "\n\n".join(
@@ -72,10 +69,10 @@ async def test_large_tool_batch_compacts_before_request_and_retains_original(
             yield "done"
 
     with workspace_context(WorkspaceContext.from_path(tmp_path)):
-        log = ConversationLog("coordinator", "today", "compact")
+        log = SessionFile.create(tmp_path / "sessions", WorkspaceContext.from_path(tmp_path).project_id)
 
         async def save(run):
-            await log.save(run.all_messages(), extra={"turn_id": "one"})
+            log.save_context(run.all_messages(), turn_id="one")
 
         result = await run_test_agent(
             model,
@@ -88,11 +85,9 @@ async def test_large_tool_batch_compacts_before_request_and_retains_original(
         assert result.output == "done"
         assert checker.estimate_context_tokens(requests[1]) < 700
         assert messages_safe_for_new_prompt(requests[1]) == requests[1]
-        journal = next(log.model_messages_path().parent.glob("*.jsonl")).read_text(
-            encoding="utf-8"
-        )
+        journal = log.path.read_text(encoding="utf-8")
         assert "原始工具结果" * 600 in journal
-        messages, _ = read_saved_model_messages_file(log.model_messages_path())
+        messages, _ = read_saved_model_messages_file(log.path)
         assert messages_safe_for_new_prompt(messages) == messages
         restored = ChatHistory()
         restored.set_messages(messages)

@@ -6,9 +6,9 @@ from copy import deepcopy
 
 import pytest
 
-from redlotus.infra import subprocess_runner as runner
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.tools.BasicTools import BasicToolkit
+from redlotus.tools import execution as runner
+from redlotus.core.agents import WorkspaceContext
+from redlotus.tools.toolkit import BasicToolkit
 
 
 @pytest.mark.parametrize("encoding", ["utf-8", "gbk", "utf-16"])
@@ -60,7 +60,7 @@ async def test_unknown_output_keeps_bytes_and_reports_decoding_failure(
         and not receipt.stderr
         and receipt.returncode == 0
     )
-    from redlotus.runtime.tool_telemetry import tool_result_succeeded
+    from redlotus.tools.registry import tool_result_succeeded
 
     assert not tool_result_succeeded(receipt.to_text())
 

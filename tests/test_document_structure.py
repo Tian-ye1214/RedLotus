@@ -5,7 +5,7 @@ from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches
 
-from redlotus.references.readers import DocumentReader
+from redlotus.tools.references import DocumentReader
 
 
 async def test_ppt_group_images_keep_distinct_contents(tmp_path):

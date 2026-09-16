@@ -11,7 +11,7 @@ import pytest
 @pytest.fixture
 def gate(monkeypatch):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
-    return importlib.import_module("verify_usage")
+    return importlib.import_module("session_acceptance")
 
 
 @pytest.mark.parametrize(
@@ -28,34 +28,19 @@ def gate(monkeypatch):
 def test_delivery_requires_one_worker_and_successful_program_execution(
     gate, tmp_path, workers, command
 ):
-    directory = tmp_path / "sessions/project"
-    directory.mkdir(parents=True)
+    trace, commands = [], []
     for index in range(workers):
-        row = dict(
-            meta=dict(turn_id="delivery", sub_id=f"worker-{index}"),
-            message=dict(
-                parts=[
-                    dict(
-                        part_kind="tool-return",
-                        tool_name="run_command",
-                        tool_call_id=f"run-{index}",
-                        content=f"Return code: 0\nCommand: {command}\n",
-                    )
-                ]
-                if command
-                else []
-            ),
-        )
-        (directory / f"worker_{index}.jsonl").write_text(
-            json.dumps(row), encoding="utf-8"
-        )
+        trace.append(dict(kind="invocation_start", role="worker", agent_id=f"worker-{index}"))
+        if command:
+            commands.append(dict(turn_id="delivery", agent_id=f"worker-{index}",
+                                 command=command, returncode=0))
     if workers == 1 and command == "python WorkDatabase/summary.py":
-        result = gate.delivery_evidence(tmp_path, "delivery")
+        result = gate.delivery_evidence(trace, commands, "delivery", "summary.py")
         assert result["worker_ids"] == ["worker-0"]
-        assert set(result["command_receipts"]) == {"run-0"}
+        assert set(result["command_receipts"]) == {"0"}
     else:
         with pytest.raises(AssertionError):
-            gate.delivery_evidence(tmp_path, "delivery")
+            gate.delivery_evidence(trace, commands, "delivery", "summary.py")
 
 
 def test_test_storage_isolation_preserves_effective_gateway_environment(
@@ -85,3 +70,13 @@ def test_test_storage_isolation_preserves_effective_gateway_environment(
         != baseline["short_term_memory"]["db_path"]
     )
     assert json.loads(source.read_text(encoding="utf-8")) == baseline
+
+
+@pytest.mark.parametrize("command", [
+    'cd /d "E:\\项目 资料" && python WorkDatabase/summary.py',
+    'cmd /c "cd /d E:\\project && python WorkDatabase/summary.py"',
+])
+def test_delivery_accepts_the_observed_directory_and_shell_wrappers(gate, command):
+    trace = [dict(kind="invocation_start", role="worker", agent_id="worker")]
+    commands = [dict(turn_id="delivery", agent_id="worker", command=command, returncode=0)]
+    assert gate.delivery_evidence(trace, commands, "delivery", "summary.py")["command_receipts"]

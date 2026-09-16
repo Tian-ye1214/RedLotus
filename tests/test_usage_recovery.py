@@ -1,72 +1,72 @@
 """Recovery scheduling fixtures are not real-model memory acceptance."""
 
-from redlotus.agent_core.memory_service import MemoryJob, MemoryService
-from redlotus.infra.persist_utils import read_locked_json
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.tools.memory.models import PerceptionResult
+from redlotus.memory.service import MemoryJob
+from memory_helpers import new_memory
+from redlotus.core.config import read_locked_json
+from redlotus.core.agents import WorkspaceContext
+from redlotus.memory.records import PerceptionResult
 
 
-async def test_recovering_twentieth_turn_seals_once_without_another_input(
-    tmp_path, monkeypatch
-):
-    memory = MemoryService(workspace=WorkspaceContext.from_path(tmp_path))
-    for number in range(20):
-        event = memory.observations.begin(
-            "session", str(number), "scheduling fixture", []
-        )
-        if number < 19:
-            event.status = "success"
-            memory.observations.finish(event)
-    memory.observations.close()
+async def test_reload_at_nineteen_waits_for_the_next_real_turn(tmp_path, monkeypatch):
+    memory = new_memory(workspace=WorkspaceContext.from_path(tmp_path))
+    for number in range(19):
+        event = memory.observations.begin("session", str(number), "scheduling fixture", [])
+        event.status = "success"
+        memory.observations.finish(event)
+    path = memory.session.path
+    await memory.close()
+    memory = new_memory(workspace=WorkspaceContext.from_path(tmp_path))
     calls = []
 
-    async def produce(job):
+    async def produce(service, job):
         calls.append(job.id)
         job.result = PerceptionResult(records=[], reason="No durable information")
-        memory._save_job(job)
+        service._save_job(job)
 
-    monkeypatch.setattr(memory, "_produce", produce)
+    monkeypatch.setattr("redlotus.memory.service.produce_job", produce)
     try:
-        assert len(memory.observations.order()) == 19
         await memory.process_pending(recover=True)
-        assert len(calls) == 1
-        assert memory.observations.cursor() == 20
-        job = MemoryJob.model_validate(
-            read_locked_json(next(memory.jobs_dir.glob("*.json")))
-        )
-        assert len(job.window.new_turn_ids) == 20 and not job.window.overlap_turn_ids
-        assert job.events[-1].status == "unverified"
+        assert memory.session.path == path and not calls
+        assert memory.session.completed_turns == 19
+        event = memory.observations.begin("session", "twentieth", "new user input", [])
+        event.status = "success"
+        memory.observations.finish(event)
+        memory.seal_windows()
+        await memory.process_pending()
+        assert len(calls) == 1 and memory.observations.cursor() == 20
+        job = memory.session.job(calls[0])
+        assert len(job["window"]["new_turn_ids"]) == 20
+        assert job["window"]["overlap_turn_ids"] == []
         await memory.process_pending(recover=True)
         assert len(calls) == 1
     finally:
         await memory.close()
 
 
-async def test_successful_recovery_preserves_original_job_failure(
-    tmp_path, monkeypatch
-):
-    memory = MemoryService(workspace=WorkspaceContext.from_path(tmp_path))
-    event = memory.observations.begin("session", "ended", "scheduling fixture", [])
-    event.status = "success"
-    memory.observations.finish(event)
-    memory.seal_windows(flush=True)
-    path = next(memory.jobs_dir.glob("*.json"))
+async def test_successful_recovery_preserves_original_job_failure(tmp_path, monkeypatch):
+    memory = new_memory(workspace=WorkspaceContext.from_path(tmp_path))
+    for number in range(20):
+        event = memory.observations.begin("session", str(number), "scheduling fixture", [])
+        event.status = "success"
+        memory.observations.finish(event)
+    memory.seal_windows()
+    identity = memory.session.pending_jobs()[0]
     calls = 0
 
-    async def produce(job):
+    async def produce(service, job):
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("first attempt failed")
         job.result = PerceptionResult(records=[], reason="No durable information")
-        memory._save_job(job)
+        service._save_job(job)
 
-    monkeypatch.setattr(memory, "_produce", produce)
+    monkeypatch.setattr("redlotus.memory.service.produce_job", produce)
     try:
         await memory.process_pending()
-        assert read_locked_json(path)["error"] == "first attempt failed"
+        assert memory.session.job(identity)["error"] == "first attempt failed"
         await memory.process_pending(recover=True)
-        saved = read_locked_json(path)
+        saved = memory.session.job(identity)
         assert saved["done"] and not saved["error"]
         assert saved["failures"][0]["error"] == "first attempt failed"
     finally:

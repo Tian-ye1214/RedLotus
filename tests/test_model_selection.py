@@ -4,8 +4,8 @@ import json
 
 from pydantic_ai.models.openai import OpenAIChatModel
 
-from redlotus.config import app_config
-from redlotus.ModelGateway.model_factory import create_model
+from redlotus.core import config as app_config
+from redlotus.core.gateway import create_model
 
 
 async def test_model_name_does_not_choose_transport_protocol(monkeypatch):
@@ -13,7 +13,7 @@ async def test_model_name_does_not_choose_transport_protocol(monkeypatch):
     monkeypatch.setenv("BASE_URL", "https://chat.example/v1")
     model = create_model("claude-through-a-chat-gateway", {"thinking": "disabled"})
     assert isinstance(model, OpenAIChatModel)
-    from redlotus.infra.shared_http import close_all_clients
+    from redlotus.core.config import close_all_clients
 
     await close_all_clients()
 
@@ -47,7 +47,7 @@ def test_named_preset_binds_settings_credentials_and_limits(tmp_path, monkeypatc
     monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(selected))
     monkeypatch.setenv("TEST_NATIVE_KEY", "preset-test-key")
     monkeypatch.setenv("API_KEY", "unrelated-test-key")
-    from redlotus.ModelGateway.model_factory import ModelTarget
+    from redlotus.core.gateway import ModelTarget
 
     target = ModelTarget.for_role("coordinator")
     assert (target.name, target.protocol, target.base_url) == (
@@ -94,7 +94,7 @@ def test_nested_role_override_keeps_other_preset_settings(tmp_path, monkeypatch)
 
 
 def test_empty_gateway_environment_reference_keeps_explicit_key(tmp_path, monkeypatch):
-    from redlotus.ModelGateway.model_factory import ModelTarget
+    from redlotus.core.gateway import ModelTarget
 
     path = tmp_path / "config.json"
     path.write_text(

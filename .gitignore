@@ -26,3 +26,4 @@ src/redlotus/prompts/LongTermMemory/USER.md
 src/redlotus/prompts/LongTermMemory/consolidation_state.json
 src/redlotus/prompts/LongTermMemory/log_sources_state.json
 src/redlotus/API/config.yaml
+src/redlotus/api/config.yaml

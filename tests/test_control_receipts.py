@@ -9,11 +9,12 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from redlotus.agent_core.system import AgentSystem
-from redlotus.references.store import ReferenceStore
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.tools.memory.evidence import EvidenceReader
-from redlotus.tools.memory.models import ObservedTurn
+from redlotus.core.system import AgentSystem
+from redlotus.core.session import SessionFile
+from redlotus.tools.references import ReferenceStore
+from redlotus.core.agents import WorkspaceContext
+from redlotus.memory.records import EvidenceReader
+from redlotus.memory.records import ObservedTurn
 
 
 async def test_control_receipt_keeps_actual_status_without_user_input(tmp_path):
@@ -44,28 +45,18 @@ async def test_control_receipt_is_preserved_as_non_user_evidence(tmp_path):
             )
         ]
     )
-    raw = ModelMessagesTypeAdapter.dump_python([message], mode="json")[0]
-    journal = tmp_path / "main.jsonl"
-    journal.write_text(
-        json.dumps(
-            dict(
-                event_id="notice",
-                meta=dict(agent="coordinator", turn_id="turn"),
-                message=raw,
-            )
-        ),
-        encoding="utf-8",
-    )
+    session = SessionFile.create(tmp_path, workspace.project_id, session_id="session")
+    session.save_context([message], turn_id="turn")
     event = ObservedTurn(
         id="event",
         project_id=workspace.project_id,
         session_id="session",
         turn_id="turn",
         user_inputs=["What happened?"],
-        evidence_paths=[str(journal)],
+        evidence_paths=[str(session.path)],
     )
-    packets, sources, _ = await EvidenceReader(ReferenceStore(workspace)).collect(
-        [event]
-    )
+    reader = EvidenceReader(ReferenceStore(workspace))
+    reader.session = session
+    packets, sources, _ = await reader.collect([event])
     assert packets[0]["operations"][0]["kind"] == "control-return"
     assert sources["event:u0"]["text"] == "What happened?"

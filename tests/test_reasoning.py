@@ -4,7 +4,7 @@ import httpx
 import pytest
 from pydantic_ai import Agent
 
-from redlotus.ModelGateway.model_factory import create_model
+from redlotus.core.gateway import create_model
 
 
 @pytest.mark.parametrize(
@@ -49,7 +49,7 @@ async def test_configured_effort_reaches_the_provider(
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         monkeypatch.setattr("pydantic_ai.models.ALLOW_MODEL_REQUESTS", True)
         monkeypatch.setattr(
-            "redlotus.ModelGateway.model_factory.get_client",
+            "redlotus.core.gateway.get_client",
             lambda key, factory: client,
         )
         monkeypatch.setenv("API_KEY", "test-only")

@@ -4,11 +4,14 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
-from redlotus.config import app_config
-from redlotus.infra import paths
-from redlotus.runtime.context import WorkspaceContext
-from redlotus.tools.memory.observations import ObservationStore
+import pytest
+
+from redlotus.core import config as app_config
+from redlotus.core import config as paths
+from redlotus.core.agents import WorkspaceContext
+from redlotus.memory.records import ObservationStore
 
 
 def test_installed_configuration_ignores_the_working_directory(tmp_path, monkeypatch):
@@ -24,7 +27,7 @@ def test_installed_configuration_ignores_the_working_directory(tmp_path, monkeyp
     monkeypatch.delenv("API_KEY", raising=False)
     monkeypatch.setattr(paths, "user_config_dir", lambda: global_root)
     monkeypatch.chdir(tmp_path)
-    from redlotus.workspace.workspace import set_workspace
+    from redlotus.core.session import set_workspace
 
     set_workspace(tmp_path)
     assert paths.config_file() == global_file
@@ -40,37 +43,47 @@ def test_configuration_source_can_be_selected_after_import(tmp_path, monkeypatch
     assert app_config.load_config()["example"] == "selected"
 
 
-def test_legacy_project_state_is_copied_once_without_overwriting_new_state(tmp_path):
-    project = tmp_path / "project"
-    legacy = project / ".redlotus"
-    (legacy / "memory").mkdir(parents=True)
-    (legacy / "memory" / "perception_state.json").write_text('{"consumed":25}')
-    (legacy / "coordinator.jsonl").write_text("original trace\n")
-    workspace = WorkspaceContext.from_path(project)
-    store = ObservationStore(workspace)
-    destination = paths.user_data_dir() / "projects" / workspace.project_id
-    assert store.root == destination / "memory"
-    assert json.loads(store.cursor_path.read_text()) == {"consumed": 25}
-    assert (destination / "coordinator.jsonl").read_text() == "original trace\n"
-    store.cursor_path.write_text('{"consumed":45}')
-    assert ObservationStore(workspace).cursor() == 45
-    assert (
-        json.loads((legacy / "memory/perception_state.json").read_text())["consumed"]
-        == 25
-    )
+def test_new_session_does_not_import_legacy_project_progress(tmp_path):
+    from memory_helpers import bound_observations
+    legacy = tmp_path / ".redlotus/memory"
+    legacy.mkdir(parents=True)
+    (legacy / "perception_state.json").write_text('{"consumed":25}')
+    store = bound_observations(WorkspaceContext.from_path(tmp_path))
+    assert store.cursor() == 0 and store.window() is None
+    assert store.session.completed_turns == 0
+    assert not (paths.project_data_dir(store.workspace) / "legacy_import.json").exists()
 
 
-def test_importing_entrypoint_does_not_initialize_user_storage(tmp_path):
+@pytest.mark.parametrize(
+    "module",
+    [
+        "core.session", "core.agents", "core.config", "core.gateway",
+        "core.history", "core.system", "core.console", "core.cli_commands",
+        "core.presentation", "core.tui", "tools.execution",
+        "tools.registry", "tools.references", "tools.interaction", "tools.toolkit",
+        "memory.service", "memory.perception", "memory.records", "memory.store",
+        "memory.retrieval", "prompts.prompt", "prompts.message_text", "api.base",
+    ],
+)
+def test_import_order_does_not_initialize_user_storage(tmp_path, module):
     env = os.environ | {
         "REDLOTUS_CONFIG_DIR": str(tmp_path / "configuration"),
         "REDLOTUS_DATA_DIR": str(tmp_path / "memory"),
     }
     env.pop("REDLOTUS_CONFIG_FILE", None)
     result = subprocess.run(
-        [sys.executable, "-c", "import redlotus.agent_core.entrypoint"],
+        [
+            sys.executable, "-c",
+            "import sys; from pathlib import Path; "
+            "sys.path[:] = [sys.argv[1], *[p for p in sys.path "
+            "if not (Path(p) / 'redlotus').is_dir()]]; "
+            "__import__('redlotus.' + sys.argv[2])",
+            str(Path(__file__).resolve().parents[1] / "src"), module,
+        ],
         env=env,
         capture_output=True,
         text=True,
+        timeout=30,
     )
     assert result.returncode == 0, result.stderr
     assert not (tmp_path / "configuration").exists()
@@ -79,7 +92,7 @@ def test_importing_entrypoint_does_not_initialize_user_storage(tmp_path):
 
 def test_settings_returns_independent_nested_snapshots(tmp_path, monkeypatch):
     import json
-    from redlotus.config.app_config import settings
+    from redlotus.core.config import settings
 
     path = tmp_path / "config.json"
     path.write_text(
@@ -151,25 +164,17 @@ def test_partial_configuration_adds_roles_without_overwriting_preset_or_shared_c
     assert set(app_config.get_context_profile_roles()) == set(config["models"])
 
 
-def test_recovery_reloads_the_event_after_acquiring_ownership(tmp_path, monkeypatch):
-    from contextlib import contextmanager
-    from redlotus.tools.memory import observations
-
-    store = ObservationStore(WorkspaceContext.from_path(tmp_path))
+def test_recovery_reads_latest_completed_status_without_reclassifying_it(tmp_path):
+    from memory_helpers import bound_observations
+    workspace = WorkspaceContext.from_path(tmp_path)
+    store = bound_observations(workspace)
     event = store.begin("session", "turn", "complete a task", [])
-    original_lock = observations.FileLock
-
-    @contextmanager
-    def finish_before_lock(*args, **kwargs):
-        event.status = "success"
-        store.finish(event)
-        with original_lock(*args, **kwargs):
-            yield
-
-    monkeypatch.setattr(observations, "FileLock", finish_before_lock)
-    store.recover()
-    assert store.read([event.id])[0].status == "success"
-    store.close()
+    second = bound_observations(workspace)
+    event.status = "success"
+    store.finish(event)
+    assert second.read([event.id])[0].status == "success"
+    assert second.session.completed_turns == 1
+    assert second.window() is None
 
 
 def test_config_reader_holds_writer_lock_until_parse_finishes(tmp_path, monkeypatch):

@@ -19,7 +19,7 @@ class _Usage:
 
 @pytest.fixture
 def title_module():
-    from redlotus.agent_core import task_title
+    from redlotus.core import gateway as task_title
 
     return task_title
 
@@ -106,9 +106,9 @@ async def test_title_wire_uses_real_gateway_model_without_tools(monkeypatch):
     from pydantic_ai import models
     from pydantic_ai.usage import UsageLimits
 
-    from redlotus.agent_core import task_title
-    from redlotus.ModelGateway import model_factory
-    from redlotus.ModelGateway.model_factory import ModelTarget
+    from redlotus.core import gateway as task_title
+    from redlotus.core import gateway as model_factory
+    from redlotus.core.gateway import ModelTarget
 
     requests = []
 
