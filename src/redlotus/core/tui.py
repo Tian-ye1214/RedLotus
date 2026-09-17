@@ -13,6 +13,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.suggester import Suggester
 from textual.widgets import (
+    Button,
     Footer,
     Input,
     Label,
@@ -24,7 +25,12 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from redlotus.core.console import SnapshotAction, SnapshotSelection, input_completions
+from redlotus.core.console import (
+    SnapshotAction,
+    SnapshotSelection,
+    input_completions,
+    visible_conversation_entries,
+)
 from redlotus.core.presentation import (
     ContextUsageItem,
     OutputSink,
@@ -106,18 +112,34 @@ class SnapshotPickScreen(ModalScreen[SnapshotSelection]):
     }
     """
 
-    def __init__(self, snapshots: list[WorkspaceSnapshot]) -> None:
+    def __init__(
+        self,
+        snapshots: list[WorkspaceSnapshot],
+        *,
+        project_name: str = "",
+        current_session_id: str | None = None,
+    ) -> None:
         super().__init__()
         self._snapshots = snapshots
+        self._project_name = project_name
+        self._current_session_id = current_session_id
 
     def compose(self) -> ComposeResult:
         with Vertical(id="snapshot-dialog"):
-            yield Static("新建会话或恢复原会话", id="snapshot-title")
+            context = "新建会话或恢复原会话"
+            if self._project_name:
+                session = self._current_session_id or "新会话"
+                context = f"项目：{self._project_name} · 当前会话：{session}\n{context}"
+            yield Static(context, id="snapshot-title")
             yield Static("↑↓ 选择 · Enter 确认 · Esc 取消", classes="snapshot-hint")
             yield OptionList(
                 Option("新建会话", id="new"),
                 *[
-                    Option(snapshot.label, id=str(index))
+                    Option(
+                        snapshot.label,
+                        id=str(index),
+                        disabled=not snapshot.is_loadable,
+                    )
                     for index, snapshot in enumerate(self._snapshots)
                 ],
                 Option("取消", id="cancel"),
@@ -186,7 +208,10 @@ class RedLotusTui(App[None]):
     #context-usage { display: none; height: 1; padding: 0 1; color: $text-muted; }
     #stream-preview { display: none; height: 12; max-height: 12; padding: 0 1; }
     #status { height: 1; padding: 0 1; background: $surface; color: $text-muted; }
-    #input { height: 3; border: round $primary; }
+    #session-context { height: 1; padding: 0 1; color: $text-muted; }
+    #input-row { height: 3; }
+    #input { width: 1fr; height: 3; border: round $primary; }
+    #session-load { width: 16; height: 3; }
     #input.ask { border: thick $warning; }
     """
 
@@ -248,11 +273,14 @@ class RedLotusTui(App[None]):
             yield Static("", id="context-usage")
             yield Static("", id="stream-preview")
             yield Static(READY_LABEL, id="status")
-            yield AgentInput(
-                placeholder="📝 请输入您的任务:",
-                id="input",
-                suggester=AgentInputSuggester(case_sensitive=True, use_cache=False),
-            )
+            yield Static(self._session_context_text(), id="session-context")
+            with Horizontal(id="input-row"):
+                yield AgentInput(
+                    placeholder="📝 请输入您的任务:",
+                    id="input",
+                    suggester=AgentInputSuggester(case_sensitive=True, use_cache=False),
+                )
+                yield Button("会话 / 加载", id="session-load")
             yield Footer()
 
     async def on_mount(self) -> None:
@@ -268,6 +296,7 @@ class RedLotusTui(App[None]):
         controller = self.system._cli_controller
         controller._active_session_state = self.state
         controller.set_snapshot_picker(self.pick_snapshot)
+        controller.set_snapshot_loaded_callback(self._show_loaded_conversation)
         controller.config_prompt = self.ask_config
         if self.stop_event is not None:
             asyncio.create_task(self._watch_stop_event())
@@ -284,7 +313,13 @@ class RedLotusTui(App[None]):
             await interactive_set_api(ask=self.ask_config)
 
     async def _enter_workspace_after_mount(self) -> None:
-        loaded = await self.system._cli_controller.enter_current_workspace()
+        controller = self.system._cli_controller
+        self.query_one("#input", AgentInput).disabled = True
+        self.query_one("#session-load", Button).disabled = True
+        try:
+            loaded = await controller.enter_current_workspace()
+        finally:
+            self.refresh_status()
         if loaded:
             self.state.is_first_input = False
 
@@ -304,9 +339,51 @@ class RedLotusTui(App[None]):
                     else SnapshotSelection(SnapshotAction.CANCEL)
                 )
 
-        screen = SnapshotPickScreen(snapshots)
-        await self.push_screen(screen, callback=_on_result, wait_for_dismiss=False)
-        return await future
+        screen = SnapshotPickScreen(
+            snapshots,
+            project_name=str(self.system.workspace.root),
+            current_session_id=self.system.session_key,
+        )
+        try:
+            await self.push_screen(screen, callback=_on_result, wait_for_dismiss=False)
+            return await future
+        except asyncio.CancelledError:
+            if self.screen is screen:
+                screen.dismiss(SnapshotSelection(SnapshotAction.CANCEL))
+            raise
+
+    def _session_context_text(self) -> Text:
+        workspace = self.system.workspace
+        project = str(workspace.root)
+        session = self.system.session_key or "新会话（首次输入后创建）"
+        return Text(f"项目：{project} · 当前会话：{session}", style="dim")
+
+    def _show_loaded_conversation(
+        self,
+        snapshot: WorkspaceSnapshot,
+        messages,
+    ) -> None:
+        entries = visible_conversation_entries(messages or [])
+
+        def render() -> None:
+            log = self.query_one("#output", RichLog)
+            log.write(
+                Text(
+                    f"已恢复会话：{snapshot.title} · {snapshot.completed_turns} 回合",
+                    style="bold green",
+                ),
+                scroll_end=True,
+            )
+            if not entries:
+                log.write(Text("该会话没有可显示的用户或助手文本。", style="dim"), scroll_end=True)
+            for entry in entries:
+                style = {} if entry.role == "用户" else {
+                    "text_style": "white", "border_style": "cyan",
+                }
+                self._write_user_input(entry.text, title=entry.role, **style)
+            self.query_one("#session-context", Static).update(self._session_context_text())
+
+        self.call_ui(render)
 
     def _make_ask_user_bridge(self):
         async def ask_user_bridge(question: str) -> str:
@@ -567,6 +644,10 @@ class RedLotusTui(App[None]):
         controller = self.system._cli_controller
         input_box = self.query_one("#input", AgentInput)
         input_box.disabled = controller.is_transitioning
+        self.query_one("#session-load", Button).disabled = (
+            controller.is_transitioning or self._active_line_handlers > 0 or self.system.has_current_turn
+        )
+        self.query_one("#session-context", Static).update(self._session_context_text())
         if not input_box.disabled and controller.last_rejected_input and self._ask_future is None:
             if not input_box.value:
                 input_box.value = controller.last_rejected_input
@@ -701,6 +782,16 @@ class RedLotusTui(App[None]):
         inp = self.query_one("#input", AgentInput)
         await self.on_input_submitted(Input.Submitted(inp, inp.value), urgent=True)
 
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "session-load" or self.system._cli_controller.is_transitioning or self._active_line_handlers:
+            return
+        if self._panel_mode:
+            self._exit_panel()
+        self._active_line_handlers += 1
+        self.refresh_status()
+        event.button.disabled = True
+        asyncio.create_task(self._handle_line("/load"))
+
     async def on_input_submitted(self, event: Input.Submitted, *, urgent=False) -> None:
         if self.system._cli_controller.is_transitioning:
             return
@@ -778,6 +869,7 @@ async def run_textual_tui(
     finally:
         app._stop_panel_timer()
         app._cancel_pending_ask()
+        system._cli_controller.set_snapshot_loaded_callback(None)
         set_output_sink(None)
         system.set_ask_user_handler(None)
         try:

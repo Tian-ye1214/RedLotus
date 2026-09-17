@@ -1,0 +1,1512 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-09-17T08:42:20.136628Z",
+  "operation": "metadata_only_inventory",
+  "deletion_performed": false,
+  "scanned_roots": [
+    "D:\\RedLotusBenchmark",
+    "E:\\代码\\Agent\\WorkDatabase\\runtime",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime"
+  ],
+  "excluded": [
+    "C global cleanup candidates: previously inventoried, not acted on in this run.",
+    "Any path outside the three parent-specified roots.",
+    "File bodies, credentials, prompts, and personal conversation text."
+  ],
+  "status_summary": {
+    "CANDIDATE_CONFIRMED": {
+      "entries": 70,
+      "bytes": 4631214005
+    },
+    "PROTECTED_ACTIVE": {
+      "entries": 3,
+      "bytes": 0
+    },
+    "UNKNOWN_PRESERVE": {
+      "entries": 22,
+      "bytes": 70801417
+    },
+    "PROTECTED_AUDIT_EVIDENCE": {
+      "entries": 1,
+      "bytes": 0
+    }
+  },
+  "entries": [
+    {
+      "path": "D:\\RedLotusBenchmark\\binary8-chunk4096-fair-v3",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 7,
+      "bytes": 529591060,
+      "last_activity_utc": "2026-09-17T06:49:26.609475Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\binary8-chunk4096-fair-v3\\comparison.json",
+          "sha256": "8e3bc63dd78879f2c38f311f9adcecf2e6d80f62b2b324661ee97c30ff3e935e"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\binary8-fair-v2",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 4,
+      "bytes": 528706159,
+      "last_activity_utc": "2026-09-17T06:30:42.017941Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\binary8-fair-v2\\comparison.json",
+          "sha256": "e198f1f4e1d64075d16ccb3d397682602660e7914088a064b54b1d3eb2138ddd"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\chunks-128",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 476629643,
+      "last_activity_utc": "2026-09-17T06:31:47.815863Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\chunks-4096",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 476306090,
+      "last_activity_utc": "2026-09-17T06:31:52.426063Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-fair-wal-v1",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 11820973,
+      "last_activity_utc": "2026-09-17T08:02:16.252898Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-fair-wal-v1\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "ea65197c559f0430b165456d8fb74357976c3a96625879c3a972d20591017182"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-fair-wal-v1\\cross-backend-report.json",
+          "sha256": "9c6f72b529879cd2cb9a615b189fec82a8ad98dd93708abb00312d9ec316d7c5"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-projection-smoke",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 772519,
+      "last_activity_utc": "2026-09-17T07:50:41.537415Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-projection-smoke\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "c2e092159d28bf8f343dcc9cb776fd2b6e152015fa9007687f74880789fb92b3"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-projection-smoke\\cross-backend-report.json",
+          "sha256": "ce549bad881b66114b5517fb3fe7ce4dc4d8e1a197543fdb4a8080c2cf51cf6e"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-projection-smoke-2",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 772521,
+      "last_activity_utc": "2026-09-17T07:51:23.926501Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-projection-smoke-2\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "9e8d0981c112d8befd2ccec10d5c8e0aaf1a15eb1aa18e1d785b5ac41a29dcc2"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-projection-smoke-2\\cross-backend-report.json",
+          "sha256": "2440890b6e5645598d34b8a9bcee2eb7c4e497c5c98c2ce82f37674e960f483b"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 4,
+      "bytes": 5215185,
+      "last_activity_utc": "2026-09-17T07:16:55.041246Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "a3e2e4670cf501d156b4b958972e51ca16f2b6679b3e3023c3f05a1bce952959"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke\\cross-backend-report.json",
+          "sha256": "e0360b16b7ee7aa9b8a34f021cf210d5ccdb9f12390b677c8f3f22bd19490702"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-100k",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 818172,
+      "last_activity_utc": "2026-09-17T07:22:34.834706Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-100k\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "79268baca83dd7b11f9f1aac9a81b7a69af13da17e3efb34e111c186a4ddaa9e"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-100k\\cross-backend-report.json",
+          "sha256": "54383f227317bb86119e63d4202621c25a2bc2e07eea3981e934f0aab5b7fb03"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-2",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 391430,
+      "last_activity_utc": "2026-09-17T07:17:45.098118Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-2\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "0b1a6cc531a38311b816703c6b927e71577abb9b36c151cf189ef54022b624f5"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-2\\cross-backend-report.json",
+          "sha256": "15eef734ec0e0994d91a24c309520a61fe7426ce039672137142bec1c043e653"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-3",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 391435,
+      "last_activity_utc": "2026-09-17T07:18:41.866350Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-3\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "cd8b7ae41f8148869c103a264f6ddc5855fe71d8254cbb9b62d3b9f421c20ed3"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-3\\cross-backend-report.json",
+          "sha256": "1b0c0eaf1ef8ac7c451ba3b41590f3934b42e5ff6a04f123e99e6656a0b404c4"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-4",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 769898,
+      "last_activity_utc": "2026-09-17T07:19:41.749180Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-4\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "1af46d89b09ce111436f1f025d405cb642291975ce432d53858f2b41469c1db9"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-4\\cross-backend-report.json",
+          "sha256": "e786029f6286d3da714dadbc775ef49d5924d1235d865a50c6c5228871425a6e"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-5",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 772349,
+      "last_activity_utc": "2026-09-17T07:21:11.016346Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-5\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "c440edc5fa2686ad902f80d6c233d487cd647aac0f1db4376b3fc7441cca9367"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-5\\cross-backend-report.json",
+          "sha256": "668e139e7857d1af05edd78d78c03b2a51f27be5cc667527a52e9abec786579f"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-v1",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 11778184,
+      "last_activity_utc": "2026-09-17T07:33:59.834138Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-v1\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "5bdf07a20ddba50f849e6b6415a8b06734c361ea1ce242d7ec657fe046a92c37"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-v1\\cross-backend-report.json",
+          "sha256": "4c5743dd5a6abb6c86d3797c0f8018e02e709b6d801e1cb8ea6fe0c1cf72e351"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-wal-100k",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 4049394,
+      "last_activity_utc": "2026-09-17T07:41:48.449657Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-wal-100k\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "77bd2a7f8060007ce9130a6e308ddd54529cf4733d4d8238533da1229e9253a5"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-wal-100k\\cross-backend-report.json",
+          "sha256": "35a11f37373811d93a771c787e6d00bbdc86b2b4d6dfe46486fe99fff357dfd7"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-wal-small-v1",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 7729584,
+      "last_activity_utc": "2026-09-17T07:48:50.192238Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-wal-small-v1\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "9f4c77def8c14280858563ed5e4921ed4d4b33561735397200f924a42a30167d"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-cross-wal-small-v1\\cross-backend-report.json",
+          "sha256": "fa3c9cb50cb6465dd23b2c8c9d67aeeb9546a4289ccf55687d4e32db10ef4903"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-phase-100k-wal-v1",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 14945,
+      "last_activity_utc": "2026-09-17T08:07:21.765914Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-phase-100k-wal-v1\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "b6f3cbd5fca671cc3d606c42f20a08abe13a503abe81c30fd5657ea4697cd306"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-phase-100k-wal-v1\\phase-profile.json",
+          "sha256": "21549d9d8c9b51f05433e66b43e26f3e7bd2c7601fce6473ea36cc38b1f6dbd9"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-phase-100k-wal-v2",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 15330,
+      "last_activity_utc": "2026-09-17T08:11:01.918476Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-phase-100k-wal-v2\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "b10f2f0abd05c6db9936cc8e34d130a8e7d80d23637c1fafadaa64022a1d9935"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-phase-100k-wal-v2\\phase-profile.json",
+          "sha256": "fc98314ef8c655426db35ea2f0d24af3ddf1ee8e65e7c7feb0c83ea26afd1f35"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-v1",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 2644799,
+      "last_activity_utc": "2026-09-17T07:10:20.693926Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-v1\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "085c2709e2faccc474df6aa383f507caa70506e1530717725a5de8b9431d5846"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-v1\\concurrency-report.json",
+          "sha256": "d0c80dd9e538305857be7e600477bf5f61e9919df7bf0314fb6c41edf01d2089"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-wal-e-v1",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 2,
+      "bytes": 1057359,
+      "last_activity_utc": "2026-09-17T08:12:42.502675Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-wal-e-v1\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "4c8ef8546f853c689f8e394871c9f1a06a742f2419891c8659a7140164f19f65"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\concurrency-wal-e-v1\\concurrency-report.json",
+          "sha256": "d9eeb7a584bf34830409c581f881e4f57f77f974c552bca904d2aa0700fd3b34"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\exact-v1",
+      "scope": "D_benchmark_root",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker; no active-use exception was supplied.",
+      "file_count": 38,
+      "bytes": 2441052087,
+      "last_activity_utc": "2026-09-17T06:26:14.203502Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "D:\\RedLotusBenchmark\\exact-v1\\comparison.json",
+          "sha256": "dcd7beec913264b87cfb48d7ad6c8a41842920e19438a54f8739dd2dd50da077"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\runtime\\cache",
+      "scope": "D_benchmark_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker and stored under benchmark runtime.",
+      "file_count": 40,
+      "bytes": 1515632,
+      "last_activity_utc": "2026-09-17T06:10:47.451328Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\runtime\\dependencies",
+      "scope": "D_benchmark_runtime",
+      "status": "PROTECTED_ACTIVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Parent-directed protection: runtime/dependencies remains in use by tests; no recursive measurement while active.",
+      "file_count": null,
+      "bytes": null,
+      "last_activity_utc": "2026-09-17T06:10:47.477089Z",
+      "evidence": []
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\runtime\\sqlite-cross-final-wal-tmp",
+      "scope": "D_benchmark_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker and stored under benchmark runtime.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T08:02:13.127884Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\runtime\\sqlite-cross-tmp",
+      "scope": "D_benchmark_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker and stored under benchmark runtime.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T07:33:54.201413Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\runtime\\sqlite-cross-wal-tmp",
+      "scope": "D_benchmark_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker and stored under benchmark runtime.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T07:51:22.768746Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\runtime\\sqlite-e-wal-tmp",
+      "scope": "D_benchmark_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker and stored under benchmark runtime.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T08:12:30.784590Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\runtime\\sqlite-phase-100k-wal-tmp",
+      "scope": "D_benchmark_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker and stored under benchmark runtime.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T08:07:15.372316Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\runtime\\sqlite-phase-100k-wal-v2-tmp",
+      "scope": "D_benchmark_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker and stored under benchmark runtime.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T08:10:56.355148Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ]
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\runtime\\tmp",
+      "scope": "D_benchmark_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Owned by the benchmark root marker and stored under benchmark runtime.",
+      "file_count": 12,
+      "bytes": 15098895,
+      "last_activity_utc": "2026-09-17T06:16:49.436278Z",
+      "evidence": [
+        {
+          "kind": "benchmark_root_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-diagnose-20260917",
+      "scope": "E_main_acceptance_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "No marker found; preserve until its origin is independently confirmed.",
+      "file_count": 3,
+      "bytes": 11448,
+      "last_activity_utc": "2026-09-17T07:28:40Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-lifecycle-20260917-01",
+      "scope": "E_main_acceptance_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round acceptance marker present.",
+      "file_count": 21,
+      "bytes": 1543518,
+      "last_activity_utc": "2026-09-17T07:49:56Z",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-lifecycle-20260917-01\\acceptance-evidence.json",
+          "sha256": "1fbffe866f58d585eaaaecac6bca8b234fbc8a3fc9e7885361413c4ef92b4215"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-long-20260917-01",
+      "scope": "E_main_acceptance_runtime",
+      "status": "PROTECTED_ACTIVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Parent-directed protection: long-01 is still running; no recursive measurement while active.",
+      "file_count": null,
+      "bytes": null,
+      "last_activity_utc": "2026-09-17T08:04:11.970000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-01",
+      "scope": "E_main_acceptance_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round acceptance marker present.",
+      "file_count": 2,
+      "bytes": 8999,
+      "last_activity_utc": "2026-09-17T07:24:42Z",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-01\\acceptance-evidence.json",
+          "sha256": "2e67c00e347cb21fc7476ce057de65a9cdc74a708eba931a289a4034e43f3a78"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-02",
+      "scope": "E_main_acceptance_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round acceptance marker present.",
+      "file_count": 2,
+      "bytes": 8999,
+      "last_activity_utc": "2026-09-17T07:26:16Z",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-02\\acceptance-evidence.json",
+          "sha256": "b447304c93d8e62f21c1cf3383f7c694aa79475e6d4f5578850ac458d2bd1a0a"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-03",
+      "scope": "E_main_acceptance_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round acceptance marker present.",
+      "file_count": 5,
+      "bytes": 19661,
+      "last_activity_utc": "2026-09-17T07:31:28Z",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-03\\acceptance-evidence.json",
+          "sha256": "f41f5f2eee6e95c9273ace3cffddce79aed5388891360a8948e50c2c076d7d6c"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-04",
+      "scope": "E_main_acceptance_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round acceptance marker present.",
+      "file_count": 882,
+      "bytes": 12713626,
+      "last_activity_utc": "2026-09-17T07:34:10Z",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-04\\acceptance-evidence.json",
+          "sha256": "06e7080ab0ea2496cfe7236182587e5822f27e1851c11d546516fa2d4431bdbd"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-05",
+      "scope": "E_main_acceptance_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round acceptance marker present.",
+      "file_count": 884,
+      "bytes": 13511030,
+      "last_activity_utc": "2026-09-17T07:47:26Z",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-05\\acceptance-evidence.json",
+          "sha256": "9d9ae1b499b43266d0c82ecb95693fec9e7ff5224e6783b639ecae9b299dc6c2"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-06",
+      "scope": "E_main_acceptance_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round acceptance marker present.",
+      "file_count": 22,
+      "bytes": 1509028,
+      "last_activity_utc": "2026-09-17T07:46:52Z",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\runtime\\project-storage-acceptance-short-20260917-06\\acceptance-evidence.json",
+          "sha256": "5e188a27be08831c989bafb8c5c3c02ae6ea4d95909b0c09324b94c6f94a297f"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 2567,
+      "bytes": 35183707,
+      "last_activity_utc": "2026-09-17T08:35:46Z",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance\\pytest.log",
+          "sha256": "fb04d933f0ab59e90682b5988ed251b9b20855dc7b9b59ec4e4ef39345881b11"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance-v2",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Outside the explicitly confirmed cleanup patterns; preserve without recursive measurement.",
+      "file_count": null,
+      "bytes": null,
+      "last_activity_utc": "2026-09-17T08:35:08.900000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\integration-01",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 171,
+      "bytes": 784538,
+      "last_activity_utc": "2026-09-17T07:14:04Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\isolated-config",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 1,
+      "bytes": 8060,
+      "last_activity_utc": "2026-09-17T07:08:59.640000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\load-green",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 267,
+      "bytes": 446831,
+      "last_activity_utc": "2026-09-17T08:24:50Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\load-red",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 5,
+      "bytes": 13900,
+      "last_activity_utc": "2026-09-17T08:22:56Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\local-acceptance",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 3437,
+      "bytes": 32561596,
+      "last_activity_utc": "2026-09-17T07:27:20Z",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\local-acceptance\\pytest.log",
+          "sha256": "d7c53304ddabeddf92058d7be5e981b9dae06fd1dab2d1c7d2596e82f3115278"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\local-retest-01",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 3940,
+      "bytes": 54928342,
+      "last_activity_utc": "2026-09-17T07:34:54Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\log-red",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 2,
+      "bytes": 12354,
+      "last_activity_utc": "2026-09-17T07:37:40Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\migration-copy",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 3,
+      "bytes": 688647,
+      "last_activity_utc": "2026-09-17T07:18:36Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\migration-inventory",
+      "scope": "worktree_runtime",
+      "status": "PROTECTED_AUDIT_EVIDENCE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Contains the migration and cleanup audits required for the final report.",
+      "file_count": null,
+      "bytes": null,
+      "last_activity_utc": "2026-09-17T07:02:42.980000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\packaging",
+      "scope": "worktree_runtime",
+      "status": "PROTECTED_ACTIVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Parent-directed protection: packaging is still running; no recursive measurement while active.",
+      "file_count": null,
+      "bytes": null,
+      "last_activity_utc": "2026-09-17T07:04:21.280000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\paths-red-02",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 18,
+      "bytes": 98967,
+      "last_activity_utc": "2026-09-17T07:32:00Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\picker-red",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 2,
+      "bytes": 12360,
+      "last_activity_utc": "2026-09-17T07:35:44Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-0f801ededde449d99349c676ffa5cb40",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 3,
+      "bytes": 127106,
+      "last_activity_utc": "2026-09-17T08:01:14Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-1237fd86b05d40f1adc24a895d5e1467",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 48,
+      "bytes": 993052,
+      "last_activity_utc": "2026-09-17T07:58:06Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-13db95748c18486a9bbc61d5376102d6",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 10,
+      "bytes": 62090,
+      "last_activity_utc": "2026-09-17T07:58:06Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-171b333e0acd4291a58b2b8488d826f5",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 638,
+      "bytes": 7717869,
+      "last_activity_utc": "2026-09-17T07:43:46Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-1fc5b6f100bc47d2ac9c00d96791402e",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T07:41:42.070000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-26b2e6a03c20464e80a5a977f3fc41a6",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T07:53:47.910000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-a7c8b22c4c784e8cae93bb992ff2422b",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 110,
+      "bytes": 1546803,
+      "last_activity_utc": "2026-09-17T08:16:08Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-cb82b52d5d12469cad53291ef71cf13a",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 55,
+      "bytes": 1230880,
+      "last_activity_utc": "2026-09-17T08:02:20Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-connect-check",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T07:07:00.150000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-ed7f540f433543cdbfedea00a2a9ca69",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 14,
+      "bytes": 76471,
+      "last_activity_utc": "2026-09-17T06:54:52Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-green-20260917",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 2,
+      "bytes": 12400,
+      "last_activity_utc": "2026-09-17T08:29:50Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-red-20260917",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T08:27:52.660000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-red2-20260917",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 2,
+      "bytes": 12398,
+      "last_activity_utc": "2026-09-17T08:28:22Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-logs-580127aeb56245b68fb561aabc7568c6",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 46,
+      "bytes": 280687,
+      "last_activity_utc": "2026-09-17T06:53:46Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-paths-6a7aaa2a40954c9a8c6131ada33bf7dd",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 14,
+      "bytes": 76615,
+      "last_activity_utc": "2026-09-17T06:54:22Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-rag-green-1",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 5,
+      "bytes": 401408,
+      "last_activity_utc": "2026-09-17T07:09:44Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-rag-green-2",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 5,
+      "bytes": 401408,
+      "last_activity_utc": "2026-09-17T07:10:04Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-final",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 18,
+      "bytes": 111834,
+      "last_activity_utc": "2026-09-17T07:19:52Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-1",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 7,
+      "bytes": 512000,
+      "last_activity_utc": "2026-09-17T07:17:22Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-2",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 1,
+      "bytes": 77824,
+      "last_activity_utc": "2026-09-17T07:17:54Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-3",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 7,
+      "bytes": 512000,
+      "last_activity_utc": "2026-09-17T07:18:06Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-4",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 7,
+      "bytes": 512000,
+      "last_activity_utc": "2026-09-17T07:19:06Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-1",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T07:05:50.680000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-2",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 2,
+      "bytes": 131072,
+      "last_activity_utc": "2026-09-17T07:09:12Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-3",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 2,
+      "bytes": 131072,
+      "last_activity_utc": "2026-09-17T07:09:30Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-race-red",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 8,
+      "bytes": 221376,
+      "last_activity_utc": "2026-09-17T07:52:36Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-red",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T06:55:49.810000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-review",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 25,
+      "bytes": 381480,
+      "last_activity_utc": "2026-09-17T08:07:44Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-scope-red",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 12,
+      "bytes": 110886,
+      "last_activity_utc": "2026-09-17T08:12:40Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-scope-review",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 9,
+      "bytes": 86224,
+      "last_activity_utc": "2026-09-17T08:24:36Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\records-green",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 63,
+      "bytes": 442726,
+      "last_activity_utc": "2026-09-17T07:15:36Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\records-red",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 6,
+      "bytes": 37956,
+      "last_activity_utc": "2026-09-17T06:55:08Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\script-static",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T07:23:31.370000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\script-static-2",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T07:30:33.940000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\script-static-logs",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T07:39:18.030000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\session-scan-tests",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 145,
+      "bytes": 587609,
+      "last_activity_utc": "2026-09-17T06:56:48Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\skills",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 0,
+      "bytes": 0,
+      "last_activity_utc": "2026-09-17T07:24:42.190000Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\skills-path-red",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 2,
+      "bytes": 12412,
+      "last_activity_utc": "2026-09-17T07:27:52Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\sqlite-concurrency",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 1,
+      "bytes": 254874,
+      "last_activity_utc": "2026-09-17T07:10:22Z",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\sqlite-concurrency\\concurrency-report.json",
+          "sha256": "30dec4df087196966e119d08dcd6814d58d4c344197ac99df535efe2471afb8a"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\sqlite-concurrency-wal",
+      "scope": "worktree_runtime",
+      "status": "CANDIDATE_CONFIRMED",
+      "cleanup_eligible_after_release": true,
+      "protection_or_reason": "Current-round test/acceptance evidence is present.",
+      "file_count": 2,
+      "bytes": 258369,
+      "last_activity_utc": "2026-09-17T08:12:44Z",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\sqlite-concurrency-wal\\.redlotus-sqlite-concurrency-owner.json",
+          "sha256": "697d69d9b9e0e5fcf086928e451f1246f3e11d40b5377dbae46975a9d20fca03"
+        },
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\sqlite-concurrency-wal\\concurrency-report.json",
+          "sha256": "5ae35cda6091f110ea4ca9d86570120536981e42fb8a71d9f55a097f6489f352"
+        }
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\sqlite-vec-probe.sqlite3",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Outside the explicitly confirmed cleanup patterns; preserve without recursive measurement.",
+      "file_count": null,
+      "bytes": null,
+      "last_activity_utc": "2026-09-17T06:56:10Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\transition-restore-green",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 40,
+      "bytes": 164129,
+      "last_activity_utc": "2026-09-17T08:30:50Z",
+      "evidence": []
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\tui-tests",
+      "scope": "worktree_runtime",
+      "status": "UNKNOWN_PRESERVE",
+      "cleanup_eligible_after_release": false,
+      "protection_or_reason": "Test-like directory lacks a marker; preserve until independently confirmed.",
+      "file_count": 1544,
+      "bytes": 12551138,
+      "last_activity_utc": "2026-09-17T08:41:00Z",
+      "evidence": []
+    }
+  ]
+}

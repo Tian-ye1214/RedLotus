@@ -4,6 +4,7 @@ import os
 import sys
 import uuid
 import json
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +27,21 @@ pydantic_ai.models.ALLOW_MODEL_REQUESTS = False
 import pytest
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config):
+    """Keep pytest and subprocess temporary files on the project volume by default."""
+    base = config.option.basetemp
+    if base is None:
+        base = ROOT / "WorkDatabase" / "runtime" / f"pytest-{uuid.uuid4().hex}"
+        config.option.basetemp = base
+    else:
+        base = Path(base).resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    os.environ["TEMP"] = str(base)
+    os.environ["TMP"] = str(base)
+    tempfile.tempdir = None
+
+
 @pytest.fixture(autouse=True)
 def isolate_background_services(monkeypatch, tmp_path):
     memory_root = os.environ.get("REDLOTUS_TEST_MEMORY_ROOT")
@@ -35,10 +51,14 @@ def isolate_background_services(monkeypatch, tmp_path):
     config.parent.mkdir(parents=True, exist_ok=True)
     settings = json.loads((ROOT / "src/redlotus/config.json").read_text(encoding="utf-8"))
     settings.update(API_KEY="test-only", BASE_URL="https://example.test/v1")
-    settings["short_term_memory"]["db_path"] = str(state / "rag")
-    settings["storage"]["sessions_dir"] = str(tmp_path / "sessions")
-    settings["storage"]["references_dir"] = str(tmp_path / "references")
-    settings["storage"]["runtime_dir"] = str(tmp_path / "runtime")
+    settings["storage"].update(
+        state_dir=str(state),
+        project_dir=".redlotus",
+        sessions_dir=".redlotus/sessions",
+        project_logs_dir=".redlotus/logs",
+        references_dir="WorkDatabase/references",
+        runtime_dir="WorkDatabase/runtime",
+    )
     config.write_text(json.dumps(settings), encoding="utf-8")
     global_config = tmp_path.parent / "global_settings" / tmp_path.name / "config.json"
     global_config.parent.mkdir(parents=True)
@@ -46,8 +66,10 @@ def isolate_background_services(monkeypatch, tmp_path):
     monkeypatch.setenv("REDLOTUS_CONFIG_DIR", str(global_config.parent))
     monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(config))
     monkeypatch.setenv("REDLOTUS_DOTENV_FILE", str(tmp_path / ".env"))
-    # Keep native LanceDB on the test volume, including Windows exFAT fallback.
-    monkeypatch.setenv("RAG_DB_PATH", str(state / "rag"))
+    monkeypatch.delenv("RAG_DB_PATH", raising=False)
+    from redlotus.core import agents
+
+    monkeypatch.setattr(agents, "_workspace", tmp_path.resolve())
     monkeypatch.setattr(
         "redlotus.core.history._ensure_openrouter_maps", lambda: None
     )

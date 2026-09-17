@@ -13,6 +13,8 @@ from datetime import timedelta
 from pathlib import Path
 
 import lancedb
+from copy import deepcopy
+from filelock import AsyncFileLock
 
 from redlotus.core import config as logger
 from redlotus.memory.retrieval import RAG
@@ -27,7 +29,7 @@ class MemoryStore:
 
     def __init__(self, workspace):
         self.workspace = workspace
-        config = settings()
+        config = deepcopy(settings())
         self.indexes = {
             "project": RAG(
                 config["short_term_memory"], project_id=workspace.project_id
@@ -100,9 +102,13 @@ class MemoryStore:
     def save(self, records: list[MemoryRecord]):
         if not records:
             return
+        if any(not MEMORY_ID_PATTERN.fullmatch(record.id) for record in records):
+            raise ValueError("Invalid memory id")
         with file_lock(self.path / self.TABLE):
             table = self._table()
-            old = {row["id"]: row for row in self._rows(active_only=False)}
+            identities = ",".join(f"'{record.id}'" for record in records)
+            old = {row["id"]: row for row in table.search().where(
+                f"id IN ({identities})").limit(None).to_arrow().to_pylist()} if table else {}
             rows = []
             for record in records:
                 if (
@@ -113,6 +119,8 @@ class MemoryStore:
                 previous = old.get(record.id)
                 if previous:
                     saved = MemoryRecord.model_validate_json(previous["payload"])
+                    if saved.scope == "project" and saved.project_id != self.workspace.project_id:
+                        raise ValueError("Cannot write another project's memory")
                     if saved.last_change_id == record.last_change_id:
                         continue
                     if record.version != saved.version + 1:
@@ -193,11 +201,7 @@ class MemoryStore:
         async with self._index_lock:
             try:
                 for scope, index in self.indexes.items():
-                    rows = await asyncio.to_thread(self._rows, scope)
-                    indexed = await index.indexed_record_ids()
-                    await index.delete_records(
-                        list(indexed - {row["id"] for row in rows})
-                    )
+                    rows, indexed = await self._index_snapshot(scope)
                     pending = [
                         row
                         for row in rows
@@ -207,7 +211,7 @@ class MemoryStore:
                     batch_size = int(settings()["rag_service"]["index_batch_size"])
                     for start in range(0, len(pending), batch_size):
                         batch = pending[start : start + batch_size]
-                        await index.upsert_records(
+                        vectors = await index.prepare_records(
                             [
                                 dict(
                                     record_id=row["id"],
@@ -220,12 +224,9 @@ class MemoryStore:
                                 for row in batch
                             ]
                         )
-                        for row in batch:
-                            await asyncio.to_thread(
-                                self._table().update,
-                                where=f"id = '{row['id']}' AND body_hash = '{row['body_hash']}'",
-                                values={"indexed": row["body_hash"] + index.index_key},
-                            )
+                        await self._commit_index(scope, batch, vectors)
+                    # Retry acceleration independently of already persisted embeddings.
+                    await index._db.ensure_vector_index()
                 self.last_error = ""
             except Exception as exc:
                 message = str(exc)
@@ -234,6 +235,34 @@ class MemoryStore:
                         "记忆索引更新未完成，正文已保存并等待重试：%s", message
                     )
                 self.last_error = message
+
+    def _write_lock(self):
+        """Share the authoritative writer lock with synchronous save operations."""
+        self.path.mkdir(parents=True, exist_ok=True)
+        return AsyncFileLock(self.path / (self.TABLE + ".lock"), run_in_executor=False)
+
+    async def _index_snapshot(self, scope):
+        """Remove only currently inactive vectors while holding the record lock."""
+        index = self.indexes[scope]
+        async with self._write_lock():
+            rows = await asyncio.to_thread(self._rows, scope)
+            indexed = await index.indexed_record_ids()
+            obsolete = indexed - {row["id"] for row in rows}
+            await index.delete_records(list(obsolete))
+            return rows, indexed - obsolete
+
+    async def _commit_index(self, scope, batch, vectors):
+        """Reject stale embeddings before writing vectors or marking bodies indexed."""
+        index = self.indexes[scope]
+        async with self._write_lock():
+            current = {row["id"]: row["body_hash"] for row in await asyncio.to_thread(self._rows, scope)}
+            valid = {row["id"]: row["body_hash"] for row in batch
+                     if current.get(row["id"]) == row["body_hash"]}
+            await index.write_records([row for row in vectors if row["record_id"] in valid])
+            for identity, digest in valid.items():
+                await asyncio.to_thread(self._table().update,
+                    where=f"id = '{identity}' AND body_hash = '{digest}' AND state = 'active'",
+                    values={"indexed": digest + index.index_key})
 
     async def clear(self, scope):
         now = iso_utc_now()

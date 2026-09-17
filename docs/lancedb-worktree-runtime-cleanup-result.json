@@ -1,0 +1,653 @@
+{
+  "schema_version": 1,
+  "operation": "user_confirmed_exact_inventory_worktree_runtime_cleanup",
+  "generated_at_utc": "2026-09-17T11:35:21.4773350Z",
+  "inventory_path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\docs\\lancedb-final-cleanup-inventory.json",
+  "runtime_root": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime",
+  "user_confirmation": "Delete the 65 exact CANDIDATE_AFTER_FINAL_TESTS paths from the inventory.",
+  "deleted": [
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance-v2",
+      "bytes_before": 61175212,
+      "file_count_before": 4812,
+      "last_activity_utc_before": "2026-09-17T08:35:08.9000000Z",
+      "inventory_evidence": [
+        "test_marker_filename"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\local-acceptance",
+      "bytes_before": 32561596,
+      "file_count_before": 3437,
+      "last_activity_utc_before": "2026-09-17T07:20:08.3500000Z",
+      "inventory_evidence": [
+        "test_marker_filename"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-0e27eb3d14954f3380667f57c37215b0",
+      "bytes_before": 11918,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T10:40:12.2500000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-0f801ededde449d99349c676ffa5cb40",
+      "bytes_before": 127106,
+      "file_count_before": 3,
+      "last_activity_utc_before": "2026-09-17T08:01:05.8500000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-1237fd86b05d40f1adc24a895d5e1467",
+      "bytes_before": 993052,
+      "file_count_before": 48,
+      "last_activity_utc_before": "2026-09-17T07:57:57.7400000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-13db95748c18486a9bbc61d5376102d6",
+      "bytes_before": 62090,
+      "file_count_before": 10,
+      "last_activity_utc_before": "2026-09-17T07:57:54.1400000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-171b333e0acd4291a58b2b8488d826f5",
+      "bytes_before": 7717869,
+      "file_count_before": 638,
+      "last_activity_utc_before": "2026-09-17T07:42:46.7100000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-1fc5b6f100bc47d2ac9c00d96791402e",
+      "bytes_before": 0,
+      "file_count_before": 0,
+      "last_activity_utc_before": "2026-09-17T07:41:42.0700000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-26b2e6a03c20464e80a5a977f3fc41a6",
+      "bytes_before": 0,
+      "file_count_before": 0,
+      "last_activity_utc_before": "2026-09-17T07:53:47.9100000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-2d405f6246994d659e78d052cfa09f85",
+      "bytes_before": 60330,
+      "file_count_before": 10,
+      "last_activity_utc_before": "2026-09-17T10:29:26.2200000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-2f9144a907e544c6b675db66418ec5fa",
+      "bytes_before": 160814,
+      "file_count_before": 32,
+      "last_activity_utc_before": "2026-09-17T10:45:28.1600000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-38fe56a7e7a34a3f90c0341c255ba153",
+      "bytes_before": 11918,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T10:47:31.4900000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-3d0bbe5304b5411c86ba093c780a8338",
+      "bytes_before": 12418,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T10:28:40.7100000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-4526cfc5cc894ddf842ecd214d6a73d5",
+      "bytes_before": 618553,
+      "file_count_before": 142,
+      "last_activity_utc_before": "2026-09-17T10:38:24.9300000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-4f6625d6ca5f4a6a9b12bb0cb3096a48",
+      "bytes_before": 95344,
+      "file_count_before": 16,
+      "last_activity_utc_before": "2026-09-17T10:30:53.7400000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-504f845c0dc1464990d85f4865165383",
+      "bytes_before": 193904,
+      "file_count_before": 36,
+      "last_activity_utc_before": "2026-09-17T10:48:42.4200000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-5e243e604e354a03a5f8887c110097ac",
+      "bytes_before": 45466,
+      "file_count_before": 11,
+      "last_activity_utc_before": "2026-09-17T10:43:05.4100000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-62b7a4032d9744138f0b175d27ff3fc5",
+      "bytes_before": 68448769,
+      "file_count_before": 5836,
+      "last_activity_utc_before": "2026-09-17T10:43:35.2000000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-6c26e1aecb2e4d12b74f2806ab2faa5b",
+      "bytes_before": 62090,
+      "file_count_before": 10,
+      "last_activity_utc_before": "2026-09-17T08:50:59.1100000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-7795d6547c194a33a8ad75dae6fa2a5a",
+      "bytes_before": 11918,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T10:35:38.9700000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-7b467d21d4a245c2bfdce936b4876928",
+      "bytes_before": 11918,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T10:40:59.3500000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-8701336c3ba74078b0863cffeb2c3c3b",
+      "bytes_before": 95344,
+      "file_count_before": 16,
+      "last_activity_utc_before": "2026-09-17T10:32:43.2100000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-8980b8910414443c9ce1ed7c84c9f63c",
+      "bytes_before": 45293,
+      "file_count_before": 10,
+      "last_activity_utc_before": "2026-09-17T10:39:52.7900000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-8cdfcc61323f45c891015937d73144b6",
+      "bytes_before": 618553,
+      "file_count_before": 142,
+      "last_activity_utc_before": "2026-09-17T10:41:31.1700000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-c002fe5d4ae04f038d42a64f21daaf03",
+      "bytes_before": 115348,
+      "file_count_before": 21,
+      "last_activity_utc_before": "2026-09-17T10:41:42.7800000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-caf6bf1d57224abaab5d6a00928e57c4",
+      "bytes_before": 45466,
+      "file_count_before": 11,
+      "last_activity_utc_before": "2026-09-17T10:41:20.5500000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-connect-check",
+      "bytes_before": 0,
+      "file_count_before": 0,
+      "last_activity_utc_before": "2026-09-17T07:07:00.1500000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-e3f5917515e342c58d7ca8bb6aae1079",
+      "bytes_before": 618553,
+      "file_count_before": 142,
+      "last_activity_utc_before": "2026-09-17T10:39:19.4100000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-e8a80e6ef3c14b7c9f9c47bcf379f2fc",
+      "bytes_before": 160814,
+      "file_count_before": 32,
+      "last_activity_utc_before": "2026-09-17T10:43:44.3200000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-ed7f540f433543cdbfedea00a2a9ca69",
+      "bytes_before": 76471,
+      "file_count_before": 14,
+      "last_activity_utc_before": "2026-09-17T06:54:50.2900000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-green-20260917",
+      "bytes_before": 12400,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T08:29:48.1300000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-red-20260917",
+      "bytes_before": 0,
+      "file_count_before": 0,
+      "last_activity_utc_before": "2026-09-17T08:27:52.6600000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-red2-20260917",
+      "bytes_before": 12398,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T08:28:20.4200000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-f4b0e0dcf5fe4ff1bf0d84e0255a39c7",
+      "bytes_before": 263575,
+      "file_count_before": 52,
+      "last_activity_utc_before": "2026-09-17T10:37:22.8800000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-f604499b4f404f1294245f18ad4fa596",
+      "bytes_before": 461166,
+      "file_count_before": 114,
+      "last_activity_utc_before": "2026-09-17T10:40:32.8400000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-logs-580127aeb56245b68fb561aabc7568c6",
+      "bytes_before": 280687,
+      "file_count_before": 46,
+      "last_activity_utc_before": "2026-09-17T06:53:35.2600000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-paths-6a7aaa2a40954c9a8c6131ada33bf7dd",
+      "bytes_before": 76615,
+      "file_count_before": 14,
+      "last_activity_utc_before": "2026-09-17T06:54:20.6700000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-rag-green-1",
+      "bytes_before": 401408,
+      "file_count_before": 5,
+      "last_activity_utc_before": "2026-09-17T07:09:41.7400000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-rag-green-2",
+      "bytes_before": 401408,
+      "file_count_before": 5,
+      "last_activity_utc_before": "2026-09-17T07:10:01.3400000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-final",
+      "bytes_before": 111834,
+      "file_count_before": 18,
+      "last_activity_utc_before": "2026-09-17T07:19:50.0000000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-1",
+      "bytes_before": 512000,
+      "file_count_before": 7,
+      "last_activity_utc_before": "2026-09-17T07:17:19.5400000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-2",
+      "bytes_before": 77824,
+      "file_count_before": 1,
+      "last_activity_utc_before": "2026-09-17T07:17:53.0500000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-3",
+      "bytes_before": 512000,
+      "file_count_before": 7,
+      "last_activity_utc_before": "2026-09-17T07:18:04.6100000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-4",
+      "bytes_before": 512000,
+      "file_count_before": 7,
+      "last_activity_utc_before": "2026-09-17T07:19:03.1800000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-baseline-20260917",
+      "bytes_before": 0,
+      "file_count_before": 0,
+      "last_activity_utc_before": "2026-09-17T10:27:44.1800000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-green-20260917",
+      "bytes_before": 12607,
+      "file_count_before": 4,
+      "last_activity_utc_before": "2026-09-17T10:31:21.5000000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-manual-load-20260917",
+      "bytes_before": 12936,
+      "file_count_before": 5,
+      "last_activity_utc_before": "2026-09-17T10:35:57.3200000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-pilot-20260917",
+      "bytes_before": 24659,
+      "file_count_before": 6,
+      "last_activity_utc_before": "2026-09-17T10:33:08.0900000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-pilot-green-20260917",
+      "bytes_before": 36747,
+      "file_count_before": 8,
+      "last_activity_utc_before": "2026-09-17T10:34:24.0500000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-red-20260917",
+      "bytes_before": 12603,
+      "file_count_before": 4,
+      "last_activity_utc_before": "2026-09-17T10:30:26.7600000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-1",
+      "bytes_before": 0,
+      "file_count_before": 0,
+      "last_activity_utc_before": "2026-09-17T07:05:50.6800000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-2",
+      "bytes_before": 131072,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:09:08.6600000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-3",
+      "bytes_before": 131072,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:09:28.2400000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-race-red",
+      "bytes_before": 221376,
+      "file_count_before": 8,
+      "last_activity_utc_before": "2026-09-17T07:52:30.8800000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-red",
+      "bytes_before": 0,
+      "file_count_before": 0,
+      "last_activity_utc_before": "2026-09-17T06:55:49.8100000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-scope-red",
+      "bytes_before": 110886,
+      "file_count_before": 12,
+      "last_activity_utc_before": "2026-09-17T08:12:33.4100000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-scope-review",
+      "bytes_before": 86224,
+      "file_count_before": 9,
+      "last_activity_utc_before": "2026-09-17T08:24:34.5100000Z",
+      "inventory_evidence": [
+        "pytest_runtime_path"
+      ]
+    }
+  ],
+  "not_present": [],
+  "failed": [
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance",
+      "reason": "目录不是空的。 : 'E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance\\tmp\\test_driver_never_assigns_new_0'."
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-a7c8b22c4c784e8cae93bb992ff2422b",
+      "reason": "目录不是空的。 : 'E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-a7c8b22c4c784e8cae93bb992ff2422b\\test_project_records_live_besi0'."
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-cb82b52d5d12469cad53291ef71cf13a",
+      "reason": "目录不是空的。 : 'E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-cb82b52d5d12469cad53291ef71cf13a\\test_project_records_live_besi0\\乙项目'."
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-baseline-20260917-b",
+      "reason": "目录不是空的。 : 'E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-baseline-20260917-b\\test_loading_locks_input_durin0'."
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-20260917",
+      "reason": "目录不是空的。 : 'E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-20260917\\test_loading_locks_input_durin0'."
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-format-20260917",
+      "reason": "目录不是空的。 : 'E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-format-20260917\\test_loading_locks_input_durin0'."
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-full-green-20260917",
+      "reason": "目录不是空的。 : 'E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-full-green-20260917\\test_loading_locks_input_durin0'."
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-review",
+      "reason": "目录不是空的。 : 'E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-review\\test_project_records_live_besi0\\乙项目'."
+    }
+  ],
+  "blocked": [],
+  "retained_protected": [
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\packaging",
+      "reason": "Explicitly protected; not in exact inventory deletion set."
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\migration-inventory",
+      "reason": "Explicitly protected; not in exact inventory deletion set."
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\lance-final-local-20260917",
+      "reason": "Explicitly protected; not in exact inventory deletion set."
+    }
+  ],
+  "total_deleted_bytes": 178573624,
+  "deletion_performed": true,
+  "e_drive_free_bytes_after": 1433625296896,
+  "remaining_runtime_directories": [
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\integration-01",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\isolated-config",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\lance-final-local-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\load-green",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\load-red",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\local-retest-01",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\log-red",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\migration-copy",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\migration-inventory",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\packaging",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\paths-red-02",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\picker-red",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-3f3e9fa964f74614b4f119ccce26ecd8",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-a7c8b22c4c784e8cae93bb992ff2422b",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-adf47ccfb0a745278facf007abb42533",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-cb82b52d5d12469cad53291ef71cf13a",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-eac9a4274f0046568d2bebf237602cda",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-baseline-20260917-b",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-format-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-full-green-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-review",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-extended-prefix-probe-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-file-validation-2-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-file-validation-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-file-validation-3-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-file-validation-final-2-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-file-validation-final-2-logs-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-file-validation-final-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-file-validation-final-logs-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-helper-green-2-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-helper-green-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-helper-validation-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-normal-green-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-pip-validation-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-post-provision-green-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-production-deep-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-tdd-green-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\python-path-tdd-red-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\records-green",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\records-red",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\script-static",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\script-static-2",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\script-static-logs",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\session-scan-readonly-green",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\session-scan-readonly-red",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\session-scan-readonly-red-2",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\session-scan-regression",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\session-scan-regression-confirm",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\session-scan-tests",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\skills",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\skills-path-red",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\sqlite-concurrency",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\sqlite-concurrency-wal",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\temp-session-ui-baseline-20260917-b",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\temp-session-ui-final-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\temp-session-ui-final-format-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\temp-session-ui-full-green-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\temp-session-ui-green-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\temp-session-ui-manual-load-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\temp-session-ui-pilot-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\temp-session-ui-pilot-green-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\temp-session-ui-red-20260917",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\transition-restore-green",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\tui-tests",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\ui-review-cancel-20260917-01",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\ui-review-cancel-20260917-01-temp",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\ui-review-cancel-20260917-02",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\ui-review-cancel-20260917-02-temp",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\ui-review-cancel-20260917-03",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\ui-review-cancel-20260917-03-temp",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\ui-review-final-20260917-01",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\ui-review-final-20260917-01-temp"
+  ],
+  "untouched_non_inventory_directory_count": 66
+}

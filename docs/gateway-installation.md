@@ -10,7 +10,11 @@ pip 安装后运行 `redlotus`，全局基准配置为 `~/.redlotus/config.json`
 
 `.env` 支持所有字段，嵌套键使用与 JSON 一致的名字及双下划线，例如 `models__worker__max_tokens=393216`。数组和对象使用 JSON 值，普通文本保持字符串；不展开宿主环境变量。空白连接配置继续查找下一层，`false`、`0`、空列表及允许的 `null` 不会被当成缺失。全局 `.env` 不是第四层来源。
 
-全局记忆、LanceDB 和日志默认保存在 `.redlotus`；项目情景按 `project_id` 隔离。会话、引用、运行环境继续遵守显式存储配置，`WorkDatabase` 保存项目产物。打包时不携带开发配置或 `.env`；EXE 旁可自行放置外置开发配置。
+全局配置、全部记忆和必要的全局日志保存在用户目录 `~/.redlotus`，项目短期记忆通过 `project_id` 隔离。当前打开的项目以文件夹为边界，项目 `.redlotus` 保存会话、轻量索引、必要日志和用户维护的 `AGENT.md`；`WorkDatabase` 保存项目产物、依赖、缓存和 `references` 引用快照。项目目录不放另一份模型配置，也不向父目录查找项目。
+
+向量检索由 LanceDB 完成，项目记录使用稳定的 `project_id` 隔离；召回继续经过相似度过滤、rerank 和分块去重，服务不可用时仍可检索已保存正文。运行时数据位置遵守当前存储策略，安装包不携带数据库、配置或凭据。
+
+存在历史会话时，启动提供新建、恢复或取消；TUI 的“会话 / 加载”与 `/load` 使用同一入口。恢复保留原 session ID、文件、提示词快照和感知计数。每个会话的正文只在一个 `model_messages.json` 中，项目会话索引不复制正文。引用快照在普通退出后保留。
 
 ## 命名网关与模型预设
 
@@ -69,14 +73,14 @@ pip 安装后运行 `redlotus`，全局基准配置为 `~/.redlotus/config.json`
 ./scripts/pack.ps1 -OneFile
 ```
 
-两种模式分别输出到 `dist/onedir`、`dist/onefile`。验收结束后可以删除生成的 `build`、`dist`；全局配置和记忆不在这些目录中。
+两种模式的构建环境、缓存和输出位于项目 `WorkDatabase/runtime/packaging`。单文件程序在启动项目的 `WorkDatabase/runtime/pyinstaller` 解压，配置仍从 EXE 所在目录及全局配置读取。验收完成后清理本次构建产物，配置与正式记忆不在构建目录中。
 
 实现复用 [Pydantic AI 模型适配](https://pydantic.dev/docs/ai/models/overview/) 与 [消息历史](https://pydantic.dev/docs/ai/core-concepts/message-history/)，打包路径遵循 [PyInstaller 运行时说明](https://pyinstaller.org/en/stable/runtime-information.html)。真实覆盖范围以对应版本的验收报告为准，辅助协议测试不代表已访问其他服务。
 
 ## 复现实测
 
-真实验收读取当前全局配置并保存配置指纹，不修改模型参数。测试数据通过 `REDLOTUS_DATA_DIR` 隔离；所有请求仍访问真实服务，会产生实际用量。准备浏览器、LibreOffice 以及脚本执行用的外部 Python 后，可以从仓库外使用干净环境中安装的 wheel 运行以下脚本。
+真实验收读取选定的三层配置并保存配置指纹，不修改模型参数。测试数据通过 `REDLOTUS_DATA_DIR` 隔离；所有请求仍访问真实服务，会产生实际用量。以下脚本验证对应源码检出；安装验收必须另行从仓库外启动干净环境的 `redlotus` 或已打包 EXE，不能用会主动插入源码目录的脚本代替。
 
-`scripts/real_acceptance.py --root <新的测试目录>` 覆盖六类场景；`scripts/real_soak.py --root <新的测试目录>` 连续运行至少两小时、200 个用户回合。测试依赖包含开发 extra、浏览器 extra 和 `psutil`。Windows 原生 CLI/TUI 验收脚本 `scripts/installed_entry_acceptance.py` 另需 `pywinpty`、`pyte`，并通过 `--executable` 指定安装后的入口或冻结程序。
+`scripts/session_acceptance.py --config <配置路径> --dotenv <本地.env路径> --root <隔离测试目录>` 检验真实 60 回合、窗口和恢复；`scripts/project_storage_acceptance.py` 提供本轮业务批次。各批次期限为 600 秒，超时或未执行项必须单独记录。固定向量性能对照不能代替真实 LLM、embedding 和 rerank 验收。
 
-报告中的缓存比例使用服务返回的缓存命中 token 除以全部输入 token，包含首次冷请求；没有返回缓存用量的协议显示为未测量。运行阶段的非预期 WARNING/ERROR 或任务资源未释放应判为失败。用户退出时允许取消尚未完成的记忆生产，但必须保留可恢复窗口、不误推进完成位置，并验证下次启动可以继续处理。测试完成后可以保留报告、请求统计和终端证据，删除生成的打包目录。
+报告中的缓存比例使用服务返回的缓存命中 token 除以全部输入 token，包含首次冷请求；没有返回缓存用量的协议显示为未测量。运行阶段的非预期 WARNING/ERROR 或任务资源未释放判为失败。退出取消未完成任务并保留恢复状态；新建和加载本身不调度感知，不足 20 个新增回合不做收尾感知。测试通过后仅保留精简报告、性能统计和清理清单，清理已确认的测试产物，未知归属与真实数据保留。

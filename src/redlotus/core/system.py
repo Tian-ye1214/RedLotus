@@ -73,6 +73,7 @@ class AgentSystem:
         exit_deadline=None,
     ):
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
+        logger.activate_log_dir(logger.prepare_log_dir(self.workspace))
         self._owner_memory_allowed = owner_memory_allowed
         self._session = SessionController()
         self._registry = AgentRegistry()
@@ -81,7 +82,7 @@ class AgentSystem:
         self._exit_deadline = exit_deadline
         self.last_turn_error: Exception | None = None
         self._cancel_lock = asyncio.Lock()
-        self._skills_manager = SkillsManager()
+        self._skills_manager = SkillsManager(workspace=self.workspace)
         self._manager_history = ChatHistory()
         self._current_attachments: list = []
         self._factory = SubagentFactory()
@@ -126,7 +127,8 @@ class AgentSystem:
             if self._session_file is not None:
                 self._session_file.release_use()
             self._session_file = storage or await self._durable_write(lambda: SessionFile.create(
-                session_data_dir(self.workspace), self.workspace.project_id, session_id=session_key
+                session_data_dir(self.workspace), self.workspace.project_id,
+                session_id=session_key, workspace=self.workspace,
             ))
         self._session_key = session_key
         self._session_file.acquire_use()
@@ -208,23 +210,24 @@ class AgentSystem:
 
     async def _durable_write(self, operation):
         """Pause failed I/O without repeating model or tool execution."""
-        storage = self._session_file
-        while True:
-            self._storage_retry.clear()
-            try:
-                if storage is not None:
-                    await finish_file_io(asyncio.to_thread(storage.retry_pending))
-                result = await finish_file_io(asyncio.to_thread(operation))
-                if inspect.isawaitable(result):
-                    result = await result
-                self._storage_paused = False
-                return result
-            except OSError as exc:
-                self._storage_paused = True
-                print_warning(f"保存失败，任务已暂停，输入已保留: {exc}。恢复存储后提交普通输入重试。")
-                if asyncio.current_task().cancelling():
-                    raise asyncio.CancelledError() from exc
-                await self._storage_retry.wait()
+        with workspace_context(self.workspace):
+            storage = self._session_file
+            while True:
+                self._storage_retry.clear()
+                try:
+                    if storage is not None:
+                        await finish_file_io(asyncio.to_thread(storage.retry_pending))
+                    result = await finish_file_io(asyncio.to_thread(operation))
+                    if inspect.isawaitable(result):
+                        result = await result
+                    self._storage_paused = False
+                    return result
+                except OSError as exc:
+                    self._storage_paused = True
+                    print_warning(f"保存失败，任务已暂停，输入已保留: {exc}。恢复存储后提交普通输入重试。")
+                    if asyncio.current_task().cancelling():
+                        raise asyncio.CancelledError() from exc
+                    await self._storage_retry.wait()
 
     async def cancel_compression(self):
         """Invalidate the queued control operation without cancelling ordinary tasks."""
@@ -496,7 +499,7 @@ class AgentSystem:
         return receipt
 
     async def bind_loaded_snapshot(self, agent, path, meta):
-        storage = SessionFile.load(path)
+        storage = SessionFile.load(path, workspace=self.workspace)
         await self.bind_session(storage.session_id, storage=storage)
         metadata = storage.metadata
         messages = storage.model_messages()
@@ -511,7 +514,7 @@ class AgentSystem:
             from pydantic_ai.messages import ModelMessagesTypeAdapter
             from redlotus.tools.references import reference_message_data
             self._manager_history.set_messages(ModelMessagesTypeAdapter.validate_python(
-                [reference_message_data(row, restore=True) for row in metadata["manager_context"]]
+                [reference_message_data(row, restore=True, workspace=self.workspace) for row in metadata["manager_context"]]
             ))
         self._task_manager.restore(metadata.get("tasks", []))
         return repaired
@@ -591,6 +594,7 @@ class AgentSystem:
         workspace = WorkspaceContext.from_path(path)
         if not workspace.root.is_dir():
             raise NotADirectoryError(workspace.root)
+        log_dir = logger.prepare_log_dir(workspace)
         skills = SkillsManager(workspace=workspace)
         memory = MemoryService(
             workspace=workspace,
@@ -609,11 +613,12 @@ class AgentSystem:
         await self.reset_session(close_memory=True)
         self.workspace, self._memory, self._toolkit, self._skills_manager = workspace, memory, toolkit, skills
         self._coordinator_agent = None
-        review_store.clear()
-        self._orchestrator._toolkit = toolkit
         from redlotus.core.session import set_workspace
 
         set_workspace(workspace.root)
+        logger.activate_log_dir(log_dir)
+        review_store.clear()
+        self._orchestrator._toolkit = toolkit
 
     @asynccontextmanager
     async def _outer_turn(self, message: UserMessage, turn_id: str):

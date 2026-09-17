@@ -1,18 +1,18 @@
 include README.md
-include src/redlotus/config.default.json
 
 recursive-include src/redlotus/prompts *.md
 prune src/redlotus/prompts/LongTermMemory
 
-graft src/redlotus/skills
+graft src/redlotus/tools/skills
 
-include src/redlotus/API/config.yaml.example
+include src/redlotus/api/config.yaml.example
 
+exclude src/redlotus/config.json
 global-exclude *.py[cod]
 global-exclude __pycache__
 global-exclude *.log
 global-exclude *.log.*
-exclude src/redlotus/API/config.yaml
-recursive-exclude src/redlotus/skills .env
-recursive-exclude src/redlotus/skills __pycache__
-recursive-exclude src/redlotus/skills *.py[cod]
+exclude src/redlotus/api/config.yaml
+recursive-exclude src/redlotus/tools/skills .env
+recursive-exclude src/redlotus/tools/skills __pycache__
+recursive-exclude src/redlotus/tools/skills *.py[cod]

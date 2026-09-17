@@ -1,0 +1,1432 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-09-17T10:53:45.585584Z",
+  "operation": "read_only_final_lancedb_cleanup_inventory",
+  "deletion_performed": false,
+  "owner_marker_valid": true,
+  "owner_marker_sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929",
+  "scope": [
+    "D:\\RedLotusBenchmark",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime",
+    "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826"
+  ],
+  "explicit_exclusions": [
+    "C:\\Users\\Administrator\\.redlotus: global configuration and LanceDB memory.",
+    "Any project .redlotus directory: formal local sessions, project memory, and logs.",
+    "Any path without positive current-round marker or prior provenance evidence."
+  ],
+  "status_summary": {
+    "RETAIN_COMPACT_DOCUMENT": {
+      "entries": 1,
+      "measured_bytes": 252
+    },
+    "PROTECTED_UNTIL_FINAL_REPORT": {
+      "entries": 3,
+      "measured_bytes": 541427363
+    },
+    "CANDIDATE_AFTER_FINAL_TESTS": {
+      "entries": 69,
+      "measured_bytes": 208529688
+    },
+    "PROTECTED_ACTIVE": {
+      "entries": 2,
+      "measured_bytes": 0
+    },
+    "PROTECTED_AUDIT_EVIDENCE": {
+      "entries": 1,
+      "measured_bytes": 0
+    },
+    "NOT_PRESENT_AT_INVENTORY": {
+      "entries": 1,
+      "measured_bytes": 0
+    }
+  },
+  "entries": [
+    {
+      "path": "D:\\RedLotusBenchmark\\baseline-index.json",
+      "scope": "D_benchmark_compact_document",
+      "status": "RETAIN_COMPACT_DOCUMENT",
+      "active_or_protected": false,
+      "reason": "Compact benchmark index/documentation retained after test cleanup.",
+      "evidence": [
+        {
+          "kind": "benchmark_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ],
+      "bytes": 252,
+      "file_count": 1,
+      "last_activity_utc": "2026-09-17T06:53:11.949866Z",
+      "measurement": "shallow_metadata_only"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\binary8-chunk4096-fair-v3",
+      "scope": "D_benchmark_failure_baseline",
+      "status": "PROTECTED_UNTIL_FINAL_REPORT",
+      "active_or_protected": true,
+      "reason": "Current failed minimal baseline/evidence; retain until compact performance documentation is saved and final tests end.",
+      "evidence": [
+        {
+          "kind": "benchmark_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ],
+      "bytes": 529591060,
+      "file_count": 7,
+      "last_activity_utc": "2026-09-17T06:49:26.609475Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-fair-wal-v1",
+      "scope": "D_benchmark_failure_baseline",
+      "status": "PROTECTED_UNTIL_FINAL_REPORT",
+      "active_or_protected": true,
+      "reason": "Current failed minimal baseline/evidence; retain until compact performance documentation is saved and final tests end.",
+      "evidence": [
+        {
+          "kind": "benchmark_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ],
+      "bytes": 11820973,
+      "file_count": 2,
+      "last_activity_utc": "2026-09-17T08:02:16.252898Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-phase-100k-wal-v2",
+      "scope": "D_benchmark_failure_baseline",
+      "status": "PROTECTED_UNTIL_FINAL_REPORT",
+      "active_or_protected": true,
+      "reason": "Current failed minimal baseline/evidence; retain until compact performance documentation is saved and final tests end.",
+      "evidence": [
+        {
+          "kind": "benchmark_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ],
+      "bytes": 15330,
+      "file_count": 2,
+      "last_activity_utc": "2026-09-17T08:11:01.918476Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\probe-10000-aux.jsonl",
+      "scope": "D_benchmark_fixture",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Root owner marker confirms benchmark ownership; retain until final tests no longer need fixtures.",
+      "evidence": [
+        {
+          "kind": "benchmark_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ],
+      "bytes": 1127,
+      "file_count": 1,
+      "last_activity_utc": "2026-09-17T06:24:25.846091Z",
+      "measurement": "shallow_metadata_only"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\probe-10000.jsonl",
+      "scope": "D_benchmark_fixture",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Root owner marker confirms benchmark ownership; retain until final tests no longer need fixtures.",
+      "evidence": [
+        {
+          "kind": "benchmark_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ],
+      "bytes": 1480,
+      "file_count": 1,
+      "last_activity_utc": "2026-09-17T06:23:28.752857Z",
+      "measurement": "shallow_metadata_only"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\probe-100000-aux.jsonl",
+      "scope": "D_benchmark_fixture",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Root owner marker confirms benchmark ownership; retain until final tests no longer need fixtures.",
+      "evidence": [
+        {
+          "kind": "benchmark_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ],
+      "bytes": 785,
+      "file_count": 1,
+      "last_activity_utc": "2026-09-17T06:24:48.647616Z",
+      "measurement": "shallow_metadata_only"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\probe-100000-external.jsonl",
+      "scope": "D_benchmark_fixture",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Root owner marker confirms benchmark ownership; retain until final tests no longer need fixtures.",
+      "evidence": [
+        {
+          "kind": "benchmark_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ],
+      "bytes": 1208,
+      "file_count": 1,
+      "last_activity_utc": "2026-09-17T06:26:16.121741Z",
+      "measurement": "shallow_metadata_only"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\runtime",
+      "scope": "D_benchmark_runtime",
+      "status": "PROTECTED_ACTIVE",
+      "active_or_protected": true,
+      "reason": "Current live UI tests use runtime/dependencies; no recursive measurement while active.",
+      "evidence": [
+        {
+          "kind": "benchmark_owner_marker",
+          "path": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+          "sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929"
+        }
+      ],
+      "bytes": null,
+      "file_count": null,
+      "last_activity_utc": "2026-09-17T08:12:30.784590Z",
+      "measurement": "shallow_metadata_only"
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance\\pytest.log"
+        }
+      ],
+      "bytes": 35183707,
+      "file_count": 2567,
+      "last_activity_utc": "2026-09-17T08:35:46Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance-v2",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance-v2\\pytest.log"
+        }
+      ],
+      "bytes": 61175212,
+      "file_count": 4812,
+      "last_activity_utc": "2026-09-17T08:51:16Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\local-acceptance",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "test_marker_filename",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\local-acceptance\\pytest.log"
+        }
+      ],
+      "bytes": 32561596,
+      "file_count": 3437,
+      "last_activity_utc": "2026-09-17T07:27:20Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\migration-inventory",
+      "scope": "worktree_runtime_audit",
+      "status": "PROTECTED_AUDIT_EVIDENCE",
+      "active_or_protected": true,
+      "reason": "Contains audit reports and limited-cleanup results needed by the final report.",
+      "evidence": [
+        {
+          "kind": "audit_directory",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\migration-inventory"
+        }
+      ],
+      "bytes": null,
+      "file_count": null,
+      "last_activity_utc": "2026-09-17T07:02:42.980000Z",
+      "measurement": "shallow_metadata_only"
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\packaging",
+      "scope": "worktree_runtime_packaging",
+      "status": "PROTECTED_ACTIVE",
+      "active_or_protected": true,
+      "reason": "Packaging/test activity has not been declared finished; preserve without recursive measurement.",
+      "evidence": [
+        {
+          "kind": "parent_directive",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\packaging"
+        }
+      ],
+      "bytes": null,
+      "file_count": null,
+      "last_activity_utc": "2026-09-17T07:04:21.280000Z",
+      "measurement": "shallow_metadata_only"
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-0e27eb3d14954f3380667f57c37215b0",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-0e27eb3d14954f3380667f57c37215b0"
+        }
+      ],
+      "bytes": 11918,
+      "file_count": 2,
+      "last_activity_utc": "2026-09-17T10:40:14Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-0f801ededde449d99349c676ffa5cb40",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-0f801ededde449d99349c676ffa5cb40"
+        }
+      ],
+      "bytes": 127106,
+      "file_count": 3,
+      "last_activity_utc": "2026-09-17T08:01:14Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-1237fd86b05d40f1adc24a895d5e1467",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-1237fd86b05d40f1adc24a895d5e1467"
+        }
+      ],
+      "bytes": 993052,
+      "file_count": 48,
+      "last_activity_utc": "2026-09-17T07:58:06Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-13db95748c18486a9bbc61d5376102d6",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-13db95748c18486a9bbc61d5376102d6"
+        }
+      ],
+      "bytes": 62090,
+      "file_count": 10,
+      "last_activity_utc": "2026-09-17T07:58:06Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-171b333e0acd4291a58b2b8488d826f5",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-171b333e0acd4291a58b2b8488d826f5"
+        }
+      ],
+      "bytes": 7717869,
+      "file_count": 638,
+      "last_activity_utc": "2026-09-17T07:43:46Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-1fc5b6f100bc47d2ac9c00d96791402e",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-1fc5b6f100bc47d2ac9c00d96791402e"
+        }
+      ],
+      "bytes": 0,
+      "file_count": 0,
+      "last_activity_utc": "2026-09-17T07:41:42.070000Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-26b2e6a03c20464e80a5a977f3fc41a6",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-26b2e6a03c20464e80a5a977f3fc41a6"
+        }
+      ],
+      "bytes": 0,
+      "file_count": 0,
+      "last_activity_utc": "2026-09-17T07:53:47.910000Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-2d405f6246994d659e78d052cfa09f85",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-2d405f6246994d659e78d052cfa09f85"
+        }
+      ],
+      "bytes": 60330,
+      "file_count": 10,
+      "last_activity_utc": "2026-09-17T10:29:28Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-2f9144a907e544c6b675db66418ec5fa",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-2f9144a907e544c6b675db66418ec5fa"
+        }
+      ],
+      "bytes": 160814,
+      "file_count": 32,
+      "last_activity_utc": "2026-09-17T10:45:44Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-38fe56a7e7a34a3f90c0341c255ba153",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-38fe56a7e7a34a3f90c0341c255ba153"
+        }
+      ],
+      "bytes": 11918,
+      "file_count": 2,
+      "last_activity_utc": "2026-09-17T10:47:32Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-3d0bbe5304b5411c86ba093c780a8338",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-3d0bbe5304b5411c86ba093c780a8338"
+        }
+      ],
+      "bytes": 12418,
+      "file_count": 2,
+      "last_activity_utc": "2026-09-17T10:28:42Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-4526cfc5cc894ddf842ecd214d6a73d5",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-4526cfc5cc894ddf842ecd214d6a73d5"
+        }
+      ],
+      "bytes": 618553,
+      "file_count": 142,
+      "last_activity_utc": "2026-09-17T10:38:36Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-4f6625d6ca5f4a6a9b12bb0cb3096a48",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-4f6625d6ca5f4a6a9b12bb0cb3096a48"
+        }
+      ],
+      "bytes": 95344,
+      "file_count": 16,
+      "last_activity_utc": "2026-09-17T10:31:00Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-504f845c0dc1464990d85f4865165383",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-504f845c0dc1464990d85f4865165383"
+        }
+      ],
+      "bytes": 193904,
+      "file_count": 36,
+      "last_activity_utc": "2026-09-17T10:48:52Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-5e243e604e354a03a5f8887c110097ac",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-5e243e604e354a03a5f8887c110097ac"
+        }
+      ],
+      "bytes": 45466,
+      "file_count": 11,
+      "last_activity_utc": "2026-09-17T10:43:12Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-62b7a4032d9744138f0b175d27ff3fc5",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-62b7a4032d9744138f0b175d27ff3fc5"
+        }
+      ],
+      "bytes": 59288096,
+      "file_count": 5092,
+      "last_activity_utc": "2026-09-17T10:52:34Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-6c26e1aecb2e4d12b74f2806ab2faa5b",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-6c26e1aecb2e4d12b74f2806ab2faa5b"
+        }
+      ],
+      "bytes": 62090,
+      "file_count": 10,
+      "last_activity_utc": "2026-09-17T08:51:08Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-7795d6547c194a33a8ad75dae6fa2a5a",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-7795d6547c194a33a8ad75dae6fa2a5a"
+        }
+      ],
+      "bytes": 11918,
+      "file_count": 2,
+      "last_activity_utc": "2026-09-17T10:35:40Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-7b467d21d4a245c2bfdce936b4876928",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-7b467d21d4a245c2bfdce936b4876928"
+        }
+      ],
+      "bytes": 11918,
+      "file_count": 2,
+      "last_activity_utc": "2026-09-17T10:41:00Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-8701336c3ba74078b0863cffeb2c3c3b",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-8701336c3ba74078b0863cffeb2c3c3b"
+        }
+      ],
+      "bytes": 95344,
+      "file_count": 16,
+      "last_activity_utc": "2026-09-17T10:32:46Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-8980b8910414443c9ce1ed7c84c9f63c",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-8980b8910414443c9ce1ed7c84c9f63c"
+        }
+      ],
+      "bytes": 45293,
+      "file_count": 10,
+      "last_activity_utc": "2026-09-17T10:40:02Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-8cdfcc61323f45c891015937d73144b6",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-8cdfcc61323f45c891015937d73144b6"
+        }
+      ],
+      "bytes": 618553,
+      "file_count": 142,
+      "last_activity_utc": "2026-09-17T10:41:44Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-a7c8b22c4c784e8cae93bb992ff2422b",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-a7c8b22c4c784e8cae93bb992ff2422b"
+        }
+      ],
+      "bytes": 1546803,
+      "file_count": 110,
+      "last_activity_utc": "2026-09-17T08:16:08Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-c002fe5d4ae04f038d42a64f21daaf03",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-c002fe5d4ae04f038d42a64f21daaf03"
+        }
+      ],
+      "bytes": 115348,
+      "file_count": 21,
+      "last_activity_utc": "2026-09-17T10:41:52Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-caf6bf1d57224abaab5d6a00928e57c4",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-caf6bf1d57224abaab5d6a00928e57c4"
+        }
+      ],
+      "bytes": 45466,
+      "file_count": 11,
+      "last_activity_utc": "2026-09-17T10:41:30Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-cb82b52d5d12469cad53291ef71cf13a",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-cb82b52d5d12469cad53291ef71cf13a"
+        }
+      ],
+      "bytes": 1230880,
+      "file_count": 55,
+      "last_activity_utc": "2026-09-17T08:02:20Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-connect-check",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-connect-check"
+        }
+      ],
+      "bytes": 0,
+      "file_count": 0,
+      "last_activity_utc": "2026-09-17T07:07:00.150000Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-e3f5917515e342c58d7ca8bb6aae1079",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-e3f5917515e342c58d7ca8bb6aae1079"
+        }
+      ],
+      "bytes": 618553,
+      "file_count": 142,
+      "last_activity_utc": "2026-09-17T10:39:32Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-e8a80e6ef3c14b7c9f9c47bcf379f2fc",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-e8a80e6ef3c14b7c9f9c47bcf379f2fc"
+        }
+      ],
+      "bytes": 160814,
+      "file_count": 32,
+      "last_activity_utc": "2026-09-17T10:44:02Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-ed7f540f433543cdbfedea00a2a9ca69",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-ed7f540f433543cdbfedea00a2a9ca69"
+        }
+      ],
+      "bytes": 76471,
+      "file_count": 14,
+      "last_activity_utc": "2026-09-17T06:54:52Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-green-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-green-20260917"
+        }
+      ],
+      "bytes": 12400,
+      "file_count": 2,
+      "last_activity_utc": "2026-09-17T08:29:50Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-red-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-red-20260917"
+        }
+      ],
+      "bytes": 0,
+      "file_count": 0,
+      "last_activity_utc": "2026-09-17T08:27:52.660000Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-red2-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-evidence-red2-20260917"
+        }
+      ],
+      "bytes": 12398,
+      "file_count": 2,
+      "last_activity_utc": "2026-09-17T08:28:22Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-f4b0e0dcf5fe4ff1bf0d84e0255a39c7",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-f4b0e0dcf5fe4ff1bf0d84e0255a39c7"
+        }
+      ],
+      "bytes": 263575,
+      "file_count": 52,
+      "last_activity_utc": "2026-09-17T10:37:36Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-f604499b4f404f1294245f18ad4fa596",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-f604499b4f404f1294245f18ad4fa596"
+        }
+      ],
+      "bytes": 461166,
+      "file_count": 114,
+      "last_activity_utc": "2026-09-17T10:40:46Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-logs-580127aeb56245b68fb561aabc7568c6",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-logs-580127aeb56245b68fb561aabc7568c6"
+        }
+      ],
+      "bytes": 280687,
+      "file_count": 46,
+      "last_activity_utc": "2026-09-17T06:53:46Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-paths-6a7aaa2a40954c9a8c6131ada33bf7dd",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-paths-6a7aaa2a40954c9a8c6131ada33bf7dd"
+        }
+      ],
+      "bytes": 76615,
+      "file_count": 14,
+      "last_activity_utc": "2026-09-17T06:54:22Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-rag-green-1",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-rag-green-1"
+        }
+      ],
+      "bytes": 401408,
+      "file_count": 5,
+      "last_activity_utc": "2026-09-17T07:09:44Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-rag-green-2",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-rag-green-2"
+        }
+      ],
+      "bytes": 401408,
+      "file_count": 5,
+      "last_activity_utc": "2026-09-17T07:10:04Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-final",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-final"
+        }
+      ],
+      "bytes": 111834,
+      "file_count": 18,
+      "last_activity_utc": "2026-09-17T07:19:52Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-1",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-1"
+        }
+      ],
+      "bytes": 512000,
+      "file_count": 7,
+      "last_activity_utc": "2026-09-17T07:17:22Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-2",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-2"
+        }
+      ],
+      "bytes": 77824,
+      "file_count": 1,
+      "last_activity_utc": "2026-09-17T07:17:54Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-3",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-3"
+        }
+      ],
+      "bytes": 512000,
+      "file_count": 7,
+      "last_activity_utc": "2026-09-17T07:18:06Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-4",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-retrieval-green-4"
+        }
+      ],
+      "bytes": 512000,
+      "file_count": 7,
+      "last_activity_utc": "2026-09-17T07:19:06Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-baseline-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-baseline-20260917"
+        }
+      ],
+      "bytes": 0,
+      "file_count": 0,
+      "last_activity_utc": "2026-09-17T10:27:44.180000Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-baseline-20260917-b",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-baseline-20260917-b"
+        }
+      ],
+      "bytes": 168062,
+      "file_count": 47,
+      "last_activity_utc": "2026-09-17T10:28:54Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-20260917"
+        }
+      ],
+      "bytes": 200363,
+      "file_count": 56,
+      "last_activity_utc": "2026-09-17T10:36:32Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-format-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-format-20260917"
+        }
+      ],
+      "bytes": 200615,
+      "file_count": 56,
+      "last_activity_utc": "2026-09-17T10:37:34Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-full-green-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-full-green-20260917"
+        }
+      ],
+      "bytes": 200227,
+      "file_count": 55,
+      "last_activity_utc": "2026-09-17T10:35:02Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-green-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-green-20260917"
+        }
+      ],
+      "bytes": 12607,
+      "file_count": 4,
+      "last_activity_utc": "2026-09-17T10:31:24Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-manual-load-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-manual-load-20260917"
+        }
+      ],
+      "bytes": 12936,
+      "file_count": 5,
+      "last_activity_utc": "2026-09-17T10:36:00Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-pilot-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-pilot-20260917"
+        }
+      ],
+      "bytes": 24659,
+      "file_count": 6,
+      "last_activity_utc": "2026-09-17T10:33:10Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-pilot-green-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-pilot-green-20260917"
+        }
+      ],
+      "bytes": 36747,
+      "file_count": 8,
+      "last_activity_utc": "2026-09-17T10:34:28Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-red-20260917",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-red-20260917"
+        }
+      ],
+      "bytes": 12603,
+      "file_count": 4,
+      "last_activity_utc": "2026-09-17T10:30:28Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-1",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-1"
+        }
+      ],
+      "bytes": 0,
+      "file_count": 0,
+      "last_activity_utc": "2026-09-17T07:05:50.680000Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-2",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-2"
+        }
+      ],
+      "bytes": 131072,
+      "file_count": 2,
+      "last_activity_utc": "2026-09-17T07:09:12Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-3",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-green-3"
+        }
+      ],
+      "bytes": 131072,
+      "file_count": 2,
+      "last_activity_utc": "2026-09-17T07:09:30Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-race-red",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-race-red"
+        }
+      ],
+      "bytes": 221376,
+      "file_count": 8,
+      "last_activity_utc": "2026-09-17T07:52:36Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-red",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-red"
+        }
+      ],
+      "bytes": 0,
+      "file_count": 0,
+      "last_activity_utc": "2026-09-17T06:55:49.810000Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-review",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-review"
+        }
+      ],
+      "bytes": 381480,
+      "file_count": 25,
+      "last_activity_utc": "2026-09-17T08:07:44Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-scope-red",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-scope-red"
+        }
+      ],
+      "bytes": 110886,
+      "file_count": 12,
+      "last_activity_utc": "2026-09-17T08:12:40Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-scope-review",
+      "scope": "worktree_runtime_test",
+      "status": "CANDIDATE_AFTER_FINAL_TESTS",
+      "active_or_protected": false,
+      "reason": "Confirmed current-round test artifact; do not delete while tests are active.",
+      "evidence": [
+        {
+          "kind": "pytest_runtime_path",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-scope-review"
+        }
+      ],
+      "bytes": 86224,
+      "file_count": 9,
+      "last_activity_utc": "2026-09-17T08:24:36Z",
+      "measurement": "bounded_metadata_only",
+      "complete": true
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826",
+      "scope": "E_main_old_evaluation",
+      "status": "NOT_PRESENT_AT_INVENTORY",
+      "active_or_protected": true,
+      "reason": "The previously audited evaluation path is absent at this inventory point; no deletion action was taken.",
+      "evidence": [
+        {
+          "kind": "prior_provenance_audit",
+          "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\migration-inventory\\evidence_audit.json"
+        }
+      ],
+      "bytes": null,
+      "file_count": null,
+      "last_activity_utc": null,
+      "measurement": "path_existence_only"
+    }
+  ]
+}

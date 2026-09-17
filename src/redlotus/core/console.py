@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from redlotus.tools.interaction import iter_reference_spans, quote_reference_path, user_message_from_cli_input, load_file_refs
 from redlotus.core.session import current_workspace
 from redlotus.core.cli_commands import WorkspaceSnapshot, list_workspace_snapshots, read_saved_model_messages_file
@@ -365,6 +366,41 @@ class SnapshotSelection:
     snapshot: WorkspaceSnapshot | None = None
 
 
+@dataclass(frozen=True)
+class VisibleConversationEntry:
+    role: Literal["用户", "助手"]
+    text: str
+
+
+def visible_conversation_entries(messages) -> list[VisibleConversationEntry]:
+    """Keep only human-readable turns when replaying a restored conversation."""
+    entries = []
+    for message in messages:
+        if isinstance(message, ModelRequest):
+            parts = []
+            for part in message.parts:
+                if not isinstance(part, UserPromptPart):
+                    continue
+                content = part.content
+                if isinstance(content, str):
+                    parts.append(content)
+                elif isinstance(content, (list, tuple)) and content:
+                    # UserMessage.to_prompt() keeps the original request first;
+                    # later entries are references, media, or runtime metadata.
+                    if isinstance(content[0], str):
+                        parts.append(content[0])
+            role = "用户"
+        elif isinstance(message, ModelResponse):
+            parts = [part.content for part in message.parts if isinstance(part, TextPart)]
+            role = "助手"
+        else:
+            continue
+        text = "\n".join(part for part in parts if part.strip())
+        if text:
+            entries.append(VisibleConversationEntry(role, text))
+    return entries
+
+
 def format_snapshot_choices(snapshots: list[WorkspaceSnapshot]) -> str:
     return "\n".join(
         [
@@ -400,7 +436,11 @@ async def legacy_pick_snapshot(
         if index < 1 or index > len(snapshots):
             print_error(f"序号超出范围（1-{len(snapshots)}）。")
             continue
-        return SnapshotSelection(SnapshotAction.RESTORE, snapshots[index - 1])
+        snapshot = snapshots[index - 1]
+        if not snapshot.is_loadable:
+            print_error("该会话条目无法加载，请选择其他会话或新建会话。")
+            continue
+        return SnapshotSelection(SnapshotAction.RESTORE, snapshot)
 
 
 @dataclass
@@ -442,6 +482,9 @@ class AgentCliController:
             Callable[[list[WorkspaceSnapshot]], Awaitable[SnapshotSelection]]
             | None
         ) = None
+        self._snapshot_loaded_callback: (
+            Callable[[WorkspaceSnapshot, list], None] | None
+        ) = None
         self._legacy_repl: InteractiveRepl | None = None
         self.config_prompt = None
         self.last_rejected_input: str | None = None
@@ -457,6 +500,12 @@ class AgentCliController:
     ) -> None:
         self._snapshot_picker = picker
 
+    def set_snapshot_loaded_callback(
+        self,
+        callback: Callable[[WorkspaceSnapshot, list], None] | None,
+    ) -> None:
+        self._snapshot_loaded_callback = callback
+
     async def _pick_snapshot(
         self,
         snapshots: list[WorkspaceSnapshot],
@@ -468,6 +517,16 @@ class AgentCliController:
         return SnapshotSelection(SnapshotAction.CANCEL)
 
     async def enter_current_workspace(self, *, state=None, force_picker=False):
+        """Lock admission throughout discovery, selection and restoring the chosen session."""
+        if self.is_transitioning:
+            return None
+        self._ready.clear()
+        try:
+            return await self._choose_current_workspace(state=state, force_picker=force_picker)
+        finally:
+            self._ready.set()
+
+    async def _choose_current_workspace(self, *, state=None, force_picker=False):
         generation = self.system._session.generation
         state = state or getattr(self, "_active_session_state", None)
         if state is None:
@@ -475,6 +534,7 @@ class AgentCliController:
         snapshots = await asyncio.to_thread(
             list_workspace_snapshots,
             root=session_data_dir(self.system.workspace),
+            include_unloadable=True,
         )
         if not snapshots:
             if not force_picker:
@@ -490,16 +550,20 @@ class AgentCliController:
             state.is_first_input = True
             return False
         chosen = selection.snapshot
-        messages = meta = None
+        if chosen is None or not chosen.is_loadable:
+            print_warning("所选会话无法加载，请选择其他会话或新建会话。")
+            return None
+        messages = meta = restored_messages = None
         try:
             async def prepare():
                 nonlocal messages, meta
                 messages, meta = await asyncio.to_thread(
-                    read_saved_model_messages_file, chosen.path
+                    read_saved_model_messages_file, chosen.path, workspace=self.system.workspace
                 )
                 return generation == self.system._session.generation
 
             async def restore():
+                nonlocal restored_messages
                 repaired = await self.system.bind_loaded_snapshot(
                     chosen.agent, chosen.path, meta
                 )
@@ -508,9 +572,8 @@ class AgentCliController:
                     state.history
                     if chosen.agent == "coordinator"
                     else self.system._manager_history
-                ).set_messages(
-                    repaired if repaired is not None else messages
-                )
+                ).set_messages(repaired if repaired is not None else messages)
+                restored_messages = repaired if repaired is not None else messages
                 state.is_first_input = False
                 if task_name := meta.get("task_name"):
                     self.system._toolkit.set_task_directory(task_name)
@@ -522,6 +585,11 @@ class AgentCliController:
                 state.history, prepare=prepare, restore=restore
             ):
                 return None
+            if self._snapshot_loaded_callback is not None:
+                try:
+                    self._snapshot_loaded_callback(chosen, restored_messages)
+                except Exception as exc:
+                    print_warning(f"已恢复会话，但无法显示历史对话: {exc}")
             print_success(f"已加载 {chosen.agent} 对话（{len(messages)} 条模型消息）。")
             return True
         except (OSError, ValueError) as exc:

@@ -7,12 +7,14 @@ import asyncio
 from copy import deepcopy
 from dataclasses import asdict
 import hashlib
+import httpx
 import json
 import os
 from pathlib import Path
 import sys
 import threading
 import time
+import traceback
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,29 +57,60 @@ def delivery_evidence(trace, commands, turn_id, script_name):
     return dict(worker_ids=sorted(workers), command_receipts=receipts)
 
 
+def _lancedb_evaluation_dir(root: Path) -> Path:
+    """Keep native Lance files on the operator volume without sharing live data."""
+    stable_root = root.expanduser().resolve()
+    root_hash = hashlib.sha256(
+        str(stable_root).casefold().encode("utf-8")
+    ).hexdigest()[:16]
+    return (
+        Path.home()
+        / ".redlotus"
+        / "evaluation"
+        / "storage-final-live"
+        / root_hash
+    )
+
+
 def configure(args):
     """Change storage destinations only; never overwrite the source configuration."""
     config = json.loads(args.config.read_text(encoding="utf-8"))
     baseline = deepcopy(config)
-    memory = Path.home() / ".redlotus" / "e" / hashlib.sha256(str(args.root).encode()).hexdigest()[:8]
-    runtime = args.root / "runtime"
-    for directory in (memory, runtime):
+    memory = args.root / "global-state"
+    runtime = args.root / "WorkDatabase" / "runtime"
+    lancedb = _lancedb_evaluation_dir(args.root)
+    # Settings always include user_config_dir()/config.json as their lowest
+    # precedence source.  Snapshot that source into this isolated run before
+    # redirecting discovery, so a live acceptance keeps the same effective
+    # model/RAG settings without creating a C: lock or modifying user data.
+    original_config_dir = Path(
+        os.environ.get("REDLOTUS_CONFIG_DIR") or Path.home() / ".redlotus"
+    ).expanduser()
+    original_global = original_config_dir / "config.json"
+    isolated_config_dir = memory / "config-source"
+    for directory in (memory, runtime, isolated_config_dir, lancedb):
         directory.mkdir(parents=True, exist_ok=True)
+    if original_global.is_file():
+        (isolated_config_dir / "config.json").write_bytes(original_global.read_bytes())
     config.setdefault("storage", {}).update(
-        state_dir=str(memory), sessions_dir=str(args.root / "sessions"),
-        references_dir=str(args.root / "references"), runtime_dir=str(runtime),
+        state_dir=str(memory), project_dir=".redlotus",
+        sessions_dir=".redlotus/sessions", project_logs_dir=".redlotus/logs",
+        references_dir="WorkDatabase/references", runtime_dir="WorkDatabase/runtime",
     )
-    config["short_term_memory"]["db_path"] = str(memory / "rag")
     selected = memory / "config.json"
     write_json(selected, config)
-    for section in ("models", "model_presets", "gateways", "RAG_models", "context"):
-        assert config.get(section) == baseline.get(section), section
+    assert {
+        section: value for section, value in config.items() if section != "storage"
+    } == {
+        section: value for section, value in baseline.items() if section != "storage"
+    }
     os.environ.update(
         REDLOTUS_CONFIG_FILE=str(selected), REDLOTUS_DATA_DIR=str(memory),
-        RAG_DB_PATH=str(memory / "rag"),
+        RAG_DB_PATH=str(lancedb), TEMP=str(runtime), TMP=str(runtime),
     )
     if getattr(args, "dotenv", None):
         os.environ["REDLOTUS_DOTENV_FILE"] = str(args.dotenv)
+    os.environ["REDLOTUS_CONFIG_DIR"] = str(isolated_config_dir)
     return memory, hashlib.sha256(args.config.read_bytes()).hexdigest()
 
 
@@ -126,8 +159,10 @@ class ApplicationDriver:
         return result
 
     async def restore(self, path):
+        from redlotus.core.console import SnapshotAction, SnapshotSelection
+
         async def choose(snapshots):
-            return next(row for row in snapshots if row.path == path)
+            return SnapshotSelection(SnapshotAction.RESTORE, next(row for row in snapshots if row.path == path))
 
         controller = self.system._cli_controller
         controller.set_snapshot_picker(choose)
@@ -138,11 +173,82 @@ class ApplicationDriver:
         await self.system.shutdown()
 
 
+class TimedResponseStream(httpx.AsyncByteStream):
+    """Pass through model bytes while recording timing only, never response content.
+
+    ``stream_wait_seconds`` is the sum of waits for the upstream iterator's
+    ``__anext__`` calls.  It excludes time a consumer keeps a yielded chunk, so
+    neither it nor request-to-EOF duration is a pure service-latency measure.
+    """
+
+    def __init__(self, stream, row: dict, elapsed, lock) -> None:
+        self.stream, self.row, self.elapsed, self.lock = stream, row, elapsed, lock
+        self._finished = False
+        self._first_byte = False
+
+    def _request_seconds(self) -> float:
+        return max(0.0, self.elapsed() - float(self.row["at"]))
+
+    def _add_wait(self, started: float) -> None:
+        with self.lock:
+            self.row["stream_wait_seconds"] = self.row.get("stream_wait_seconds", 0.0) + max(
+                0.0, self.elapsed() - started
+            )
+
+    def _finish(self, status: str, error: BaseException | None = None) -> None:
+        with self.lock:
+            if self._finished:
+                return
+            self._finished = True
+            seconds = self._request_seconds()
+            self.row["stream_status"] = status
+            if status == "eof":
+                self.row["stream_eof_seconds"] = seconds
+            elif status == "closed_early":
+                self.row["stream_closed_early_seconds"] = seconds
+            else:
+                self.row["stream_error_seconds"] = seconds
+                self.row["stream_error_type"] = type(error).__name__ if error else "unknown"
+
+    async def __aiter__(self):
+        iterator = self.stream.__aiter__()
+        try:
+            while True:
+                started = self.elapsed()
+                try:
+                    chunk = await iterator.__anext__()
+                except StopAsyncIteration:
+                    self._add_wait(started)
+                    self._finish("eof")
+                    return
+                except BaseException as exc:
+                    self._add_wait(started)
+                    self._finish("error", exc)
+                    raise
+                self._add_wait(started)
+                if chunk and not self._first_byte:
+                    self._first_byte = True
+                    with self.lock:
+                        self.row["stream_first_byte_seconds"] = self._request_seconds()
+                yield chunk
+        finally:
+            self._finish("closed_early")
+
+    async def aclose(self) -> None:
+        try:
+            await self.stream.aclose()
+        except BaseException as exc:
+            self._finish("close_error", exc)
+            raise
+        self._finish("closed_early")
+
+
 class Evidence:
     """Observe real requests and owned process resources without replacing responses."""
 
     def __init__(self, root):
         self.root, self.requests, self.resources, self.failures = root, [], [], []
+        self.exceptions = []
         self.rag_calls = []
         self.commands = []
         self.warnings, self.turns, self.sessions = [], [], []
@@ -178,6 +284,12 @@ class Evidence:
                 row = res.request.extensions["acceptance_row"]
                 with self.lock:
                     row.update(status_code=res.status_code, headers_seconds=time.monotonic() - self.started - row["at"])
+                res.stream = TimedResponseStream(
+                    res.stream,
+                    row,
+                    elapsed=lambda: time.monotonic() - self.started,
+                    lock=self.lock,
+                )
 
             value.event_hooks["request"].append(request)
             value.event_hooks["response"].append(response)
@@ -229,7 +341,20 @@ class Evidence:
                 warnings=self.warnings, resources=self.resources, turns=self.turns, sessions=self.sessions,
                 rag_calls=self.rag_calls,
                 commands=self.commands,
+                exceptions=self.exceptions,
             ))
+
+    def record_exception(self, exc):
+        """Keep source locations only; never persist exception values or locals."""
+        frames = []
+        for frame in traceback.extract_tb(exc.__traceback__):
+            path = Path(frame.filename)
+            try:
+                name = str(path.resolve().relative_to(ROOT))
+            except ValueError:
+                name = path.name
+            frames.append(dict(file=name, line=frame.lineno, function=frame.name))
+        self.exceptions.append(dict(type=type(exc).__name__, frames=frames))
 
     def timeout(self):
         self.timed_out = True
@@ -410,6 +535,7 @@ async def run(args, evidence):
     try:
         await live(args, evidence)
     except Exception as exc:
+        evidence.record_exception(exc)
         evidence.failures.append(f"{type(exc).__name__}: {exc}")
         raise
     finally:

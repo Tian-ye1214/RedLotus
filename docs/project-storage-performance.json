@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "recorded_on": "2026-09-17",
+  "scope": "storage-only benchmark evidence; not a live model, embedding, rerank, or end-to-end Agent acceptance result",
+  "decision": {
+    "current_implementation_meets_this_change_gate": false,
+    "action": "do_not_switch_the_formal_memory_store_from_LanceDB_to_SQLite",
+    "reason": "The fair 100000-record concurrent run had real write/read overlap, but SQLite was slower than LanceDB for both required latency gates."
+  },
+  "configuration": {
+    "source_config_path": "src/redlotus/config.json",
+    "source_config_sha256": "9926f94a4a9384d787d7c2f6fce90a24359efcee343280445ba7ebf139da2565",
+    "source_config_memory_database_journal_mode": "DELETE",
+    "concurrency_diagnostic_journal_mode": "WAL",
+    "sqlite_mode": "binary coarse vec0 plus full-float cosine rerank",
+    "candidate_multiplier": 8,
+    "candidate_count_at_top_k_30": 240,
+    "mmap_size_bytes": 1073741824,
+    "vector_chunk_size": 4096,
+    "distance_metric": "cosine"
+  },
+  "environment": {
+    "os": "Windows 11 Pro 10.0.26200",
+    "cpu": "13th Gen Intel Core i9-13900HX",
+    "physical_cores": 24,
+    "logical_cpus": 32,
+    "memory_bytes": 34124718080,
+    "python": "3.12.13",
+    "sqlite_vec": "0.1.9",
+    "lancedb": "0.30.2",
+    "psutil": "7.2.2"
+  },
+  "dataset": {
+    "seed": 20260917,
+    "dimensions": 1024,
+    "queries_per_run": 64,
+    "top_k": 30,
+    "datasets": {
+      "1000": "97e8e2255eb1cba202e53f41f4d794e150fe2a99dddf8c1669c4d12801e67dfd",
+      "10000": "bce3ca9ccfc34caeca337bad4aacdb55efcb658add5333424cf6027c78bbc88c",
+      "100000": "4b2e02718adc8ba326433ea24dd007deee04b7bb4a0dbba79ef21c5303b7a526"
+    }
+  },
+  "evidence": {
+    "query_only": {
+      "path": "D:\\RedLotusBenchmark\\binary8-chunk4096-fair-v3\\comparison.json",
+      "sha256": "8e3bc63dd78879f2c38f311f9adcecf2e6d80f62b2b324661ee97c30ff3e935e",
+      "script_sha256": "b63289c0e9c1d17486f9c516f59e3f892633b5b6dd853296346101c04d4467e8",
+      "projection": "equal ten-column rows including float32 vectors",
+      "repetitions": 5,
+      "all_sizes_passed": true
+    },
+    "fair_concurrency": {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-fair-wal-v1\\cross-backend-report.json",
+      "sha256": "9c6f72b529879cd2cb9a615b189fec82a8ad98dd93708abb00312d9ec316d7c5",
+      "projection": "equal record_id, text, distance; embeddings not materialized",
+      "repetitions": 5,
+      "write_policy": "one unchanged complete-record upsert per second maximum for both backends",
+      "all_size_batches_within_600_seconds": true
+    },
+    "phase_profile": {
+      "path": "D:\\RedLotusBenchmark\\concurrency-phase-100k-wal-v2\\phase-profile.json",
+      "sha256": "fc98314ef8c655426db35ea2f0d24af3ddf1ee8e65e7c7feb0c83ea26afd1f35",
+      "candidate_sqlite_db_sha256": "39f3668ef8e4614b11faab5d2b2d8d4ae3c33815c9d81f5f512b8c7d03f50837",
+      "repetitions": 5
+    },
+    "e_volume_wal_recovery": {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\sqlite-concurrency-wal\\concurrency-report.json",
+      "sha256": "5ae35cda6091f110ea4ca9d86570120536981e42fb8a71d9f55a097f6489f352"
+    },
+    "reproduction_script": {
+      "path": "scripts/sqlite_concurrency_acceptance.py",
+      "sha256": "32b8bc92cc71c3d0ebf06fae6115c50ee9205a8bd7d25132d8b477fd8f665e48"
+    }
+  },
+  "query_only_results": [
+    {
+      "count": 1000,
+      "passed": true,
+      "sqlite": { "p50_ms": 2.772, "p95_ms": 3.412, "cpu_seconds": 0.188, "peak_rss_bytes": 48914432, "recall_at_k": 0.894792 },
+      "lance": { "p50_ms": 38.798, "p95_ms": 47.268, "cpu_seconds": 2.281, "peak_rss_bytes": 152662016, "recall_at_k": 0.676562 }
+    },
+    {
+      "count": 10000,
+      "passed": true,
+      "sqlite": { "p50_ms": 4.297, "p95_ms": 5.279, "cpu_seconds": 0.266, "peak_rss_bytes": 83042304, "recall_at_k": 1.0 },
+      "lance": { "p50_ms": 43.899, "p95_ms": 53.211, "cpu_seconds": 2.781, "peak_rss_bytes": 155926528, "recall_at_k": 0.645312 }
+    },
+    {
+      "count": 100000,
+      "passed": true,
+      "sqlite": { "p50_ms": 20.376, "p95_ms": 21.781, "cpu_seconds": 1.297, "peak_rss_bytes": 150331392, "recall_at_k": 0.735417 },
+      "lance": { "p50_ms": 46.186, "p95_ms": 59.259, "cpu_seconds": 6.531, "peak_rss_bytes": 173813760, "recall_at_k": 0.366146 }
+    }
+  ],
+  "fair_concurrency_results": [
+    {
+      "count": 1000,
+      "batch_seconds": 65.891,
+      "status": "passed",
+      "write_read_overlap": { "sqlite": true, "lance": true },
+      "strict_superiority": true
+    },
+    {
+      "count": 10000,
+      "batch_seconds": 83.641,
+      "status": "not_accepted",
+      "reason": "SQLite fixed-rate writer did not overlap the 64-query reader; no cross-backend superiority conclusion is valid."
+    },
+    {
+      "count": 100000,
+      "batch_seconds": 184.797,
+      "status": "failed",
+      "write_read_overlap": { "sqlite": true, "lance": true },
+      "sqlite": { "p50_ms": 42.886, "p95_ms": 69.502, "cpu_seconds": 2.406, "peak_rss_bytes": 297590784, "recall_at_k": 0.735417 },
+      "lance": { "p50_ms": 30.889, "p95_ms": 34.957, "cpu_seconds": 5.797, "peak_rss_bytes": 668667904, "recall_at_k": 0.366146 },
+      "failed_gates": ["p50_ms", "p95_ms"],
+      "passed_gates": ["cpu_seconds", "peak_rss_bytes", "every_query_recall_not_lower"]
+    }
+  ],
+  "phase_profile_100000": {
+    "semantically_equivalent_to_single_statement": true,
+    "order_exact": false,
+    "order_difference_reason": "one boundary equal-distance tie selected a different ID; ranked distances were equivalent",
+    "page_size": 4096,
+    "payload_overflow_pages": 100000,
+    "candidate_execute_p50_ms": 38.573,
+    "payload_rerank_and_projection_p50_ms": 2.405,
+    "payload_fraction_p50": 0.057511,
+    "reference_end_to_end_p50_ms": 40.017,
+    "payload_page_size_hypothesis_supported": false
+  },
+  "e_volume_wal_recovery": {
+    "diagnostic_only": true,
+    "passed": true,
+    "concurrent_runs": 3,
+    "writer_operations": [52, 44, 34],
+    "all_writes_overlapped_reads": true,
+    "all_result_ids_unchanged": true,
+    "all_recall_unchanged": true,
+    "interrupted_uncommitted_writer": {
+      "sentinel_rows_after_reopen": 0,
+      "integrity_check": "ok",
+      "vector_count": 1000,
+      "payload_count": 1000,
+      "exclusive_lock_released": true,
+      "wal_and_shm_removed_after_reopen": true
+    }
+  },
+  "limitations": [
+    "The successful query-only measurement did not include concurrent writes and therefore does not authorize a store migration.",
+    "The 10000-record fixed-rate concurrency run is retained as a failed overlap check, not as a performance comparison.",
+    "WAL was measured only on copied fixtures. The checked-in application configuration remains DELETE and this report makes no configuration change.",
+    "No page-size variant was tested because the phase profile did not show payload/rerank as the primary cost.",
+    "Raw reports remain outside the repository so vector payloads and full query traces are not committed."
+  ]
+}

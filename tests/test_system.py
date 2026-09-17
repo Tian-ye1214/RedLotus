@@ -1,6 +1,9 @@
 import asyncio
+import errno
 import json
+import os
 import threading
+import time
 import pytest
 
 from pydantic_ai import Agent
@@ -8,8 +11,9 @@ from pydantic_ai.models.function import FunctionModel, DeltaToolCall
 
 from redlotus.tools.interaction import UserMessage
 from redlotus.core.system import AgentSystem
-from redlotus.core.agents import WorkspaceContext
+from redlotus.core.agents import WorkspaceContext, active_workspace, workspace_context
 from redlotus.core.history import ChatHistory
+from redlotus.core import system as system_module
 from redlotus.memory.records import LongTermMemory
 from redlotus.tools.interaction import TaskManager
 from redlotus.tools.interaction import TaskStatus
@@ -82,6 +86,55 @@ async def test_system_serializes_turns_freezes_session_memory_and_records_raw(
     await system.run_agent_system(UserMessage(text="新会话"), history)
     assert len(injections) == 2 and "偏好中文" in injections[1]
     await system.shutdown()
+
+
+async def test_durable_write_cleans_only_the_system_workspace(tmp_path):
+    from redlotus.core import config
+    from redlotus.core import session as session_module
+    from redlotus.core.session import SessionFile
+
+    first_root, second_root = tmp_path / "first", tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    first = WorkspaceContext.from_path(first_root)
+    second = WorkspaceContext.from_path(second_root)
+
+    def session(workspace, session_id):
+        return SessionFile.create(
+            config.session_data_dir(workspace),
+            workspace.project_id,
+            session_id=session_id,
+            workspace=workspace,
+        )
+
+    current = session(first, "current")
+    first_old = session(first, "first-old")
+    second_old = session(second, "second-old")
+    old = time.time() - 8 * 24 * 60 * 60
+    for stored in (first_old, second_old):
+        os.utime(stored.path, (old, old))
+    system = AgentSystem(workspace=first)
+    observed, attempts = [], []
+
+    def write():
+        observed.append(active_workspace())
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise OSError(errno.ENOSPC, "disk full")
+
+    try:
+        with workspace_context(second):
+            await system._durable_write(
+                lambda: session_module._write_with_cleanup(current.path, write)
+            )
+            assert active_workspace() == second
+        assert active_workspace() is None
+        assert attempts == [True, True]
+        assert observed == [first, first]
+        assert not first_old.path.exists()
+        assert second_old.path.exists()
+    finally:
+        await system.shutdown()
 
 
 async def test_missing_current_reply_is_recorded_as_a_failed_turn(tmp_path, monkeypatch):
@@ -378,6 +431,69 @@ async def test_project_switch_cancels_current_perception_without_producing(tmp_p
         assert previous.workspace.root == tmp_path.resolve()
         assert system._memory._perception_factory is previous._perception_factory
         assert system._memory.session is None
+    finally:
+        await system.shutdown()
+
+
+async def test_project_switch_prepares_logs_before_reset_and_activates_after(
+    tmp_path, monkeypatch
+):
+    system = configured_system(tmp_path, monkeypatch)
+    await system.bind_session("original")
+    target = tmp_path / "next-project"
+    target.mkdir()
+    target_log_dir = target / ".redlotus/logs"
+    events = []
+    original_reset = system.reset_session
+
+    def prepare(workspace):
+        events.append(("prepare", workspace.root))
+        return target_log_dir
+
+    async def reset(*args, **kwargs):
+        events.append(("reset", system.session_key))
+        return await original_reset(*args, **kwargs)
+
+    def activate(log_dir):
+        events.append(("activate", log_dir))
+
+    monkeypatch.setattr(system_module.logger, "prepare_log_dir", prepare)
+    monkeypatch.setattr(system_module.logger, "activate_log_dir", activate)
+    monkeypatch.setattr(system, "reset_session", reset)
+    try:
+        await system.switch_workspace(target)
+        assert events == [
+            ("prepare", target.resolve()),
+            ("reset", "original"),
+            ("activate", target_log_dir),
+        ]
+    finally:
+        await system.shutdown()
+
+
+async def test_failed_log_preparation_keeps_original_session_and_log_route(
+    tmp_path, monkeypatch
+):
+    system = configured_system(tmp_path, monkeypatch)
+    await system.bind_session("original")
+    target = tmp_path / "target"
+    target.mkdir()
+    original_workspace = system.workspace
+    activated = []
+
+    def fail_prepare(_workspace):
+        raise OSError("log directory unavailable")
+
+    monkeypatch.setattr(system_module.logger, "prepare_log_dir", fail_prepare)
+    monkeypatch.setattr(
+        system_module.logger, "activate_log_dir", lambda log_dir: activated.append(log_dir)
+    )
+    try:
+        with pytest.raises(OSError, match="log directory unavailable"):
+            await system.switch_workspace(target)
+        assert system.workspace is original_workspace
+        assert system.session_key == "original"
+        assert activated == []
     finally:
         await system.shutdown()
 

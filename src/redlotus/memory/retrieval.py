@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sys
 from pathlib import Path
 from redlotus.core import config as logger, config as app_config
 from redlotus.core.config import (
@@ -25,23 +24,6 @@ from lancedb.index import IvfPq
 import json
 
 
-def _fit_windows_path(path: Path, table_name: str) -> str:
-    # Lance adds table, data/index directories and generated filenames. Its Windows
-    # writer currently drops the extended-path prefix before committing a file.
-    if (
-        not table_name
-        or sys.platform != "win32"
-        or len(str(path)) + len(table_name) + 110 < 248
-    ):
-        return str(path)
-    digest = hashlib.sha256(str(path).casefold().encode()).hexdigest()[:16]
-    fallback = user_data_dir() / "rag_lancedb" / digest
-    logger.info(
-        "LanceDB: 路径过深，向量索引改存 %s；原始记忆与配置保持原位。", fallback
-    )
-    return str(fallback)
-
-
 def resolve_lancedb_dir(configured_path: str, *, table_name: str = "") -> str:
     """Use the configured database path, with an explicit process override for tests."""
     p = Path(os.environ.get("RAG_DB_PATH") or configured_path).expanduser()
@@ -50,7 +32,7 @@ def resolve_lancedb_dir(configured_path: str, *, table_name: str = "") -> str:
     else:
         p = p.resolve()
 
-    return _fit_windows_path(p, table_name)
+    return str(p)
 
 
 _HTTP_KEY = "rag"
@@ -342,6 +324,17 @@ class RAG:
         return chunks or [""]
 
     async def upsert_records(self, records: list[dict]) -> int:
+        count = await self.write_records(await self.prepare_records(records))
+        try:
+            await self._db.ensure_vector_index()
+        except Exception as exc:
+            # Exact vector search remains available without an acceleration index.
+            self.last_error = f"Index acceleration unavailable: {exc}"
+            logger.warning(self.last_error)
+        return count
+
+    async def prepare_records(self, records: list[dict]) -> list[dict]:
+        """Embed complete record chunks without holding any database write lock."""
         rows = []
         for episode in records:
             if episode["project_id"] != self.project_id:
@@ -355,13 +348,7 @@ class RAG:
                     }
                 )
         if not rows:
-            return 0
-        record_ids = ",".join(
-            "'" + record["record_id"].replace("'", "''") + "'" for record in records
-        )
-        previous_ids = await self._db.keys(
-            "id", f"{self.where} AND record_id IN ({record_ids})"
-        )
+            return []
         vectors = await embed_texts(
             [row["text"] for row in rows], model=self.embedding_model
         )
@@ -369,6 +356,17 @@ class RAG:
             raise ValueError("Embedding count does not match the submitted chunks")
         for row, vector in zip(rows, vectors):
             row["vector"] = vector
+        return rows
+
+    async def write_records(self, rows: list[dict]) -> int:
+        """Commit prepared vectors; callers can validate authoritative versions first."""
+        if not rows:
+            return 0
+        if any(row["project_id"] != self.project_id for row in rows):
+            raise ValueError("Cannot index an episode from another project")
+        identities = {row["record_id"] for row in rows}
+        record_ids = ",".join("'" + identity.replace("'", "''") + "'" for identity in identities)
+        previous_ids = await self._db.keys("id", f"{self.where} AND record_id IN ({record_ids})")
         count = await self._db.upsert_vectors(rows)
         if count != len(rows):
             raise RuntimeError("The vector database did not confirm all chunk writes")
@@ -376,16 +374,10 @@ class RAG:
         if obsolete:
             ids = ",".join("'" + value.replace("'", "''") + "'" for value in obsolete)
             await self._db.delete_where(f"{self.where} AND id IN ({ids})")
-        try:
-            await self._db.ensure_vector_index()
-        except Exception as exc:
-            # Exact vector search remains available without an acceleration index.
-            self.last_error = f"Index acceleration unavailable: {exc}"
-            logger.warning(self.last_error)
-        return len(records)
+        return len(identities)
 
     async def retrieve(self, query: str) -> list[dict]:
-        if not query.strip():
+        if not query.strip() or not await self.row_count():
             return []
         vector = (
             await embed_texts(

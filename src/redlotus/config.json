@@ -166,11 +166,12 @@
     "max_command_timeout_seconds": 60
   },
   "storage": {
-    "state_dir": "C:\\Users\\Administrator\\.redlotus",
-    "sessions_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\sessions",
-    "references_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\references",
-    "compression_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\sessions\\compression",
-    "runtime_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\runtime",
+    "state_dir": "~/.redlotus",
+    "project_dir": ".redlotus",
+    "sessions_dir": ".redlotus/sessions",
+    "project_logs_dir": ".redlotus/logs",
+    "references_dir": "WorkDatabase/references",
+    "runtime_dir": "WorkDatabase/runtime",
     "cleanup": {
       "enabled": true,
       "session_retention_days": 7,
@@ -181,9 +182,12 @@
     "max_chars": 50
   },
   "execution": {
-    "output_encodings": ["utf-8-sig", "locale"],
+    "output_encodings": [
+      "utf-8-sig",
+      "locale"
+    ],
     "python_executable": "",
-    "environment_dir": "{runtime}/environments/{project_id}",
+    "environment_dir": "{runtime}/venv",
     "cache_dir": "{runtime}/cache",
     "inherit_env": [
       "PATH",
@@ -215,8 +219,13 @@
     ],
     "permissions": {
       "require_explicit_commands": true,
-      "argv_command_wrappers": ["asyncio.create_subprocess_exec"],
-      "javascript_modules": ["child_process", "node:child_process"],
+      "argv_command_wrappers": [
+        "asyncio.create_subprocess_exec"
+      ],
+      "javascript_modules": [
+        "child_process",
+        "node:child_process"
+      ],
       "javascript_command_wrappers": {
         "exec": "shell",
         "execSync": "shell",
@@ -298,9 +307,9 @@
       "npm_config_cache": "{cache}/{project_id}/npm",
       "UV_CACHE_DIR": "{cache}/{project_id}/uv",
       "XDG_CACHE_HOME": "{cache}/{project_id}/xdg",
-      "TEMP": "{cache}/{project_id}/tmp",
-      "TMP": "{cache}/{project_id}/tmp",
-      "TMPDIR": "{cache}/{project_id}/tmp",
+      "TEMP": "{runtime}/tmp",
+      "TMP": "{runtime}/tmp",
+      "TMPDIR": "{runtime}/tmp",
       "PYTHONNOUSERSITE": "1",
       "PYTHONUTF8": "1",
       "PIP_DISABLE_PIP_VERSION_CHECK": "1"
