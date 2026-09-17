@@ -200,9 +200,10 @@ class RedLotusTui(App[None]):
     #panel-view { display: none; height: 1fr; border: round $success; padding: 0 1; }
     .panel-chart-title { color: $text-muted; text-style: bold; margin-top: 1; }
     #panel-trend { height: 3; }
-    .panel-bar-row { height: 1; width: 1fr; }
-    .panel-bar-label { width: 12; }
+    .panel-bar-row { height: auto; min-height: 1; width: 1fr; }
+    .panel-bar-label { width: 22; }
     .panel-bar-row ProgressBar { width: 1fr; }
+    .panel-token-value { width: 38; height: auto; padding-left: 1; }
     #panel-task-progress { width: 1fr; }
     #panel-task-counts { height: 1; }
     #context-usage { display: none; height: 1; padding: 0 1; color: $text-muted; }
@@ -255,19 +256,26 @@ class RedLotusTui(App[None]):
             yield OptionList(id="review-view")
             with VerticalScroll(id="panel-view"):
                 yield Static("", id="panel-content")
-                yield Label("Token 趋势（按会话 旧→新）", classes="panel-chart-title")
+                yield Label("API 累计 Token 趋势（按会话 旧→新）", classes="panel-chart-title")
                 yield Sparkline(id="panel-trend")
+                yield Static("", id="panel-trend-note")
                 yield Label(
-                    "Token 占比（输入 / 非推理输出 / 推理输出）",
+                    "新增内容 Token 占比（当前项目全部会话）",
                     classes="panel-chart-title",
                 )
-                for label in ("Input", "Output", "Reasoning"):
+                for key, label in (("input", "用户输入（估算）"), ("output", "模型输出（非推理）"), ("reasoning", "推理输出")):
                     with Horizontal(classes="panel-bar-row"):
                         yield Label(label, classes="panel-bar-label")
                         yield ProgressBar(
-                            id="panel-comp-" + label.lower(), show_eta=False
+                            id="panel-comp-" + key, show_eta=False, show_percentage=False
                         )
-                yield Label("任务进度", classes="panel-chart-title")
+                        yield Static("", id="panel-value-" + key, classes="panel-token-value")
+                yield Static("", id="panel-content-note")
+                yield Label("API 实际用量（包含历史重发）", classes="panel-chart-title")
+                yield Static("", id="panel-api-usage")
+                yield Label("当前会话 Agent", classes="panel-chart-title")
+                yield Static("", id="panel-agent-counts")
+                yield Label("计划任务进度", classes="panel-chart-title")
                 yield ProgressBar(id="panel-task-progress", show_eta=False)
                 yield Static("", id="panel-task-counts")
             yield Static("", id="context-usage")
@@ -515,6 +523,7 @@ class RedLotusTui(App[None]):
         try:
             from redlotus.core.session import conversations_root
 
+            identity = (self.system.workspace, self.system.session_key)
             snapshot = await build_panel_snapshot(
                 log_root=conversations_root(),
                 system=self.system,
@@ -523,30 +532,88 @@ class RedLotusTui(App[None]):
                 include_all=self._panel_include_all,
                 cache=self._panel_cache,
             )
+            if not self._panel_mode or identity != (self.system.workspace, self.system.session_key):
+                return
             self.query_one("#panel-content", Static).update(render_panel(snapshot))
             self._update_panel_charts(snapshot)
         except Exception as e:
             logger.error(f"刷新工作区面板失败: {type(e).__name__}: {e}", exc_info=True)
 
     def _update_panel_charts(self, snapshot: Any) -> None:
-        """就地更新面板内的原生图表控件（趋势 Sparkline、占比与任务 ProgressBar），避免重建。"""
+        """Render independent content, API, Agent and plan counters without rebuilding widgets."""
+        self._update_token_trend(snapshot.token_trend)
+        self._update_content_chart(snapshot)
+        self._update_api_usage(snapshot.history)
+        self._update_agent_counts(snapshot.runtime)
+
+    def _update_token_trend(self, values) -> None:
+        """Only draw a sparkline when session samples express a real change."""
         trend = self.query_one("#panel-trend", Sparkline)
-        series = [float(v) for v in (snapshot.token_trend or [])]
-        trend.data = series if any(series) else []
+        series = [float(v) for v in values]
+        trend.data = series if len(set(series)) > 1 else []
         trend.display = bool(trend.data)
-        history = snapshot.history
-        total = history.input_tokens + history.output_tokens
-        reasoning = min(history.reasoning_tokens, history.output_tokens)
-        for widget_id, value in (
-            ("#panel-comp-input", history.input_tokens or 0),
-            ("#panel-comp-output", history.output_tokens - reasoning),
-            ("#panel-comp-reasoning", reasoning),
+        note = ""
+        if not series:
+            note = "暂无 Token 数据"
+        elif len(series) == 1:
+            note = f"{series[0]:,.0f} tokens · 仅一个会话，暂无趋势"
+        elif not trend.data:
+            note = f"{len(series)} 个会话均为 {series[0]:,.0f} tokens · 无变化"
+        self.query_one("#panel-trend-note", Static).update(note)
+        self.query_one("#panel-trend-note", Static).display = bool(note)
+
+    def _update_content_chart(self, snapshot) -> None:
+        """Show once-counted content and mark measurements with incomplete coverage."""
+        content = snapshot.content
+        complete = content.complete and not snapshot.history.skipped_count
+        total = content.input_tokens + content.output_tokens
+        for key, value in (
+            ("input", content.input_tokens),
+            ("output", content.output_tokens - content.reasoning_tokens),
+            ("reasoning", content.reasoning_tokens),
         ):
-            self.query_one(widget_id, ProgressBar).update(
-                total=total or 1, progress=value
-            )
-        tasks = snapshot.runtime.tasks
+            bar = self.query_one("#panel-comp-" + key, ProgressBar)
+            bar.display = complete and total > 0
+            bar.update(total=total or 1, progress=value)
+            text = f"{value:,} tokens"
+            if key == "input":
+                text += "（估算）"
+            if key != "input" and content.missing_reasoning_responses:
+                text = (f"未知（总输出 {content.output_tokens:,} tokens）" if key == "output"
+                        else f"已报告 {content.reasoning_tokens:,} tokens；其余未知")
+            elif complete:
+                text += f"  {value / total * 100 if total else 0:.1f}%"
+            self.query_one("#panel-value-" + key, Static).update(text)
+        notes = ["用户输入及引用文本只计一次；不含系统提示词、旧回复和工具结果。"]
+        if not complete:
+            notes.append("统计不完整，暂不展示完整占比。")
+        if content.incomplete_sessions:
+            notes.append(f"{content.incomplete_sessions} 个旧会话输入统计不完整；输入仅为已统计部分。")
+        if content.unmetered_attachments:
+            notes.append(f"未计量附件 {content.unmetered_attachments} 个。")
+        if content.missing_reasoning_responses:
+            notes.append(f"{content.missing_reasoning_responses} 次响应推理明细未知。")
+        if content.missing_usage_responses:
+            notes.append(f"{content.missing_usage_responses} 次响应未报告用量。")
+        self.query_one("#panel-content-note", Static).update("\n".join(notes))
+
+    def _update_api_usage(self, history) -> None:
+        """Keep provider request accounting separate from unique input estimates."""
+        self.query_one("#panel-api-usage", Static).update(
+            f"输入 {history.input_tokens:,} tokens · 输出 {history.output_tokens:,} tokens（含推理）\n"
+            f"输入缓存：命中 {history.cache_hit_tokens:,} · 未命中 {history.cache_miss_tokens:,} · "
+            f"未报告 {max(0, history.input_tokens - history.cache_hit_tokens - history.cache_miss_tokens):,} tokens"
+        )
+    def _update_agent_counts(self, runtime) -> None:
+        """Display live Agents separately from the optional planning checklist."""
+        self.query_one("#panel-agent-counts", Static).update(
+            "暂不可用" if runtime.active_invocations_error else
+            Text.assemble((f"Running {runtime.running_agents}", "cyan"), "   ",
+                          (f"Queued {runtime.queued_agents}", "yellow"))
+        )
+        tasks = runtime.tasks
         task_total = tasks.total or 0
+        self.query_one("#panel-task-progress", ProgressBar).display = task_total > 0
         self.query_one("#panel-task-progress", ProgressBar).update(
             total=task_total or 1, progress=tasks.completed or 0
         )
@@ -555,7 +622,7 @@ class RedLotusTui(App[None]):
             (f"⟳ Running {tasks.running}", "cyan"), "   ",
             (f"✗ Failed {tasks.failed}", "red"), "   ",
             (f"… Pending {tasks.pending}", "yellow"),
-        ))
+        ) if task_total else "暂无计划任务")
 
     def _schedule_panel_refresh(self) -> None:
         if not self._panel_mode:

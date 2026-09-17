@@ -801,12 +801,35 @@ class ModelUsageSummary:
 
 
 @dataclass
+class ContentTokenStats:
+    """New content counters; user input is estimated, generation is reported usage."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    unmetered_attachments: int = 0
+    incomplete_sessions: int = 0
+    missing_reasoning_responses: int = 0
+    missing_usage_responses: int = 0
+
+    def add(self, other):
+        for name in self.__dataclass_fields__:
+            setattr(self, name, getattr(self, name) + getattr(other, name))
+
+    @property
+    def complete(self):
+        return not (self.unmetered_attachments or self.incomplete_sessions
+                    or self.missing_reasoning_responses or self.missing_usage_responses)
+
+
+@dataclass
 class UsageFileSummary:
     path: Path
     meta: dict[str, Any]
     totals: UsageTotals = field(default_factory=UsageTotals)
     by_model: dict[str, ModelUsageSummary] = field(default_factory=dict)
     by_agent: dict[str, UsageTotals] = field(default_factory=dict)
+    content: ContentTokenStats = field(default_factory=ContentTokenStats)
 
 
 @dataclass
@@ -881,6 +904,7 @@ def summarize_messages(
     summary = UsageFileSummary(
         path=Path(path) if path is not None else Path(), meta=meta or {}
     )
+    summary.content = ContentTokenStats(**summary.meta.get("input_usage", {"incomplete_sessions": 1}))
     for message in messages:
         if (
             not isinstance(message, ModelResponse)
@@ -895,7 +919,15 @@ def summarize_messages(
         if not usage.has_values():
             summary.totals.missing_usage_responses += 1
             agent_totals.missing_usage_responses += 1
+            summary.content.missing_usage_responses += 1
+            summary.content.missing_reasoning_responses += 1
             continue
+        summary.content.output_tokens += usage.output_tokens
+        reasoning = usage.details.get("reasoning_tokens")
+        if reasoning is None or not 0 <= reasoning <= usage.output_tokens:
+            summary.content.missing_reasoning_responses += 1
+        else:
+            summary.content.reasoning_tokens += reasoning
         model_name = str(getattr(message, "model_name", "") or "unknown")
         billable = billable_tokens_from_usage(usage)
         summary.totals.add_usage(usage, billable)

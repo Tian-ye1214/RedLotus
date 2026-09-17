@@ -23,6 +23,7 @@ from redlotus.core.session import conversations_root
 from redlotus.core.history import (
     MODEL_MESSAGES_GLOB,
     UsageTotals,
+    ContentTokenStats,
     read_usage_messages,
     latest_usage_input_tokens,
     summarize_messages,
@@ -498,6 +499,7 @@ class PanelHistoryStats(UsageTotals):
     by_model: dict[str, UsageTotals] = field(default_factory=dict)
     skipped_count: int = 0
     skipped_files: list[str] = field(default_factory=list)
+    content: ContentTokenStats = field(default_factory=ContentTokenStats)
 
 
 @dataclass
@@ -514,6 +516,8 @@ class RuntimePanelStats:
     session_key: str = "-"
     active_invocations: int = 0
     active_invocations_error: bool = False
+    running_agents: int = 0
+    queued_agents: int = 0
     context_input_tokens: dict[str, int] = field(default_factory=dict)
     tasks: TaskPanelStats = field(default_factory=TaskPanelStats)
 
@@ -526,6 +530,10 @@ class PanelSnapshot:
     include_all: bool = False
     # 可见会话按时间从旧到新排列的每会话总 token 数（供 Sparkline 趋势图使用）
     token_trend: list[int] = field(default_factory=list)
+
+    @property
+    def content(self):
+        return self.history.content
 
 
 class PanelSnapshotCache:
@@ -609,6 +617,7 @@ def _collect_history(
         date, topic = summary.meta["date"], summary.meta["topic"]
         history.file_count += 1
         history.add_totals(summary.totals)
+        history.content.add(summary.content)
         for role, totals in summary.by_agent.items():
             history.by_agent.setdefault(role, UsageTotals()).add_totals(totals)
         for model, usage in summary.by_model.items():
@@ -648,12 +657,11 @@ async def _collect_runtime(
         or 0,
     }
     runtime.tasks = _collect_task_stats(getattr(system, "_task_manager", None))
-    registry = getattr(system, "registry", None)
-    list_active = getattr(registry, "list_active_invocations", None)
-    if callable(list_active):
+    if system is not None:
         try:
-            active = await list_active(getattr(system, "session_key", None))
-            runtime.active_invocations = len(active)
+            runtime.running_agents, runtime.queued_agents = system._factory.activity(system.session_key)
+            runtime.running_agents += int(system._session.active)
+            runtime.active_invocations = runtime.running_agents
         except Exception:
             runtime.active_invocations_error = True
     return runtime
@@ -687,7 +695,7 @@ def _render_kpis(snapshot: PanelSnapshot) -> Table:
         f"历史对话 {history.conversation_count}",
         f"model_messages {history.file_count}",
         f"responses {history.responses}",
-        f"active {'?' if runtime.active_invocations_error else runtime.active_invocations}",
+        f"Agent Running {'暂不可用' if runtime.active_invocations_error else runtime.running_agents}",
     )
     table.add_row(
         f"session {runtime.session_key}",

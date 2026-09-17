@@ -664,6 +664,20 @@ class SubagentFactory:
     def handles(self) -> tuple[SubagentHandle, ...]:
         return tuple(self._handles.values())
 
+    def activity(self, session_id):
+        """Read foreground child activity without counting admission waiters as running."""
+        running = queued = 0
+        for handle in self.handles:
+            if handle.spec.session_id != session_id or handle.spec.role not in {"worker", "manager"}:
+                continue
+            if handle._future.done():
+                continue
+            if handle.thread is not None:
+                running += int(handle.thread.is_alive())
+            elif not handle._cancelled.is_set():
+                queued += 1
+        return running, queued
+
     async def run(self, spec: SubagentSpec, execute: Callable[[], Awaitable[Any]]):
         handle = self.start_background(spec, execute)
         try:

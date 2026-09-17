@@ -457,7 +457,21 @@ class AgentSystem:
         await asyncio.to_thread(self._skills_manager.refresh)
 
     def set_ask_user_handler(self, handler):
-        self._toolkit.set_ask_user_handler(handler)
+        async def recorded_answer(question):
+            generation = self._session.generation
+            answer = (await handler(question) if inspect.iscoroutinefunction(handler)
+                      else await asyncio.to_thread(handler, question))
+            if isinstance(answer, str) and generation == self._session.generation:
+                await self.record_user_input(uuid.uuid4().hex, UserMessage(answer))
+            return answer
+
+        self._toolkit.set_ask_user_handler(recorded_answer if handler else None)
+
+    async def record_user_input(self, identity, message):
+        """Persist a consumed input against its bound session, including tool questions."""
+        storage = self._session_file
+        if storage is not None and self._session.active:
+            await self._durable_write(lambda: storage.record_input(identity, message))
 
     @property
     def review_store(self):
@@ -564,6 +578,7 @@ class AgentSystem:
     async def _take_inner_inputs(self):
         prompts = []
         for admission, message in await self._session.take_urgent():
+            await self.record_user_input(admission.id, message)
             self._session.user_inputs.append(message.original_text or message.text)
             prompts.append(message.to_prompt())
             logger.debug(
@@ -632,6 +647,7 @@ class AgentSystem:
                 await self._toolkit._references.prepare_message(message)
                 if self._session_key is None:
                     await self.bind_session(uuid.uuid4().hex)
+                await self.record_user_input(turn_id, message)
                 if not self._session_file.metadata.get("title"):
                     await self._durable_write(lambda: self._session_file.update(metadata={"title": message.text or "session"}))
                 job = await self._durable_write(lambda: self._memory.begin_turn(

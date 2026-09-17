@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import uuid4
 from filelock import FileLock, Timeout
-from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelResponse
+from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelResponse, TextContent
 from collections import deque
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from redlotus.core.agents import (
@@ -88,7 +88,7 @@ class SessionFile:
         path = root / identity / "model_messages.json"
         if not path.resolve().is_relative_to(root):
             raise ValueError("Session ID must remain inside the session directory")
-        header = dict(session_id=identity, project_id=project_id, title=title,
+        header = dict(session_id=identity, project_id=project_id, title=title, input_accounting=1,
                       created_at=datetime.now(timezone.utc).isoformat())
         path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(path.with_suffix(".lock")):
@@ -235,7 +235,7 @@ class SessionFile:
                     self._replace(data)
             self.header = {key: value for key, value in data.items() if key != "updates"}
             self._records, self._prompts, self._metadata, self._turns = {}, {}, {}, {}
-            self._jobs, self._usage, self._digests = {}, {}, {}
+            self._jobs, self._usage, self._digests, self._inputs = {}, {}, {}, {}
             self._texts = {}
             self._pending_jobs = set()
             self._context, self._view = [], []
@@ -404,6 +404,7 @@ class SessionFile:
                     else:
                         self._pending_jobs.add(key)
         self._usage.update(update.get("usage", {}))
+        self._inputs.update(update.get("inputs", {}))
         if "context" in update:
             self._context = update["context"]
         if delta := update.get("context_delta"):
@@ -627,6 +628,41 @@ class SessionFile:
         with self._locked_state():
             return deepcopy(list(self._usage.values()))
 
+    def record_input(self, input_id, message):
+        """Count admitted user content once, without retaining another body copy."""
+        from math import ceil
+        from redlotus.core.history import _estimate_text_tokens
+
+        text = message.original_text if message.original_text is not None else message.text
+        attachments = message.attachments
+        text += "".join(part if isinstance(part, str) else part.content
+                        for part in attachments if isinstance(part, str) or isinstance(part, TextContent))
+        entries = {f"input:{input_id}": dict(
+            tokens=ceil(_estimate_text_tokens(text)),
+            unmetered=sum(not isinstance(part, (str, TextContent)) for part in attachments),
+        )}
+        for ref in message.references:
+            entries[f"reference:{ref.sha256}"] = dict(
+                tokens=ceil(_estimate_text_tokens("".join(part.text for part in ref.parts if part.kind == "text"))),
+                unmetered=sum(part.kind != "text" for part in ref.parts) if ref.parts else 1,
+            )
+        with self._locked_state():
+            if f"input:{input_id}" in self._inputs:
+                return
+            additions = {key: value for key, value in entries.items() if key not in self._inputs}
+            if additions:
+                self._append(dict(inputs=additions))
+
+    def input_usage(self):
+        """Expose measured content and coverage independently of API usage."""
+        with self._locked_state():
+            return dict(
+                input_tokens=sum(row["tokens"] for row in self._inputs.values()),
+                unmetered_attachments=sum(row["unmetered"] for row in self._inputs.values()),
+                incomplete_sessions=int(not self.header.get("input_accounting")
+                                        or bool(self._usage) and not self._inputs),
+            )
+
     def pending_jobs(self):
         """Return pending job IDs without rescanning completed production history."""
         with self._locked_state():
@@ -649,7 +685,7 @@ class SessionFile:
         return {**self.header, **self.metadata, "agent": "coordinator",
                 "date": self.header["created_at"][:10], "topic": self._metadata.get("title", self.header["title"]),
                 "saved_at": datetime.fromtimestamp(self.path.stat().st_mtime, timezone.utc).isoformat(),
-                "message_count": len(self._context)}
+                "message_count": len(self._context), "input_usage": self.input_usage()}
 
     def compact(self, *, keep_turn_ids):
         """Prune only released bodies while retaining context, pending evidence, and totals."""
@@ -661,7 +697,7 @@ class SessionFile:
             retained_turns = keep_turn_ids | {key for key, row in self._turns.items() if row.get("turn_id", key) in owners}
             prompts = {row["message"]["instructions"]["prompt_id"] for row in records.values() if isinstance(row["message"].get("instructions"), dict)}
             snapshot = dict(messages=records, prompts={key: self._prompts[key] for key in prompts},
-                            context=self._context, metadata=self._metadata, jobs=self._jobs, usage=self._usage,
+                            context=self._context, metadata=self._metadata, jobs=self._jobs, usage=self._usage, inputs=self._inputs,
                             turns={key: row if key in retained_turns else
                                    {field: row[field] for field in ("id", "number", "session_id", "status")}
                                    for key, row in self._turns.items()}, next_id=self._next_id)
