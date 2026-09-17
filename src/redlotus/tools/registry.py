@@ -406,7 +406,7 @@ class SkillsManager:
 
     def __init__(self, skills_dir: str | Path | None = None, *, workspace=None):
         self.skills_dir = (
-            Path(skills_dir) if skills_dir is not None else user_skills_dir()
+            Path(skills_dir) if skills_dir is not None else user_skills_dir(workspace)
         )
         self.workspace = workspace
         self._roots = (shipped_skills_dir(), self.skills_dir)

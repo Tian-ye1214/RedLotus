@@ -14,6 +14,7 @@ import hashlib
 import signal
 from pathlib import Path
 from contextlib import contextmanager, ExitStack
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Iterator, TYPE_CHECKING
 from filelock import FileLock, Timeout
@@ -102,24 +103,41 @@ def dotenv_file() -> Path:
     return local_config_root() / ".env"
 
 
+def _storage_workspace(workspace=None):
+    if workspace is not None:
+        return workspace
+    from redlotus.core.agents import WorkspaceContext, current_workspace
+
+    return WorkspaceContext.from_path(current_workspace())
+
+
+def _project_storage_path(name: str, workspace=None) -> Path:
+    workspace = _storage_workspace(workspace)
+    root = workspace.root.resolve()
+    configured = settings()["storage"][name]
+    if not configured:
+        raise ConfigError(f"缺少配置 storage.{name}；检查来源: {config_source_summary()}")
+    candidate = Path(configured).expanduser()
+    path = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    if not path.is_relative_to(root):
+        raise ConfigError(f"配置 storage.{name} 必须位于当前项目目录内")
+    return path
+
+
 def project_data_dir(workspace) -> Path:
-    """Project identity is independent of the interpreter or installation directory."""
-    return user_data_dir() / "projects" / workspace.project_id
+    return _project_storage_path("project_dir", workspace)
 
 
 def session_data_dir(workspace) -> Path:
-    return (
-        _storage_path("sessions_dir", user_data_dir() / "projects")
-        / workspace.project_id
-    )
+    return _project_storage_path("sessions_dir", workspace)
 
 
-def references_dir() -> Path:
-    return _storage_path("references_dir", user_data_dir() / "references")
+def references_dir(workspace=None) -> Path:
+    return _project_storage_path("references_dir", workspace)
 
 
-def runtime_dir() -> Path:
-    return _storage_path("runtime_dir", user_data_dir())
+def runtime_dir(workspace=None) -> Path:
+    return _project_storage_path("runtime_dir", workspace)
 
 
 _REPARSE_POINT = 0x400
@@ -213,43 +231,48 @@ def _locked_session(message_path: Path) -> Iterator[FileLock | None]:
 
 def _session_candidates(sessions: Path, current: Path, cutoff: float):
     candidates = []
-    projects = _storage_children(sessions)
-    if projects is None:
+    session_dirs = _storage_children(sessions)
+    if session_dirs is None:
         return candidates
-    for project in projects:
-        if not _safe_storage_child(sessions, project) or not project.is_dir():
+    for session_dir in session_dirs:
+        if not _safe_storage_child(sessions, session_dir) or not session_dir.is_dir():
             continue
-        for session_dir in _storage_children(project) or ():
-            if not _safe_storage_child(project, session_dir) or not session_dir.is_dir():
-                continue
-            message = session_dir / "model_messages.json"
-            if not _safe_storage_child(session_dir, message) or not message.is_file():
-                continue
-            try:
-                stale = message.stat().st_mtime < cutoff
-                current_session = (
-                    message.resolve() == current
-                    or session_dir.resolve() == current.parent
-                )
-                if stale and not current_session:
-                    candidates.append(
-                        (message.stat().st_mtime, project, session_dir, message)
-                    )
-            except OSError:
-                continue
+        message = session_dir / "model_messages.json"
+        if not _safe_storage_child(session_dir, message) or not message.is_file():
+            continue
+        try:
+            stale = message.stat().st_mtime < cutoff
+            current_session = (
+                message.resolve() == current
+                or session_dir.resolve() == current.parent
+            )
+            if stale and not current_session:
+                candidates.append((message.stat().st_mtime, session_dir, message))
+        except OSError:
+            continue
     return sorted(candidates, key=lambda row: row[0])
 
 
+def _load_cleanup_session(
+    session_dir: Path, message: Path, transaction: FileLock, project_id: str
+):
+    from redlotus.core.session import SessionFile
+
+    session = SessionFile.load(message, lock=transaction, recover=False)
+    return (
+        session
+        if session.session_id == session_dir.name and session.project_id == project_id
+        else None
+    )
+
+
 def _session_protected(
-    project: Path, session_dir: Path, message: Path, transaction: FileLock
+    session_dir: Path, message: Path, transaction: FileLock, project_id: str
 ) -> bool:
     try:
-        from redlotus.core.session import SessionFile
-
-        session = SessionFile.load(message, lock=transaction, recover=False)
+        session = _load_cleanup_session(session_dir, message, transaction, project_id)
         return (
-            session.project_id != project.name
-            or session.session_id != session_dir.name
+            session is None
             or session.metadata.get("active_turn")
             or session.pending_jobs()
         )
@@ -258,10 +281,12 @@ def _session_protected(
 
 
 def _delete_old_session(
-    project: Path, session_dir: Path, message: Path, cutoff: float
+    session_dir: Path, message: Path, cutoff: float, project_id: str
 ) -> int | None:
     with _locked_session(message) as transaction:
-        if transaction is None or _session_protected(project, session_dir, message, transaction):
+        if transaction is None or _session_protected(
+            session_dir, message, transaction, project_id
+        ):
             return None
         try:
             if message.stat().st_mtime >= cutoff or not _safe_storage_child(session_dir, message):
@@ -273,34 +298,36 @@ def _delete_old_session(
             return None
 
 
-def _active_cache_projects(sessions: Path) -> set[str] | None:
+def _active_cache_projects(sessions: Path, project_id: str) -> set[str] | None:
     active = set()
-    projects = _storage_children(sessions)
-    if projects is None:
+    session_dirs = _storage_children(sessions)
+    if session_dirs is None:
         return None
-    for project in projects:
-        if not _safe_storage_child(sessions, project) or not project.is_dir():
-            active.add(project.name)
+    for session_dir in session_dirs:
+        if not _safe_storage_child(sessions, session_dir) or not session_dir.is_dir():
+            active.add(session_dir.name)
             continue
-        session_dirs = _storage_children(project)
-        if session_dirs is None:
-            active.add(project.name)
+        message = session_dir / "model_messages.json"
+        if (
+            not _safe_storage_child(session_dir, message)
+            or not message.is_file()
+        ):
+            active.add(session_dir.name)
             continue
-        for session_dir in session_dirs:
-            message = session_dir / "model_messages.json"
-            invalid = (
-                not _safe_storage_child(project, session_dir)
-                or not session_dir.is_dir()
-                or not _safe_storage_child(session_dir, message)
-                or not message.is_file()
-            )
-            if invalid:
-                active.add(project.name)
-                break
-            with _locked_session(message) as transaction:
-                if transaction is None or _session_protected(project, session_dir, message, transaction):
-                    active.add(project.name)
-                    break
+        with _locked_session(message) as transaction:
+            if transaction is None:
+                active.add(session_dir.name)
+                continue
+            try:
+                session = _load_cleanup_session(
+                    session_dir, message, transaction, project_id
+                )
+            except (OSError, ValueError, KeyError, TypeError, Timeout):
+                session = None
+            if session is None:
+                active.add(session_dir.name)
+            elif session.metadata.get("active_turn") or session.pending_jobs():
+                active.add(session.project_id)
     return active
 
 
@@ -378,28 +405,27 @@ def retry_after_storage_cleanup(
     if not enabled:
         raise error
     failed = Path(path).resolve()
-    sessions = _storage_path("sessions_dir", user_data_dir() / "projects")
+    workspace = _storage_workspace()
+    sessions = session_data_dir(workspace)
     if _same_storage_volume(sessions, failed):
-        for _, project, session_dir, message in _session_candidates(sessions, failed, cutoff):
-            released = _delete_old_session(project, session_dir, message, cutoff)
+        for _, session_dir, message in _session_candidates(sessions, failed, cutoff):
+            released = _delete_old_session(
+                session_dir, message, cutoff, workspace.project_id
+            )
             if released is not None:
                 _storage_cleanup_log(message, released)
                 if _retry_after_cleanup(retry):
                     return
     if not cache_enabled:
         raise error
-    runtime = runtime_dir()
+    runtime = runtime_dir(workspace)
     execution = settings().get("execution") or {}
     cache_root = _execution_storage_root(execution.get("cache_dir"), runtime)
     environments = _execution_storage_root(execution.get("environment_dir"), runtime)
     if cache_root is None or not _same_storage_volume(cache_root, failed):
         raise error
-    try:
-        relative = failed.relative_to(sessions.resolve())
-        current_project = relative.parts[0] if len(relative.parts) > 1 else None
-    except ValueError:
-        current_project = None
-    active = _active_cache_projects(sessions)
+    current_project = workspace.project_id
+    active = _active_cache_projects(sessions, workspace.project_id)
     if active is None:
         raise error
     protected_projects = active | ({current_project} if current_project else set())
@@ -446,8 +472,8 @@ def skills_dir() -> Path:
 
 
 # ---- 全局可写状态 ----
-def logs_dir() -> Path:
-    return user_data_dir() / "logs"
+def logs_dir(workspace=None) -> Path:
+    return _project_storage_path("project_logs_dir", workspace)
 
 
 def memory_dir() -> Path:
@@ -455,9 +481,9 @@ def memory_dir() -> Path:
     return user_data_dir() / "LongTermMemory"
 
 
-def user_skills_dir() -> Path:
+def user_skills_dir(workspace=None) -> Path:
     """运行时安装的技能 overlay（可写）；与随包基线技能合并加载。"""
-    return runtime_dir() / "skills"
+    return runtime_dir(workspace) / "skills"
 
 
 async def finish_file_io(operation):
@@ -544,7 +570,12 @@ _STYLES = {
 }
 _configured_dir: Path | None = None
 _configuration_lock = threading.Lock()
-_task_sink_id: int | None = None
+_SESSION_LOG_DIR = "session_log_dir"
+_LOG_DIR = "log_dir"
+_TASK_LOG_PATH = "task_log_path"
+_task_log_path: ContextVar[Path | None] = ContextVar("task_log_path", default=None)
+_task_log_paths: dict[Path, Path] = {}
+_workspace_log_dirs: dict[Path, Path] = {}
 SESSION_LOG_MAX_BYTES = 10 * 1024 * 1024  # 单会话日志上限，超出滚动保留一个 .log.1
 LOG_RETENTION_DAYS = 14.0  # logs 根目录 *.log 保留天数；<=0 关闭清理
 
@@ -553,18 +584,54 @@ def get_log_dir() -> Path:
     return _configured_dir or logs_dir()
 
 
-def ensure_configured() -> None:
+def _workspace_log_dir(workspace) -> Path:
+    root = workspace.root
+    if log_dir := _workspace_log_dirs.get(root):
+        return log_dir
+    log_dir = logs_dir(workspace)
+    _workspace_log_dirs[root] = log_dir
+    return log_dir
+
+
+def _install_log_sinks(log_dir: Path) -> None:
     global _configured_dir
+    _configured_dir = log_dir
+    _lg.remove()
+    _lg.add(
+        _console_sink, level="DEBUG", format=CONSOLE_FMT, filter=_console_filter
+    )
+    _lg.add(_session_sink, level="DEBUG", format=FILE_FMT, filter=_session_filter)
+    _lg.add(_task_sink, level="DEBUG", format=FILE_FMT, filter=_task_filter)
+
+
+def ensure_configured() -> None:
     with _configuration_lock:
         if _configured_dir is not None:
             return
-        _configured_dir = logs_dir()
-        _configured_dir.mkdir(parents=True, exist_ok=True)
-        _lg.remove()
-        _lg.add(
-            _console_sink, level="DEBUG", format=CONSOLE_FMT, filter=_console_filter
-        )
-        _lg.add(_session_sink, level="DEBUG", format=FILE_FMT, filter=_session_filter)
+        log_dir = logs_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _install_log_sinks(log_dir)
+        prune_old_logs()
+
+
+def prepare_log_dir(workspace) -> Path:
+    """Validate the target project's log directory before discarding a session."""
+    log_dir = _workspace_log_dir(workspace)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
+def activate_log_dir(log_dir: Path) -> None:
+    """Route future logs to a directory prepared before the workspace switch."""
+    global _configured_dir
+    target = Path(log_dir).resolve()
+    with _configuration_lock:
+        if _configured_dir == target:
+            return
+        if _configured_dir is None:
+            _install_log_sinks(target)
+        else:
+            _configured_dir = target
         prune_old_logs()
 
 
@@ -589,8 +656,16 @@ def _session_filter(record: dict) -> bool:
     return bool(record["extra"].get("session"))
 
 
+def _record_log_dir(record: dict) -> Path | None:
+    value = record["extra"].get(_LOG_DIR) or record["extra"].get(
+        _SESSION_LOG_DIR
+    )
+    return Path(value) if value else None
+
+
 def _session_sink(message: Any) -> None:
-    path = get_log_dir() / f"{message.record['extra']['session']}.log"
+    log_dir = _record_log_dir(message.record) or get_log_dir()
+    path = log_dir / f"{message.record['extra']['session']}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         if path.exists() and path.stat().st_size >= SESSION_LOG_MAX_BYTES:
@@ -601,6 +676,29 @@ def _session_sink(message: Any) -> None:
         pass
     with path.open("a", encoding="utf-8") as f:
         f.write(str(message))
+
+
+def _task_path(record: dict) -> Path | None:
+    log_dir = _record_log_dir(record)
+    if log_dir is None:
+        return _task_log_paths.get(get_log_dir())
+    if path := record["extra"].get(_TASK_LOG_PATH):
+        task_path = Path(path)
+        if task_path.parent == log_dir:
+            return task_path
+    return _task_log_paths.get(log_dir)
+
+
+def _task_filter(record: dict) -> bool:
+    return _task_path(record) is not None
+
+
+def _task_sink(message: Any) -> None:
+    path = _task_path(message.record)
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(str(message))
 
 
 def _emit(
@@ -615,7 +713,14 @@ def _emit(
     # （不传 args 时 loguru 不会再 .format()，故含 { } / JSON 的文本也安全）。
     ensure_configured()
     text = (str(msg) % args) if args else str(msg)
-    target = _lg.bind(file_only=True) if file_only else _lg
+    extra = {"file_only": True} if file_only else {}
+    if path := _task_log_path.get():
+        extra[_TASK_LOG_PATH] = str(path)
+    from redlotus.core.agents import active_workspace
+
+    if workspace := active_workspace():
+        extra[_LOG_DIR] = str(_workspace_log_dir(workspace))
+    target = _lg.bind(**extra) if extra else _lg
     target.opt(exception=exc_info).log(level, text)
 
 
@@ -641,16 +746,19 @@ def info_file_only(msg: object, *args: Any) -> None:
 
 
 def setup_task_logger(task_name: str = "task") -> None:
-    """为本次任务追加一个文件 sink（重复调用会替换上一个）。"""
-    global _task_sink_id
+    """为本次任务设置日志文件；同一工作区的新任务替换默认路由。"""
     ensure_configured()
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = (
-        get_log_dir() / f"{safe_name(task_name, max_len=50, fallback='task')}_{ts}.log"
-    )
-    if _task_sink_id is not None:
-        _lg.remove(_task_sink_id)
-    _task_sink_id = _lg.add(path, level="DEBUG", format=FILE_FMT, encoding="utf-8")
+    from redlotus.core.agents import active_workspace
+
+    workspace = active_workspace()
+    log_dir = _workspace_log_dir(workspace) if workspace is not None else get_log_dir()
+    with _configuration_lock:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{safe_name(task_name, max_len=50, fallback='task')}_{ts}.log"
+        path = log_dir / filename
+        _task_log_paths[log_dir] = path
+        _task_log_path.set(path)
     info("日志文件已创建: %s", path)
 
 
@@ -677,8 +785,13 @@ def prune_old_logs(max_age_days: float | None = None) -> None:
 @contextmanager
 def session_log_context(session_name: str):
     """把本上下文内的日志额外落到 {session}.log。"""
+    from redlotus.core.agents import active_workspace
+
+    workspace = active_workspace()
+    log_dir = _workspace_log_dir(workspace) if workspace is not None else get_log_dir()
     with _lg.contextualize(
-        session=safe_name(session_name, max_len=50, fallback="task")
+        session=safe_name(session_name, max_len=50, fallback="task"),
+        **{_SESSION_LOG_DIR: str(log_dir)},
     ):
         yield
 
@@ -888,6 +1001,7 @@ def settings() -> dict[str, Any]:
 def load_config() -> dict[str, Any]:
     global _CONFIG
     _CONFIG = None
+    _workspace_log_dirs.clear()
     return settings()
 
 

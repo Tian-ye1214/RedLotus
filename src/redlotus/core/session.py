@@ -13,10 +13,10 @@ from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import uuid4
-from filelock import FileLock
+from filelock import FileLock, Timeout
 from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelResponse
 from collections import deque
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from redlotus.core.agents import (
     InputAdmission,
     TurnQueue,
@@ -24,6 +24,7 @@ from redlotus.core.agents import (
     conversations_root,
     current_workspace,
     set_workspace,
+    workspace_context,
 )
 
 
@@ -31,13 +32,15 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _write_with_cleanup(path, operation):
+def _write_with_cleanup(path, operation, *, workspace=None):
     """Retry one unchanged file transaction only after approved space reclamation."""
-    try:
-        operation()
-    except OSError as exc:
-        from redlotus.core.config import retry_after_storage_cleanup
-        retry_after_storage_cleanup(path, exc, operation)
+    context = workspace_context(workspace) if workspace is not None else nullcontext()
+    with context:
+        try:
+            operation()
+        except OSError as exc:
+            from redlotus.core.config import retry_after_storage_cleanup
+            retry_after_storage_cleanup(path, exc, operation)
 
 
 def _response_id(message):
@@ -55,14 +58,23 @@ def _response_usage(message, **metadata):
                 timestamp=message.timestamp.isoformat(), usage=asdict(message.usage))
 
 
+@dataclass(frozen=True)
+class SessionScanInfo:
+    path: Path
+    info: dict
+    error: str = ""
+
+
 class SessionFile:
     """Append completed updates; compact only when retained evidence changes."""
 
-    def __init__(self, path, *, lock=None, recover=True):
+    def __init__(self, path, *, lock=None, recover=True, commit_recovery=True, workspace=None):
         self.path = Path(path)
+        self.workspace = workspace
         self._lock = lock or FileLock(self.path.with_suffix(".lock"))
         self._mutex = threading.RLock()
         self._recover_partial = recover
+        self._commit_recovery = commit_recovery
         self.recovered_partial_write = False
         self._view = []
         self._pending_update = None
@@ -70,7 +82,7 @@ class SessionFile:
         self._read()
 
     @classmethod
-    def create(cls, root, project_id, *, session_id=None, title=""):
+    def create(cls, root, project_id, *, session_id=None, title="", workspace=None):
         identity = session_id or uuid4().hex
         root = Path(root).resolve()
         path = root / identity / "model_messages.json"
@@ -82,12 +94,91 @@ class SessionFile:
         with FileLock(path.with_suffix(".lock")):
             if path.exists():
                 raise FileExistsError(path)
-            cls._replace_file(path, {**header, "updates": []})
-        return cls(path)
+            cls._replace_file(path, {**header, "updates": []}, workspace=workspace)
+        return cls(path, workspace=workspace)
 
     @classmethod
-    def load(cls, path, *, lock=None, recover=True):
-        return cls(path, lock=lock, recover=recover)
+    def load(cls, path, *, lock=None, recover=True, commit_recovery=True, workspace=None):
+        return cls(path, lock=lock, recover=recover, commit_recovery=commit_recovery, workspace=workspace)
+
+    @staticmethod
+    def _scan_record(info):
+        if not isinstance(info, dict):
+            return None
+        status = info.get("status") or (
+            "active" if info.get("active_turn") else "interrupted"
+            if info.get("interrupted_turn") else "completed"
+            if info.get("completed_turns", 0) else "new"
+        )
+        record = {
+            "session_id": info.get("session_id"), "project_id": info.get("project_id"),
+            "title": info.get("topic", info.get("title", "")), "saved_at": info.get("saved_at"),
+            "completed_turns": info.get("completed_turns", 0), "status": status,
+        }
+        try:
+            if (
+                not all(isinstance(record[key], str) for key in ("session_id", "project_id", "title", "saved_at"))
+                or isinstance(record["completed_turns"], bool)
+                or not isinstance(record["completed_turns"], int)
+                or record["completed_turns"] < 0
+                or record["status"] not in {"active", "interrupted", "completed", "new"}
+            ):
+                return None
+            datetime.fromisoformat(record["saved_at"])
+        except (TypeError, ValueError):
+            return None
+        return record
+
+    @classmethod
+    def scan_info(cls, root=None) -> list[SessionScanInfo]:
+        """Discover saved sessions through a rebuildable metadata-only cache."""
+        root = Path(root or conversations_root()).resolve()
+        if not root.is_dir():
+            return []
+        index = root / "index.json"
+        try:
+            cached = json.loads(index.read_text(encoding="utf-8"))
+            cached = cached["sessions"] if cached.get("version") == 1 and isinstance(cached["sessions"], dict) else {}
+        except (OSError, TypeError, ValueError, KeyError, AttributeError):
+            cached = {}
+        rows, scanned = {}, []
+        for path in sorted(root.glob("*/model_messages.json")):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            signature = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+            key = path.relative_to(root).as_posix()
+            previous = cached.get(key)
+            if isinstance(previous, dict) and previous.get("signature") == signature:
+                if set(previous) == {"signature", "error"} and previous["error"] is True:
+                    rows[key] = previous
+                    scanned.append(SessionScanInfo(path, {}, "会话文件不可读取"))
+                    continue
+                info = cls._scan_record(previous.get("info", {}))
+                if set(previous) == {"signature", "info"} and info:
+                    rows[key] = {"signature": signature, "info": info}
+                    scanned.append(SessionScanInfo(path, info))
+                    continue
+            try:
+                info = cls._scan_record(cls.load(path, commit_recovery=False).info())
+                if info is None:
+                    raise ValueError("会话元数据无效")
+                stat = path.stat()
+                rows[key] = {"signature": {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}, "info": info}
+                scanned.append(SessionScanInfo(path, info))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                rows[key] = {"signature": signature, "error": True}
+                scanned.append(SessionScanInfo(path, {}, str(exc)))
+        if rows != cached:
+            try:
+                # Session-file locks are released before this unrelated cache lock is attempted.
+                with FileLock(index.with_suffix(".lock"), timeout=0):
+                    from redlotus.core.config import atomic_write_json
+                    atomic_write_json(index, {"version": 1, "sessions": rows})
+            except (OSError, Timeout):
+                pass
+        return scanned
 
     def acquire_use(self):
         """Protect this loaded instance from cleanup until its owner releases it."""
@@ -140,7 +231,8 @@ class SessionFile:
             if self.recovered_partial_write:
                 if not self._recover_partial:
                     raise ValueError(f"会话含未完成事务，未修改原文件: {self.path}")
-                self._replace(data)
+                if self._commit_recovery:
+                    self._replace(data)
             self.header = {key: value for key, value in data.items() if key != "updates"}
             self._records, self._prompts, self._metadata, self._turns = {}, {}, {}, {}
             self._jobs, self._usage, self._digests = {}, {}, {}
@@ -266,10 +358,10 @@ class SessionFile:
         return dict(sequence=sequence, checksum=hashlib.sha256(_json(payload).encode()).hexdigest())
 
     def _replace(self, data):
-        self._replace_file(self.path, data)
+        self._replace_file(self.path, data, workspace=self.workspace)
 
     @staticmethod
-    def _replace_file(path, data):
+    def _replace_file(path, data, *, workspace=None):
         """Publish initialization or a compacted snapshot only after durable writing."""
         temporary = path.with_suffix(".tmp")
         def write():
@@ -281,7 +373,7 @@ class SessionFile:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
-        _write_with_cleanup(path, write)
+        _write_with_cleanup(path, write, workspace=workspace)
 
     def _refresh(self):
         if self._pending_update is None and self._version() != self._saved_version:
@@ -383,7 +475,7 @@ class SessionFile:
                 stream.flush()
                 os.fsync(stream.fileno())
 
-        _write_with_cleanup(self.path, write)
+        _write_with_cleanup(self.path, write, workspace=self.workspace)
         self._apply(update)
         self._count += 1
         self._last_commit = update["commit"]
@@ -437,7 +529,7 @@ class SessionFile:
             for offset, message in enumerate(messages[start:], start=start):
                 from redlotus.tools.references import reference_message_data
                 raw = ModelMessagesTypeAdapter.dump_python([message], mode="json")[0]
-                raw = reference_message_data(raw)
+                raw = reference_message_data(raw, workspace=self.workspace)
                 if instructions := raw.get("instructions"):
                     identity = hashlib.sha256(instructions.encode()).hexdigest()
                     if identity not in self._prompts:
@@ -489,7 +581,7 @@ class SessionFile:
             raw = deepcopy(record["message"])
             if isinstance(raw.get("instructions"), dict):
                 raw["instructions"] = self._prompts[raw["instructions"]["prompt_id"]]
-            rows.append(reference_message_data(raw, restore=True))
+            rows.append(reference_message_data(raw, restore=True, workspace=self.workspace))
         return ModelMessagesTypeAdapter.validate_python(rows)
 
     def model_messages(self):

@@ -1,0 +1,323 @@
+{
+  "schema": 1,
+  "purpose": "Compact, redacted evidence for three real project-storage acceptance batches.",
+  "redaction": {
+    "retained": [
+      "pass/fail state",
+      "counts",
+      "bounded timings",
+      "SHA-256 fingerprints",
+      "static check names",
+      "API endpoint/model/role aggregates"
+    ],
+    "excluded": [
+      "dialogue text",
+      "model request and response bodies",
+      "tool output",
+      "session transcript",
+      "credentials",
+      "environment values",
+      "absolute project/session paths"
+    ]
+  },
+  "batches": [
+    {
+      "id": "short-06",
+      "status": {
+        "complete": true,
+        "timed_out": false,
+        "failure_count": 0,
+        "warning_count": 0,
+        "deadline_seconds": 600
+      },
+      "timing": {
+        "evidence_stopwatch_seconds": 109.218,
+        "scope": "ProjectEvidence monotonic interval from construction immediately before configure() through final compact evidence save; no separate launcher wall-clock marker was captured."
+      },
+      "source_fingerprints": {
+        "config_sha256": "9926f94a4a9384d787d7c2f6fce90a24359efcee343280445ba7ebf139da2565",
+        "source_tree_sha256": null,
+        "source_tree_fingerprint_recorded": false
+      },
+      "tasks": {
+        "completed_turn_count": 5,
+        "session_count": 1,
+        "checks": {
+          "dialogue_success": true,
+          "worker_tool_success": true,
+          "worker_started": true,
+          "worker_total": true,
+          "original_image_success": true,
+          "original_image_recognized": true,
+          "project_memory_success": true,
+          "memory_idle": true,
+          "project_memory_recalled": true,
+          "post_memory_dialogue_success": true,
+          "session_created": true,
+          "project_session_path": true,
+          "one_json_per_session": true,
+          "usage_recorded": true,
+          "short_project_log_dir": true,
+          "short_session_task_log": true,
+          "rag_used": true,
+          "rag_succeeded": true,
+          "no_unexpected_warnings": true,
+          "resource_sampling": true
+        }
+      },
+      "api_activity": {
+        "model": {
+          "request_count": 14,
+          "models": {
+            "deepseek-v4-flash": 14
+          },
+          "roles": {
+            "unknown": 10,
+            "worker": 4
+          }
+        },
+        "rag": {
+          "call_count": 3,
+          "endpoints": {
+            "/embeddings": 2,
+            "/rerank": 1
+          },
+          "error_count": 0
+        },
+        "tool_commands": {
+          "count": 2,
+          "returncodes": {
+            "0": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "lifecycle-01",
+      "status": {
+        "complete": true,
+        "timed_out": false,
+        "failure_count": 0,
+        "warning_count": 0,
+        "deadline_seconds": 600
+      },
+      "timing": {
+        "evidence_stopwatch_seconds": 141.375,
+        "scope": "ProjectEvidence monotonic interval from construction immediately before configure() through final compact evidence save; no separate launcher wall-clock marker was captured."
+      },
+      "source_fingerprints": {
+        "config_sha256": "9926f94a4a9384d787d7c2f6fce90a24359efcee343280445ba7ebf139da2565",
+        "source_tree_sha256": null,
+        "source_tree_fingerprint_recorded": false
+      },
+      "tasks": {
+        "completed_turn_count": 5,
+        "session_count": 2,
+        "checks": {
+          "project_a_dialogue_success": true,
+          "global_memory_success": true,
+          "project_a_followup_success": true,
+          "pre_clear_session": true,
+          "project_a_project_log_dir": true,
+          "project_a_session_task_log": true,
+          "clear_new_context": true,
+          "clear_released_session": true,
+          "post_clear_dialogue_success": true,
+          "clear_created_new_session": true,
+          "load_cancel_kept_session": true,
+          "load_cancel_no_request": true,
+          "load_restored_id": true,
+          "load_restored_turns": true,
+          "workspace_switched": true,
+          "target_project_logs": true,
+          "project_b_global_recall_success": true,
+          "global_memory_recalled_in_project_b": true,
+          "compression_saved": true,
+          "compression_requested": true,
+          "project_b_session": true,
+          "project_b_project_log_dir": true,
+          "project_b_session_task_log": true,
+          "project_a_usage": true,
+          "project_b_usage": true,
+          "no_unexpected_warnings": true,
+          "resource_sampling": true
+        }
+      },
+      "api_activity": {
+        "model": {
+          "request_count": 13,
+          "models": {
+            "deepseek-v4-flash": 13
+          },
+          "roles": {
+            "unknown": 13
+          }
+        },
+        "rag": {
+          "call_count": 5,
+          "endpoints": {
+            "/embeddings": 3,
+            "/rerank": 2
+          },
+          "error_count": 0
+        },
+        "tool_commands": {
+          "count": 0,
+          "returncodes": {}
+        }
+      }
+    },
+    {
+      "id": "long-01",
+      "attempts": [
+        {
+          "id": "initial-01-19",
+          "status": {
+            "complete": false,
+            "timed_out": false,
+            "exit_code": 1,
+            "failure_count": 1,
+            "warning_count": 0,
+            "deadline_seconds": 600
+          },
+          "timing": {
+            "evidence_stopwatch_seconds": null,
+            "scope": "No elapsed stopwatch was retained in the historical initial compact evidence."
+          },
+          "source_fingerprints": {
+            "config_sha256": null,
+            "source_tree_sha256": null,
+            "source_tree_fingerprint_recorded": false,
+            "note": "The initial historical compact evidence did not retain a pre-failure source fingerprint."
+          },
+          "tasks": {
+            "completed_turn_count": 19,
+            "session_count": 0
+          },
+          "api_activity": {
+            "model": {
+              "request_count": 41
+            },
+            "rag": {
+              "call_count": 4
+            },
+            "tool_commands": {
+              "count": 4
+            }
+          }
+        },
+        {
+          "id": "resume-20-60",
+          "status": {
+            "complete": true,
+            "timed_out": false,
+            "failure_count": 0,
+            "warning_count": 0,
+            "deadline_seconds": 600
+          },
+          "timing": {
+            "evidence_stopwatch_seconds": 530.938,
+            "evidence_stopwatch_scope": "ResumeEvidence monotonic interval: initialized after source fingerprint collection and before load_config; ends at final evidence save.",
+            "process_started_at": "09/17/2026 08:39:14",
+            "process_completed_at": "09/17/2026 08:48:12",
+            "process_wall_seconds": 537.534,
+            "process_wall_scope": "Attempt launcher start marker through completion marker; includes process startup and final compact-report handling."
+          },
+          "source_fingerprints": {
+            "config_sha256": "a1011fddc54ebe311251aa2fb5e434dda0a82610e3e7ec559e4f184dcfa101d3",
+            "source_tree_sha256": "23af08a01fec4b67bc7f5661adceeaacff3b7474d5322e2462bb6c9f779d6c1e",
+            "source_file_count": 27,
+            "captured_before_first_real_request": true
+          },
+          "tasks": {
+            "turn_range_executed_this_attempt": [
+              20,
+              60
+            ],
+            "session_completed_turns": 60,
+            "pending_job_count": 0,
+            "automatic_task_count": 3,
+            "automatic_windows": [
+              {
+                "start_position": 0,
+                "end_position": 20,
+                "new_turn_count": 20,
+                "overlap_turn_count": 0
+              },
+              {
+                "start_position": 20,
+                "end_position": 40,
+                "new_turn_count": 20,
+                "overlap_turn_count": 3
+              },
+              {
+                "start_position": 40,
+                "end_position": 60,
+                "new_turn_count": 20,
+                "overlap_turn_count": 3
+              }
+            ],
+            "validation": {
+              "session_completed_60": true,
+              "automatic_window_count": true,
+              "automatic_tasks_done_indexed": true,
+              "single_session_json": true,
+              "project_memory_recalled": true,
+              "foreground_cache_ratio_over_90pct": true
+            },
+            "foreground_cache_ratio": 0.9903917681374692
+          },
+          "api_activity": {
+            "model": {
+              "request_count": 57,
+              "response_count": 57,
+              "successful_response_count": 57,
+              "models": {
+                "deepseek-v4-flash": 57
+              },
+              "roles": {
+                "perception": 9,
+                "unknown": 48
+              },
+              "status_codes": {
+                "200": 57
+              }
+            },
+            "rag": {
+              "call_count": 26,
+              "endpoints": {
+                "/embeddings": 16,
+                "/rerank": 10
+              }
+            },
+            "tool_commands": {
+              "count": 4,
+              "returncodes": {
+                "0": 4
+              }
+            },
+            "restore_model_request_count": 0
+          }
+        }
+      ],
+      "failure_diagnostics": [
+        {
+          "stage": "pre-fix saved-session restore",
+          "outcome": "failed",
+          "exception_type": "AttributeError",
+          "model_request_count": 0,
+          "zero_model_requests": true,
+          "summary": "Restore failed before any model request; no dialogue or exception message retained."
+        },
+        {
+          "stage": "post-fix saved-session restore",
+          "outcome": "restored",
+          "restored_completed_turns": 19,
+          "model_request_count": 0,
+          "zero_model_requests": true,
+          "summary": "The preserved session restored with zero model requests before continuation."
+        }
+      ]
+    }
+  ]
+}

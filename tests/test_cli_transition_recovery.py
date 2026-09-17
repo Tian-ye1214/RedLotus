@@ -442,7 +442,8 @@ async def test_load_read_failure_keeps_current_session(tmp_path, monkeypatch):
     async def picker(_snapshots):
         return SnapshotSelection(SnapshotAction.RESTORE, snapshot)
 
-    def unreadable(_path):
+    def unreadable(_path, *, workspace):
+        assert workspace is system.workspace
         raise OSError("snapshot unreadable")
 
     monkeypatch.setattr(
@@ -515,7 +516,7 @@ async def test_load_does_not_admit_input_during_snapshot_binding(
     )
     monkeypatch.setattr(
         "redlotus.core.console.read_saved_model_messages_file",
-        lambda _path: ([saved], {"session_id": "restored-id"}),
+        lambda _path, **_: ([saved], {"session_id": "restored-id"}),
     )
     monkeypatch.setattr(system, "bind_loaded_snapshot", bind)
     monkeypatch.setattr(system._session, "admit", admit)
@@ -584,7 +585,8 @@ async def test_load_does_not_admit_input_during_snapshot_read(
     async def picker(_snapshots):
         return SnapshotSelection(SnapshotAction.RESTORE, snapshot)
 
-    def slow_read(_path):
+    def slow_read(_path, *, workspace):
+        assert workspace is system.workspace
         read_started.set()
         assert read_release.wait(5)
         return [saved], {"session_id": "restored-id"}
@@ -622,7 +624,7 @@ async def test_load_does_not_admit_input_during_snapshot_read(
         load = asyncio.create_task(
             cli.enter_current_workspace(state=state, force_picker=True)
         )
-        await asyncio.wait_for(asyncio.to_thread(read_started.wait), 5)
+        assert await asyncio.wait_for(asyncio.to_thread(read_started.wait, 5), 6)
         late_input = asyncio.create_task(
             cli.process_line("late input", state, wait_for_turn=False)
         )
@@ -730,7 +732,7 @@ async def test_picker_action_routes_new_restore_and_cancel_through_controller(
     monkeypatch.setattr("redlotus.core.console.list_workspace_snapshots", lambda **_: [snapshot])
     monkeypatch.setattr(
         "redlotus.core.console.read_saved_model_messages_file",
-        lambda _path: ([saved], {"session_id": "restored-id"}),
+        lambda _path, **_: ([saved], {"session_id": "restored-id"}),
     )
     monkeypatch.setattr(cli, "reset_session", reset)
     monkeypatch.setattr(system, "bind_loaded_snapshot", bind)

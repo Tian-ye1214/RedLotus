@@ -65,10 +65,11 @@ def test_test_storage_isolation_preserves_effective_gateway_environment(
         Path(gate.os.environ["REDLOTUS_CONFIG_FILE"]).read_text(encoding="utf-8")
     )
     assert isolated["models"] == baseline["models"]
-    assert (
-        isolated["short_term_memory"]["db_path"]
-        != baseline["short_term_memory"]["db_path"]
-    )
+    assert isolated["short_term_memory"] == baseline["short_term_memory"]
+    assert Path(isolated["storage"]["state_dir"]).is_relative_to(tmp_path / "run")
+    assert isolated["storage"]["sessions_dir"] == ".redlotus/sessions"
+    assert isolated["storage"]["runtime_dir"] == "WorkDatabase/runtime"
+    assert isolated["storage"]["references_dir"] == "WorkDatabase/references"
     assert json.loads(source.read_text(encoding="utf-8")) == baseline
 
 

@@ -109,7 +109,7 @@ After pip installation, run `redlotus`. Global configuration lives at `~/.redlot
 
 Nested `.env` fields use JSON names separated by `__`, such as `models__worker__max_tokens=393216`. Numbers, booleans, arrays and objects use JSON values. Host environment variables never override business settings. Missing required fields produce an error; no bundled configuration is silently copied or merged. Configuration editing writes only the changes to an existing local JSON, otherwise to the global JSON. Credentials are never included in packages.
 
-For isolated tests, `REDLOTUS_CONFIG_FILE`, `REDLOTUS_DOTENV_FILE`, and `REDLOTUS_CONFIG_DIR` explicitly select the three sources. `REDLOTUS_DATA_DIR` isolates state. Memory and logs default to `~/.redlotus`; project artifacts and separately configured session/reference directories retain their configured locations. The legacy `%LOCALAPPDATA%/RedLotus` directory is not read, migrated, or recreated.
+For isolated tests, `REDLOTUS_CONFIG_FILE`, `REDLOTUS_DOTENV_FILE`, and `REDLOTUS_CONFIG_DIR` explicitly select the three sources. `REDLOTUS_DATA_DIR` isolates global state. Each opened project stores sessions, perception progress, logs, and its user-maintained `AGENT.md` in `.redlotus`; artifacts, dependencies, caches, and immutable reference snapshots belong in `WorkDatabase`. Configuration and all LanceDB memory databases remain in `~/.redlotus`, with project-scoped access. The legacy `%LOCALAPPDATA%/RedLotus` directory is not read, migrated, or recreated.
 
 For a new installation, provide a complete configuration at `~/.redlotus/config.json`; the maintained [source configuration](src/redlotus/config.json) shows the available fields. Set its storage paths for your machine. The following connection fields are only a fragment, not a complete configuration:
 
@@ -158,7 +158,7 @@ References can be adjacent or separated by punctuation, for example `@review.md,
 | `/help` | Show help |
 | `/clear` | Clear context and start a new conversation |
 | `/pwd` · `/cd <path>` | Show or change the working directory |
-| `/load` | Load a saved conversation for the current workspace |
+| `/load` | Open the current project's session picker; also available through the TUI session/load button |
 | `/config` · `/context` · `/panel` | Show configuration, context usage, or the runtime overview |
 | `/skills` | List loaded Skills |
 | `/LTM show` · `/STM show` | Show long- or short-term memory |
@@ -194,7 +194,7 @@ New skills are discovered automatically on subsequent user turns.
 ## Files and data
 
 - Session traces, reference snapshots and perception jobs are stored under the global user data directory, with project-specific data partitioned by project ID. Compression changes the model view while retaining the original trace.
-- Project episodes and global records are stored in LanceDB `memory_records_v3`, isolated by scope and project, with vector search, reranking and text fallback.
+- Project episodes and global records use the configured LanceDB directory under the user's `.redlotus`, with scope/project isolation, vector recall, reranking, and text fallback. Sessions and logs remain in each project's `.redlotus`; references, artifacts, dependencies, and caches stay in its `WorkDatabase`.
 - `MEMORY.md` contains the core profile, environment, constraints and general experience without a fixed character cap. Its complete contents and the system prompt are snapshotted for the session; memory writes do not rewrite that prefix. New confirmed information is consumed through tool results and retrieval, and a new session loads a fresh snapshot.
 - File and command tools use the current project. Generated artifacts go to `WorkDatabase/`. `/cd` cancels the old session before switching context.
 

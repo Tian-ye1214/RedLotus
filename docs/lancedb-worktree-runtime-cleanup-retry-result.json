@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "operation": "retry_delete_exact_prior_failed_worktree_runtime_candidates",
+  "generated_at_utc": "2026-09-17T11:40:15.9434039Z",
+  "user_confirmation": "Explicit confirmation to delete the exact 65 CANDIDATE_AFTER_FINAL_TESTS paths; this retry is limited to the eight recorded failures.",
+  "inventory_path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\docs\\lancedb-final-cleanup-inventory.json",
+  "runtime_root": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime",
+  "prior_result_path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\docs\\lancedb-worktree-runtime-cleanup-result.json",
+  "exact_candidate_count": 65,
+  "retry_candidate_count": 8,
+  "deleted": [
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\final-local-acceptance",
+      "bytes": 35173728
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-a7c8b22c4c784e8cae93bb992ff2422b",
+      "bytes": 1509939
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-cb82b52d5d12469cad53291ef71cf13a",
+      "bytes": 1194016
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-baseline-20260917-b",
+      "bytes": 168062
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-20260917",
+      "bytes": 200363
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-final-format-20260917",
+      "bytes": 200615
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-session-ui-full-green-20260917",
+      "bytes": 200227
+    },
+    {
+      "path": "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\pytest-sqlite-review",
+      "bytes": 344616
+    }
+  ],
+  "total_deleted_bytes": 38991566,
+  "not_present": [],
+  "failed": [],
+  "blocked": [],
+  "retained_protected": [
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\packaging",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\migration-inventory",
+    "E:\\代码\\Agent\\WorkDatabase\\worktrees\\project-storage-sqlite\\WorkDatabase\\runtime\\lance-final-local-20260917"
+  ],
+  "e_drive_free_bytes_after": 1434164920320
+}

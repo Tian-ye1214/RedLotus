@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-09-17T08:49:13.3523106Z",
+  "operation": "authorized_limited_benchmark_cleanup",
+  "benchmark_root": "D:\\RedLotusBenchmark",
+  "owner_marker": "D:\\RedLotusBenchmark\\.redlotus-benchmark-owner.json",
+  "expected_owner_marker_sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929",
+  "actual_owner_marker_sha256": "6673fa1895eb6322e22229a40f4b2da8b50ab3356cf347c3bf3a938983122929",
+  "retained": [
+    "binary8-chunk4096-fair-v3",
+    "concurrency-cross-fair-wal-v1",
+    "concurrency-phase-100k-wal-v2"
+  ],
+  "deleted": [
+    {
+      "path": "D:\\RedLotusBenchmark\\binary8-fair-v2",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 528706159,
+      "file_count_before": 4,
+      "last_activity_utc_before": "2026-09-17T06:30:05.5697033Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\chunks-128",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 476629643,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T06:31:42.2987541Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\chunks-4096",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 476306090,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T06:31:48.0332025Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-projection-smoke",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 772519,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:50:41.5374149Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-projection-smoke-2",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 772521,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:51:23.9265006Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 5215185,
+      "file_count_before": 4,
+      "last_activity_utc_before": "2026-09-17T07:16:55.0412462Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-100k",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 818172,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:22:34.8347062Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-2",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 391430,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:17:45.0981179Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-3",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 391435,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:18:41.8663497Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-4",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 769898,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:19:41.7491798Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-smoke-5",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 772349,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:21:11.0163461Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-v1",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 11778184,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:33:59.8341379Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-wal-100k",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 4049394,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:41:48.4496567Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-wal-small-v1",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 7729584,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:48:50.1922384Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-phase-100k-wal-v1",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 14945,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T08:07:21.7659145Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-v1",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 2644799,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T07:10:20.6939263Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-wal-e-v1",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 1057359,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T08:12:42.502675Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\exact-v1",
+      "status": "deleted",
+      "reason": "Removed after marker, boundary, reparse, and active-process checks.",
+      "bytes_before": 2441052087,
+      "file_count_before": 38,
+      "last_activity_utc_before": "2026-09-17T06:12:16.2588042Z"
+    }
+  ],
+  "skipped": [],
+  "failed": [],
+  "remaining": [
+    {
+      "path": "D:\\RedLotusBenchmark\\binary8-chunk4096-fair-v3",
+      "status": "retained",
+      "reason": "Current minimal failure baseline/evidence.",
+      "bytes_before": 529591060,
+      "file_count_before": 7,
+      "last_activity_utc_before": "2026-09-17T06:48:26.9249129Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-cross-fair-wal-v1",
+      "status": "retained",
+      "reason": "Current minimal failure baseline/evidence.",
+      "bytes_before": 11820973,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T08:02:16.2528981Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\concurrency-phase-100k-wal-v2",
+      "status": "retained",
+      "reason": "Current minimal failure baseline/evidence.",
+      "bytes_before": 15330,
+      "file_count_before": 2,
+      "last_activity_utc_before": "2026-09-17T08:11:01.918476Z"
+    },
+    {
+      "path": "D:\\RedLotusBenchmark\\runtime",
+      "status": "runtime_protected",
+      "last_activity_utc": "2026-09-17T08:12:30.7845896Z"
+    }
+  ],
+  "total_deleted_bytes": 3959871753,
+  "deletion_performed": true
+}

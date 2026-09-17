@@ -10,6 +10,10 @@ from PyInstaller.utils.hooks import copy_metadata
 project = os.path.dirname(os.path.abspath(SPEC))
 source_root = Path(project, "src", "redlotus")
 bundle_mode = os.environ.get("REDLOTUS_PYINSTALLER_MODE", "onedir")
+# PyInstaller resolves a relative runtime_tmpdir from the application's launch
+# directory, so a one-file run keeps its transient _MEI directory in the
+# selected project's WorkDatabase instead of the system temporary directory.
+onefile_runtime_dir = str(Path("WorkDatabase") / "runtime" / "pyinstaller")
 
 
 def resource_files(source: Path, destination: str):
@@ -68,6 +72,7 @@ if bundle_mode == "onefile":
         upx=False,
         console=True,
         disable_windowed_traceback=False,
+        runtime_tmpdir=onefile_runtime_dir,
     )
 else:
     exe = EXE(

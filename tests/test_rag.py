@@ -1,19 +1,38 @@
 """Offline RAG algorithm checks; live acceptance uses the actual configured services."""
 
+import errno
 import importlib
+import os
+from pathlib import Path
+
+import pytest
 
 from redlotus.memory.retrieval import EmbedDataBase
 from redlotus.memory.retrieval import RAG
 from redlotus.core.config import settings
 
 
+def _lance_test_dir(tmp_path: Path) -> Path:
+    """Keep native Lance operations off pytest's worktree-local temp volume."""
+    if override := os.environ.get("RAG_DB_PATH"):
+        return Path(override).resolve()
+    data_dir = Path(os.environ["REDLOTUS_DATA_DIR"]).resolve()
+    if root := os.environ.get("REDLOTUS_TEST_MEMORY_ROOT"):
+        root_path = Path(root).resolve()
+        if data_dir.is_relative_to(root_path):
+            return data_dir / "rag"
+        return root_path / tmp_path.parent.name / tmp_path.name / "rag"
+    return data_dir / "rag"
+
+
 async def test_lancedb_scoped_upsert_search_count_and_clear(tmp_path):
     index = settings()["short_term_memory"]["index"]
+    db_path = _lance_test_dir(tmp_path)
     first = EmbedDataBase(
-        str(tmp_path), table_name="test", vector_dim=4, index_config=index
+        str(db_path), table_name="test", vector_dim=4, index_config=index
     )
     second = EmbedDataBase(
-        str(tmp_path), table_name="test", vector_dim=4, index_config=index
+        str(db_path), table_name="test", vector_dim=4, index_config=index
     )
     a = dict(
         id="a:1",
@@ -61,7 +80,7 @@ async def test_rag_chunking_rerank_dedup_and_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "rerank_documents", rerank)
     config = settings()["short_term_memory"]
     config.update(
-        db_path=str(tmp_path),
+        db_path=str(_lance_test_dir(tmp_path)),
         use_rerank=True,
         turn_token_limit=256,
         turn_chunk_overlap_tokens=32,
@@ -104,6 +123,27 @@ async def test_rag_chunking_rerank_dedup_and_fallback(tmp_path, monkeypatch):
     await foreign.close()
 
 
+async def test_empty_project_query_does_not_embed(tmp_path, monkeypatch):
+    module = importlib.import_module("redlotus.memory.retrieval")
+    calls = []
+
+    async def embed(texts, **kwargs):
+        calls.append(texts)
+        return [[1.0, 0.0, 0.0, 0.0]]
+
+    monkeypatch.setattr(module, "embed_texts", embed)
+    config = {
+        **settings()["short_term_memory"],
+        "db_path": str(_lance_test_dir(tmp_path)),
+    }
+    rag = RAG(config, project_id="empty")
+    try:
+        assert await rag.retrieve("unindexed query") == []
+        assert calls == []
+    finally:
+        await rag.close()
+
+
 async def test_missing_vectors_recovered_despite_old_checkpoint(tmp_path, monkeypatch):
     from redlotus.core.agents import WorkspaceContext
     from redlotus.memory.store import MemoryStore
@@ -126,7 +166,7 @@ async def test_missing_vectors_recovered_despite_old_checkpoint(tmp_path, monkey
         **settings(),
         "short_term_memory": {
             **settings()["short_term_memory"],
-            "db_path": str(tmp_path / "db"),
+            "db_path": str(_lance_test_dir(tmp_path)),
             "use_rerank": False,
         },
     }
@@ -165,7 +205,7 @@ async def test_missing_vectors_recovered_despite_old_checkpoint(tmp_path, monkey
 
 async def test_index_settings_build_acceleration_at_threshold(tmp_path):
     db = EmbedDataBase(
-        str(tmp_path),
+        str(_lance_test_dir(tmp_path)),
         table_name="accelerated",
         vector_dim=8,
         index_config=settings()["short_term_memory"]["index"],
@@ -191,29 +231,35 @@ async def test_index_settings_build_acceleration_at_threshold(tmp_path):
     await db.close()
 
 
-async def test_deep_windows_path_uses_stable_writable_index_directory(tmp_path):
-    import sys
-    from pathlib import Path
-    import pytest
-
-    if sys.platform != "win32":
-        pytest.skip("Windows Lance writer path limit")
-    configured = tmp_path / ("project_" + "x" * 80) / "db"
+async def test_configured_lancedb_path_is_preserved_when_write_fails(tmp_path, monkeypatch):
+    module = importlib.import_module("redlotus.memory.retrieval")
+    configured = _lance_test_dir(tmp_path) / ("project_" + "x" * 80) / "db"
     table_name = "conversation_turns_records_v2_caa978c0b354"
+    monkeypatch.delenv("RAG_DB_PATH", raising=False)
+    attempted = []
+
+    async def denied_connection(path, **kwargs):
+        candidate = Path(path).resolve()
+        attempted.append(candidate)
+        if candidate != configured.resolve():
+            raise AssertionError(f"LanceDB redirected configured path to {candidate}")
+        raise OSError(errno.EACCES, "permission denied", str(configured))
+
+    monkeypatch.setattr(module.lancedb, "connect_async", denied_connection)
     db = EmbedDataBase(str(configured), table_name=table_name)
-    again = EmbedDataBase(str(configured), table_name=table_name)
-    assert db.db_path == again.db_path and Path(db.db_path) != configured
-    await db.upsert_vectors(
-        [
-            dict(
-                id="one",
-                record_id="one",
-                project_id="a",
-                text="路径检查",
-                vector=[1.0, 0.0],
-            )
-        ]
-    )
-    assert await again.row_count() == 1
-    await db.close()
-    await again.close()
+    assert Path(db.db_path) == configured.resolve()
+    with pytest.raises(OSError) as error:
+        await db.upsert_vectors(
+            [
+                dict(
+                    id="one",
+                    record_id="one",
+                    project_id="a",
+                    text="路径检查",
+                    vector=[1.0, 0.0],
+                )
+            ]
+        )
+    assert error.value.errno == errno.EACCES
+    assert error.value.filename == str(configured)
+    assert attempted == [configured.resolve()]

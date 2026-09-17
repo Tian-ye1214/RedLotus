@@ -12,16 +12,20 @@ from pathlib import Path
 import pytest
 
 from redlotus.core import config
+from redlotus.core.agents import WorkspaceContext, active_workspace, workspace_context
 from redlotus.core import session as session_module
 from redlotus.core.session import SessionFile
 from redlotus.tools.execution import ExecutionEnvironment, _prepare_runtime_dirs
 
 
-def _storage_config(sessions: Path, runtime: Path) -> dict:
+def _storage_config() -> dict:
     return {
         "storage": {
-            "sessions_dir": str(sessions),
-            "runtime_dir": str(runtime),
+            "project_dir": ".redlotus",
+            "sessions_dir": ".redlotus/sessions",
+            "project_logs_dir": ".redlotus/logs",
+            "references_dir": "WorkDatabase/references",
+            "runtime_dir": "WorkDatabase/runtime",
             "cleanup": {
                 "enabled": True,
                 "session_retention_days": 7,
@@ -32,6 +36,19 @@ def _storage_config(sessions: Path, runtime: Path) -> dict:
     }
 
 
+@pytest.fixture
+def project_storage(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    workspace = WorkspaceContext.from_path(root)
+    monkeypatch.setattr(config, "settings", _storage_config)
+    return (
+        workspace,
+        root / ".redlotus/sessions",
+        root / "WorkDatabase/runtime",
+    )
+
+
 def _session(
     root: Path,
     project_id: str,
@@ -40,7 +57,7 @@ def _session(
     active: bool = False,
     pending: bool = False,
 ) -> SessionFile:
-    saved = SessionFile.create(root / project_id, project_id, session_id=session_id)
+    saved = SessionFile.create(root, project_id, session_id=session_id)
     if active:
         saved.update(metadata={"active_turn": {"id": "turn"}})
     if pending:
@@ -94,40 +111,42 @@ def _marked_cache(root: Path, project_id: str) -> Path:
     return cache
 
 
-def test_non_space_error_is_reraised_without_retry_or_cleanup(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "settings", lambda: _storage_config(tmp_path / "sessions", tmp_path / "runtime"))
+def test_non_space_error_is_reraised_without_retry_or_cleanup(project_storage):
+    workspace, _, _ = project_storage
     error = OSError(errno.EACCES, "permission denied")
     retried = []
 
-    with pytest.raises(OSError) as raised:
-        config.retry_after_storage_cleanup(tmp_path / "failed", error, lambda: retried.append(True))
+    with workspace_context(workspace):
+        with pytest.raises(OSError) as raised:
+            config.retry_after_storage_cleanup(
+                workspace.root / "failed", error, lambda: retried.append(True)
+            )
 
     assert raised.value is error
     assert retried == []
 
 
-def test_unix_host_down_error_does_not_reclaim_old_session(tmp_path, monkeypatch):
-    sessions, runtime = tmp_path / "sessions", tmp_path / "runtime"
-    monkeypatch.setattr(config, "settings", lambda: _storage_config(sessions, runtime))
+def test_unix_host_down_error_does_not_reclaim_old_session(project_storage):
+    workspace, sessions, _ = project_storage
     old = _session(sessions, "old", "old")
     error = OSError(112, "host down")
     retried = []
 
-    with pytest.raises(OSError) as raised:
-        config.retry_after_storage_cleanup(
-            tmp_path / "failed", error, lambda: retried.append(True)
-        )
+    with workspace_context(workspace):
+        with pytest.raises(OSError) as raised:
+            config.retry_after_storage_cleanup(
+                workspace.root / "failed", error, lambda: retried.append(True)
+            )
 
     assert raised.value is error
     assert old.path.exists()
     assert retried == []
 
 
-def test_old_idle_session_is_retried_without_removing_unknown_sibling(tmp_path, monkeypatch):
-    sessions, runtime = tmp_path / "sessions", tmp_path / "runtime"
-    monkeypatch.setattr(config, "settings", lambda: _storage_config(sessions, runtime))
-    current = _session(sessions, "current", "current")
-    old = _session(sessions, "old", "old")
+def test_old_idle_session_is_retried_without_removing_unknown_sibling(project_storage):
+    workspace, sessions, _ = project_storage
+    current = _session(sessions, workspace.project_id, "current")
+    old = _session(sessions, workspace.project_id, "old")
     operator_note = old.path.parent / "operator-note.txt"
     operator_note.write_text("keep", encoding="utf-8")
     attempts, full = [], OSError(errno.ENOSPC, "disk full")
@@ -137,7 +156,8 @@ def test_old_idle_session_is_retried_without_removing_unknown_sibling(tmp_path, 
         if old.path.exists():
             raise full
 
-    config.retry_after_storage_cleanup(current.path, full, retry)
+    with workspace_context(workspace):
+        config.retry_after_storage_cleanup(current.path, full, retry)
 
     assert attempts == [True]
     assert not old.path.exists()
@@ -145,13 +165,72 @@ def test_old_idle_session_is_retried_without_removing_unknown_sibling(tmp_path, 
     assert current.path.exists()
 
 
+def test_cleanup_keeps_session_copied_from_another_project(project_storage):
+    workspace, sessions, _ = project_storage
+    current = _session(sessions, workspace.project_id, "current")
+    copied = _session(sessions, "another-project", "copied")
+    full = OSError(errno.ENOSPC, "disk full")
+
+    with workspace_context(workspace):
+        with pytest.raises(OSError) as raised:
+            config.retry_after_storage_cleanup(current.path, full, lambda: None)
+
+    assert raised.value is full
+    assert copied.path.exists()
+
+
+def test_recovery_write_uses_loaded_session_workspace(tmp_path, monkeypatch):
+    first_root, second_root = tmp_path / "first", tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    first = WorkspaceContext.from_path(first_root)
+    second = WorkspaceContext.from_path(second_root)
+    monkeypatch.setattr(config, "settings", _storage_config)
+
+    def session(workspace, session_id):
+        return SessionFile.create(
+            config.session_data_dir(workspace),
+            workspace.project_id,
+            session_id=session_id,
+            workspace=workspace,
+        )
+
+    partial = session(first, "partial")
+    first_old = session(first, "first-old")
+    second_old = session(second, "second-old")
+    partial.update(metadata={"title": "complete"})
+    raw = partial.path.read_bytes()
+    partial.path.write_bytes(raw[:-3] + b',\n{"metadata":{"title":"partial')
+    old = time.time() - 8 * 24 * 60 * 60
+    for stored in (first_old, second_old):
+        os.utime(stored.path, (old, old))
+    original_replace = session_module.os.replace
+    failures = []
+
+    def disk_full_replace(source, target):
+        if Path(target) == partial.path and not failures:
+            failures.append(True)
+            raise OSError(errno.ENOSPC, "disk full")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(session_module.os, "replace", disk_full_replace)
+    with workspace_context(second):
+        restored = SessionFile.load(partial.path, workspace=first)
+        assert active_workspace() == second
+
+    assert active_workspace() is None
+    assert restored.recovered_partial_write
+    assert failures == [True]
+    assert not first_old.path.exists()
+    assert second_old.path.exists()
+
+
 def test_partial_old_session_is_never_rewritten_deleted_or_recursively_cleaned(
-    tmp_path, monkeypatch
+    project_storage, monkeypatch
 ):
-    sessions, runtime = tmp_path / "sessions", tmp_path / "runtime"
-    monkeypatch.setattr(config, "settings", lambda: _storage_config(sessions, runtime))
-    current = _session(sessions, "current", "current")
-    partial = _session(sessions, "old", "old")
+    workspace, sessions, _ = project_storage
+    current = _session(sessions, workspace.project_id, "current")
+    partial = _session(sessions, workspace.project_id, "old")
     partial.update(metadata={"title": "complete"})
     raw = partial.path.read_bytes()
     partial.path.write_bytes(raw[:-3] + b',\n{"metadata":{"title":"partial')
@@ -176,8 +255,9 @@ def test_partial_old_session_is_never_rewritten_deleted_or_recursively_cleaned(
     monkeypatch.setattr(config, "retry_after_storage_cleanup", no_nested_cleanup)
     monkeypatch.setattr(session_module.os, "replace", disk_full_replace)
 
-    with pytest.raises(OSError) as raised:
-        no_nested_cleanup(current.path, full, lambda: retries.append(True))
+    with workspace_context(workspace):
+        with pytest.raises(OSError) as raised:
+            no_nested_cleanup(current.path, full, lambda: retries.append(True))
 
     assert raised.value is full
     assert cleanup_calls == [current.path]
@@ -187,24 +267,23 @@ def test_partial_old_session_is_never_rewritten_deleted_or_recursively_cleaned(
 
 
 def test_cleanup_preserves_protected_sessions_and_reclaims_only_marked_idle_cache(
-    tmp_path, monkeypatch
+    project_storage,
 ):
-    sessions, runtime = tmp_path / "sessions", tmp_path / "runtime"
-    monkeypatch.setattr(config, "settings", lambda: _storage_config(sessions, runtime))
-    current = _session(sessions, "current", "current")
-    active = _session(sessions, "active", "active", active=True)
-    pending = _session(sessions, "pending", "pending", pending=True)
-    locked = _session(sessions, "locked", "locked")
+    workspace, sessions, runtime = project_storage
+    current = _session(sessions, workspace.project_id, "current")
+    active = _session(sessions, workspace.project_id, "active", active=True)
+    pending = _session(sessions, workspace.project_id, "pending", pending=True)
+    locked = _session(sessions, workspace.project_id, "locked")
     locked_marker = locked.path.parent / ".use-123-test.lock"
-    malformed = sessions / "broken" / "bad" / "model_messages.json"
+    malformed = sessions / "broken" / "model_messages.json"
     malformed.parent.mkdir(parents=True)
     malformed.write_text("not a session", encoding="utf-8")
     old = time.time() - 8 * 24 * 60 * 60
     os.utime(malformed, (old, old))
     cache_root = runtime / "cache"
     reclaimable = _marked_cache(cache_root, "idle")
-    active_cache = _marked_cache(cache_root, "locked")
-    current_cache = _marked_cache(cache_root, "current")
+    locked_cache = _marked_cache(cache_root, "locked")
+    current_cache = _marked_cache(cache_root, workspace.project_id)
     markerless = cache_root / "operator-cache"
     markerless.mkdir(parents=True)
     (markerless / "keep.txt").write_text("keep", encoding="utf-8")
@@ -215,8 +294,9 @@ def test_cleanup_preserves_protected_sessions_and_reclaims_only_marked_idle_cach
         if reclaimable.exists():
             raise full
 
-    with _held_file_lock(locked_marker):
-        config.retry_after_storage_cleanup(current.path, full, retry)
+    with workspace_context(workspace):
+        with _held_file_lock(locked_marker):
+            config.retry_after_storage_cleanup(current.path, full, retry)
 
     assert attempts == [True]
     assert active.path.exists()
@@ -224,7 +304,7 @@ def test_cleanup_preserves_protected_sessions_and_reclaims_only_marked_idle_cach
     assert locked.path.exists()
     assert malformed.exists()
     assert not reclaimable.exists()
-    assert active_cache.exists()
+    assert locked_cache.exists()
     assert current_cache.exists()
     assert (markerless / "keep.txt").read_text(encoding="utf-8") == "keep"
 

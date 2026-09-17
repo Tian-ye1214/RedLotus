@@ -170,8 +170,8 @@ class BasicToolkit:
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
         if skills_manager is not None:
             skills_manager.workspace = self.workspace
-        self._clawhub_cwd = runtime_dir()
-        self._skills_overlay = user_skills_dir()
+        self._clawhub_cwd = runtime_dir(self.workspace)
+        self._skills_overlay = user_skills_dir(self.workspace)
         self._WORK_DATABASE_ROOT = self.workspace.root / "WorkDatabase"
         self._artifact_dir = self._WORK_DATABASE_ROOT
         self._base_dir: Path = self.workspace.root

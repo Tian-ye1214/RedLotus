@@ -427,19 +427,19 @@ class DocumentReader:
         return parts
 
 
-def reference_message_data(value, *, restore=False):
+def reference_message_data(value, *, restore=False, workspace=None):
     """Keep native attachment bytes in immutable snapshots, with links in session JSON."""
     import base64
     from redlotus.core import config as paths
     from redlotus.core.config import file_lock
 
     if isinstance(value, list):
-        return [reference_message_data(item, restore=restore) for item in value]
+        return [reference_message_data(item, restore=restore, workspace=workspace) for item in value]
     if not isinstance(value, dict):
         return value
     if value.get("kind") != "binary" or "data" not in value:
-        return {key: reference_message_data(item, restore=restore) for key, item in value.items()}
-    root = paths.references_dir().resolve()
+        return {key: reference_message_data(item, restore=restore, workspace=workspace) for key, item in value.items()}
+    root = paths.references_dir(workspace).resolve()
     if restore:
         if not isinstance(value["data"], dict):
             return value
@@ -474,7 +474,7 @@ class ReferenceStore:
 
     def __init__(self, workspace: WorkspaceContext, root: Path | None = None):
         self.workspace = workspace
-        self.root = root or references_dir()
+        self.root = root or references_dir(workspace)
 
     async def prepare_message(self, message):
         import base64

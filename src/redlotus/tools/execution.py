@@ -104,10 +104,17 @@ def _runtime_path(template: str, *, runtime: Path, project_id: str) -> Path:
     return path if path.is_absolute() else runtime / path
 
 
-def _runtime_root() -> Path:
+def _extended_path(path: Path) -> str:
+    value = str(path)
+    if _platform.system() == "Windows" and not value.startswith("\\\\?\\"):
+        return "\\\\?\\" + value
+    return value
+
+
+def _runtime_root(workspace) -> Path:
     from redlotus.core.config import runtime_dir
 
-    return runtime_dir().resolve()
+    return runtime_dir(workspace).resolve()
 
 
 def _configured_base_python(
@@ -153,6 +160,7 @@ def _configured_base_python(
 def _build_execution_variables(
     config: dict,
     *,
+    runtime: Path,
     root: Path,
     cache: Path,
     project_id: str,
@@ -165,7 +173,7 @@ def _build_execution_variables(
     }
     bin_dir = root / ("Scripts" if _platform.system() == "Windows" else "bin")
     replacements = dict(
-        runtime=_runtime_root(),
+        runtime=runtime,
         environment=root,
         cache=cache,
         project_id=project_id,
@@ -212,7 +220,7 @@ def get_execution_environment(
             (str(Path(sys.executable).resolve()),),
         )
 
-    runtime = _runtime_root()
+    runtime = _runtime_root(active)
     root = _runtime_path(
         config["environment_dir"], runtime=runtime, project_id=active.project_id
     ).resolve()
@@ -237,6 +245,7 @@ def get_execution_environment(
         cache,
         _build_execution_variables(
             config,
+            runtime=runtime,
             root=root,
             cache=cache,
             project_id=active.project_id,
@@ -311,7 +320,7 @@ async def ensure_execution_environment(environment: ExecutionEnvironment) -> Non
                         "-m",
                         "venv",
                         "--without-pip",
-                        str(environment.root),
+                        _extended_path(environment.root),
                     ],
                     "python_ready",
                 )
@@ -319,7 +328,7 @@ async def ensure_execution_environment(environment: ExecutionEnvironment) -> Non
         steps.append(
             (
                 [
-                    str(environment.python),
+                    _extended_path(environment.python),
                     "-m",
                     "ensurepip",
                     "--upgrade",
@@ -783,8 +792,10 @@ def _rewrite_python_command(args, environment: ExecutionEnvironment):
     if not values:
         return values
     name = _program_name(str(values[0]))
-    if _is_bare(str(values[0])) and name in _PYTHON_NAMES:
-        values[0] = str(environment.python)
+    if name in _PYTHON_NAMES and (
+        _is_bare(str(values[0])) or _same_path(values[0], environment.python)
+    ):
+        values[0] = _extended_path(environment.python)
     elif _is_bare(str(values[0])) and name in _PIP_NAMES:
         values[0] = str(_selected_pip(environment.python))
     return values

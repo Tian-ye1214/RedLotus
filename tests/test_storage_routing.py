@@ -1,5 +1,6 @@
 import json
 import os
+import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from redlotus.core.config import settings
@@ -16,15 +17,14 @@ async def test_session_and_reference_files_are_separate_from_memory(
     tmp_path, monkeypatch
 ):
     config = settings()
-    state, sessions, references, runtime = (
-        tmp_path / name for name in ("state", "sessions", "references", "runtime")
-    )
-    config["storage"] = dict(
+    state = tmp_path / "state"
+    config["storage"].update(
         state_dir=str(state),
-        sessions_dir=str(sessions),
-        references_dir=str(references),
-        compression_dir=str(sessions / "compression"),
-        runtime_dir=str(runtime),
+        project_dir=".redlotus",
+        sessions_dir=".redlotus/sessions",
+        project_logs_dir=".redlotus/logs",
+        references_dir="WorkDatabase/references",
+        runtime_dir="WorkDatabase/runtime",
     )
     selected = tmp_path / "config.json"
     selected.write_text(json.dumps(config), encoding="utf-8")
@@ -34,20 +34,18 @@ async def test_session_and_reference_files_are_separate_from_memory(
     trace = SessionFile.create(paths.session_data_dir(workspace), workspace.project_id)
     trace.save_context([ModelRequest(parts=[UserPromptPart("original input")])], turn_id="one")
     assert paths.user_data_dir() == state
-    assert trace.path.is_relative_to(sessions)
-    assert ReferenceStore(workspace).root == references
-    assert (
-        paths.project_data_dir(workspace) == state / "projects" / workspace.project_id
-    )
+    assert trace.path.is_relative_to(workspace.root / ".redlotus/sessions")
+    assert ReferenceStore(workspace).root == workspace.root / "WorkDatabase/references"
+    assert paths.project_data_dir(workspace) == workspace.root / ".redlotus"
     assert paths.memory_dir() == state / "LongTermMemory"
-    assert paths.user_skills_dir() == runtime / "skills"
+    assert paths.user_skills_dir(workspace) == workspace.root / "WorkDatabase/runtime/skills"
     with workspace_context(workspace):
-        assert conversations_root() == sessions / workspace.project_id
+        assert conversations_root() == workspace.root / ".redlotus/sessions"
         assert list_workspace_snapshots()
     assert not list(state.rglob("model_messages.json"))
 
 
-def test_storage_defaults_preserve_existing_layout(monkeypatch, tmp_path):
+def test_empty_project_session_path_is_rejected(monkeypatch, tmp_path):
     config = settings()
     config["storage"]["sessions_dir"] = ""
     config["storage"]["references_dir"] = ""
@@ -57,8 +55,8 @@ def test_storage_defaults_preserve_existing_layout(monkeypatch, tmp_path):
     monkeypatch.setenv("REDLOTUS_DATA_DIR", str(tmp_path))
     workspace = WorkspaceContext.from_path(tmp_path / "project")
     with workspace_context(workspace):
-        assert conversations_root() == tmp_path / "projects" / workspace.project_id
-    assert ReferenceStore(workspace).root == tmp_path / "references"
+        with pytest.raises(paths.ConfigError, match="sessions_dir"):
+            conversations_root()
 
 
 def test_snapshot_discovery_only_offers_the_new_single_file_format(tmp_path):

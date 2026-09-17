@@ -83,6 +83,7 @@ def test_user_configuration_paths_are_inherited(tmp_path, monkeypatch):
     config = runner._execution_config()
     variables = runner._build_execution_variables(
         config,
+        runtime=tmp_path,
         root=tmp_path / "venv",
         cache=tmp_path / "cache",
         project_id="project",
@@ -91,7 +92,7 @@ def test_user_configuration_paths_are_inherited(tmp_path, monkeypatch):
     assert variables["HOME"] == home
     assert variables["USERPROFILE"] == home
     assert "UNLISTED_MODEL_SECRET" not in variables
-    assert Path(variables["TEMP"]).is_relative_to(tmp_path / "cache")
+    assert Path(variables["TEMP"]) == tmp_path / "tmp"
 
 
 async def test_non_python_command_does_not_resolve_or_create_python(
@@ -119,7 +120,7 @@ async def test_non_python_command_does_not_resolve_or_create_python(
 
 def test_runtime_root_does_not_depend_on_other_templates(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "redlotus.core.config.runtime_dir", lambda: tmp_path / "actual-runtime"
+        "redlotus.core.config.runtime_dir", lambda workspace=None: tmp_path / "actual-runtime"
     )
     config = dict(
         environment_dir=str(tmp_path / "env"),

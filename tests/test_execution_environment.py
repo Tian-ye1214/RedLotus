@@ -75,9 +75,86 @@ async def test_python_command_is_provisioned_in_the_configured_project_environme
 
     assert result.returncode == 0, result.stderr
     environment = subprocess_runner.get_execution_environment(cwd=tmp_path)
-    assert str(environment.root) in result.stdout
+    _, executable = result.stdout.splitlines()
+    assert Path(executable).samefile(environment.python)
+    assert not Path(executable).samefile(Path(sys.executable))
     assert environment.root.is_dir()
-    assert str(Path(sys.executable).parent) not in result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Exercises Windows long-path provisioning")
+async def test_python_command_is_provisioned_from_a_deep_project_path(
+    tmp_path, monkeypatch
+):
+    from redlotus.tools import execution as subprocess_runner
+
+    target_length = 180
+    padding = max(1, target_length - len(str(tmp_path)) - 1)
+    workspace = tmp_path / ("p" * padding)
+    workspace.mkdir()
+    runtime = workspace / "runtime"
+    monkeypatch.setattr(
+        subprocess_runner, "_execution_config", lambda: _config(runtime)
+    )
+
+    result = await subprocess_runner.run_subprocess(
+        ["python", "-c", "import sys; print(sys.prefix)"],
+        shell=False,
+        cwd=str(workspace),
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    environment = subprocess_runner.get_execution_environment(cwd=workspace)
+    assert str(environment.root) in result.stdout
+    assert Path(environment.variables["TEMP"]) == (
+        workspace / "WorkDatabase" / "runtime" / "tmp"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Exercises Windows long-path provisioning")
+async def test_production_python_environment_uses_project_temp_from_deep_workspace(
+    tmp_path,
+):
+    from redlotus.tools import execution as subprocess_runner
+
+    target_length = 180
+    padding = max(1, target_length - len(str(tmp_path)) - 1)
+    workspace = tmp_path / ("p" * padding)
+    workspace.mkdir()
+
+    result = await subprocess_runner.run_subprocess(
+        ["python", "-c", "import sys; print(sys.prefix)"],
+        shell=False,
+        cwd=str(workspace),
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    environment = subprocess_runner.get_execution_environment(cwd=workspace)
+    assert environment.root == workspace / "WorkDatabase" / "runtime" / "venv"
+    assert Path(environment.variables["TEMP"]) == (
+        workspace / "WorkDatabase" / "runtime" / "tmp"
+    )
+    pip = await subprocess_runner.run_subprocess(
+        ["python", "-m", "pip", "--version"],
+        shell=False,
+        cwd=str(workspace),
+        timeout=120,
+    )
+    assert pip.returncode == 0, pip.stderr
+    assert pip.stdout.startswith("pip ")
+    script = await subprocess_runner.run_subprocess(
+        [
+            "python",
+            "-c",
+            "from pip._internal.cli.autocompletion import autocomplete; print('ready')",
+        ],
+        shell=False,
+        cwd=str(workspace),
+        timeout=120,
+    )
+    assert script.returncode == 0, script.stderr
+    assert script.stdout.splitlines() == ["ready"]
 
 
 def test_environment_only_inherits_allowlisted_values_and_keeps_explicit_overrides(
