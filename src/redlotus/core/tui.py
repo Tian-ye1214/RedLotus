@@ -320,6 +320,7 @@ class RedLotusTui(App[None]):
             loaded = await controller.enter_current_workspace()
         finally:
             self.refresh_status()
+            self.query_one("#input", AgentInput).focus()
         if loaded:
             self.state.is_first_input = False
 
