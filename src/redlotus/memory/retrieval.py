@@ -8,7 +8,6 @@ import sys
 from pathlib import Path
 from redlotus.core import config as logger, config as app_config
 from redlotus.core.config import (
-    APP_NAME,
     user_data_dir,
     get_env,
     settings,
@@ -36,8 +35,7 @@ def _fit_windows_path(path: Path, table_name: str) -> str:
     ):
         return str(path)
     digest = hashlib.sha256(str(path).casefold().encode()).hexdigest()[:16]
-    local_root = Path(os.environ.get("LOCALAPPDATA") or Path.home())
-    fallback = local_root / APP_NAME / "rag_lancedb" / digest
+    fallback = user_data_dir() / "rag_lancedb" / digest
     logger.info(
         "LanceDB: 路径过深，向量索引改存 %s；原始记忆与配置保持原位。", fallback
     )
@@ -61,7 +59,7 @@ _HTTP_KEY = "rag"
 def _require_rag_model(role: str) -> str:
     name = settings()["RAG_models"][role].strip()
     if not name:
-        raise RuntimeError(f"config.json 的 RAG_models 中缺少 {role!r}。")
+        raise app_config.ConfigError(f"缺少配置 RAG_models.{role}；检查来源: {app_config.config_source_summary()}")
     return name
 
 
@@ -79,7 +77,7 @@ def _get_shared_client() -> httpx.AsyncClient:
 def _require_rag_api() -> None:
     missing = app_config.missing_rag_api_keys()
     if missing:
-        raise RuntimeError("缺少 RAG API 配置: " + ", ".join(missing))
+        raise app_config.ConfigError("缺少配置 " + ", ".join(missing) + "；检查来源: " + app_config.config_source_summary())
 
 
 async def _rag_api_post(endpoint: str, body: dict[str, Any]) -> dict[str, Any]:

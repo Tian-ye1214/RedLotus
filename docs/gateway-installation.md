@@ -2,13 +2,15 @@
 
 ## 配置归属
 
-`python main.py` 是开发入口，显式选择仓库的 `src/redlotus/config.json` 和开发 `.env`。pip 安装的 `redlotus` 与 PyInstaller 程序默认读取当前操作系统用户的全局配置；启动目录里的 `config.json` 或 `.env` 不会改变它们的配置来源。
+pip 安装后运行 `redlotus`，全局基准配置为 `~/.redlotus/config.json`。逐字段读取顺序统一为：本地 `src/redlotus/config.json` → 本地 `.env` → 全局 JSON。源码以仓库根目录为本地目录，pip 以当前目录为本地目录，PyInstaller 以 EXE 目录为本地目录；不搜索父目录，不把临时解压目录作为配置来源。
 
-Windows 默认目录为 `%LOCALAPPDATA%\RedLotus`；其他平台通过 `platformdirs` 选择用户目录。`REDLOTUS_CONFIG_FILE`、`REDLOTUS_CONFIG_DIR` 和 `REDLOTUS_DOTENV_FILE` 可显式选择配置来源，`REDLOTUS_DATA_DIR` 可隔离测试数据。`/config` 显示实际配置路径。
+各平台均使用当前用户的 `.redlotus` 目录。`REDLOTUS_CONFIG_FILE`、`REDLOTUS_DOTENV_FILE` 和 `REDLOTUS_CONFIG_DIR` 可为隔离测试显式选择三层来源，`REDLOTUS_DATA_DIR` 隔离状态。`/config` 显示读取顺序和修改目标。`AppData\Local\RedLotus` 不再作为默认目录，也没有旧目录迁移逻辑。
 
-配置初始化只在启动或显式读取时执行。升级时只从随包 `config.default.json` 补齐缺失项，先备份旧配置，保留用户已经提供的模型、上下文和 RAG 设置。业务组件读取深拷贝；配置编辑通过文件锁和原子写入提交。
+不再提供第二份默认模板或启动补值。必填配置缺失时报告字段和来源；JSON 损坏或类型错误不能靠下一层隐藏。业务组件读取 `copy.deepcopy`，配置命令通过文件锁和原子写入只保存用户修改，不把合并结果整份落盘。有本地 JSON 时修改本地，否则修改全局。新安装缺少全局配置时，应先提供完整配置；程序不会选择隐藏默认模型。
 
-全局目录保存配置、核心记忆、LanceDB、引用原件、会话轨迹与感知任务。项目原始事件和会话按 `project_id` 隔离；项目情景只在对应项目召回，全局语义记忆跨本人项目使用。旧 `.redlotus` 数据幂等复制到对应项目目录，保留原件和迁移记录。`WorkDatabase` 继续用于当前项目产物，首次需要写产物时才创建。
+`.env` 支持所有字段，嵌套键使用与 JSON 一致的名字及双下划线，例如 `models__worker__max_tokens=393216`。数组和对象使用 JSON 值，普通文本保持字符串；不展开宿主环境变量。空白连接配置继续查找下一层，`false`、`0`、空列表及允许的 `null` 不会被当成缺失。全局 `.env` 不是第四层来源。
+
+全局记忆、LanceDB 和日志默认保存在 `.redlotus`；项目情景按 `project_id` 隔离。会话、引用、运行环境继续遵守显式存储配置，`WorkDatabase` 保存项目产物。打包时不携带开发配置或 `.env`；EXE 旁可自行放置外置开发配置。
 
 ## 命名网关与模型预设
 
@@ -48,7 +50,7 @@ Windows 默认目录为 `%LOCALAPPDATA%\RedLotus`；其他平台通过 `platform
 
 模型请求参数在 `models` 或 `model_presets` 中设置；通用网关设置在 `model_gateway`，连接超时使用 `MODEL_HTTP_TIMEOUT` 与网关的可选覆盖。RAG 模型名称、连接、批量与检索设置分别由 `RAG_models`、`rag_service`、`short_term_memory` 和 `long_term_memory` 提供。工厂把复制后的配置交给 SDK，协议编码不修改用户的采样和输出预算。
 
-上下文压缩使用 `compressor`。感知是独立的子 Agent 任务，默认由 `memory_perception.model_role` 选择 `worker`，使用该角色的模型、输出上限与附件限制；其并发由 `memory_perception.max_concurrent` 控制。记忆的窗口、重叠和证据读取预算也由该段配置管理。
+上下文压缩使用 `compressor`。感知是独立的子 Agent 任务，由 `memory_perception.model_role` 选择角色，使用该角色的模型、输出上限与附件限制；同一会话的 Agent 工厂线程共享 `agent_run_policy.max_concurrent_threads_per_session` 上限。记忆的窗口、重叠和证据读取预算由 `memory_perception` 管理。
 
 会话 system prompt 完整包含通用约束、系统环境、Skills 目录与摘要、角色职责、项目和核心记忆。它在会话内固定；当前时间追加到新输入的运行元数据中。Skills 通过工具逐步读取指令、资源和脚本。摘要带独立的来源标记，即使 SDK 合并消息也能在恢复会话时识别；记忆写入、纠正和清空通过后续结果告知模型，不重写已缓存的系统前缀。
 
@@ -56,9 +58,9 @@ Windows 默认目录为 `%LOCALAPPDATA%\RedLotus`；其他平台通过 `platform
 
 ## 外部资源与打包
 
-安装程序不向 `site-packages`、可执行程序目录或 PyInstaller 临时解压目录写配置与记忆。随包资源仅包括默认配置模板、提示词、基线 Skills 与必要依赖；凭据、日志和个人记忆不进入分发包。
+安装程序不向 `site-packages` 或 PyInstaller 临时解压目录写配置与记忆。随包资源仅包括提示词、基线 Skills、渠道配置示例与必要依赖；开发 JSON、`.env`、凭据、日志和个人记忆不进入分发包。EXE 旁已有的外置开发 JSON 可由配置命令修改。
 
-浏览器功能需要安装 Chromium。旧 Office 转换需要系统 LibreOffice，或通过全局配置/环境中的 `LIBREOFFICE_PATH` 指定 `soffice.com` / `soffice`。脚本使用可发现的外部 Python；冻结程序自身不作为 Python 解释器使用。
+浏览器功能需要安装 Chromium。旧 Office 转换需要系统 LibreOffice，或通过三层配置中的 `LIBREOFFICE_PATH` 指定 `soffice.com` / `soffice`。脚本使用可发现的外部 Python；冻结程序自身不作为 Python 解释器使用。
 
 ```powershell
 # 构建独立目录

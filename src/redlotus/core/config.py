@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 import os
 import errno
-import platformdirs
 import json
 import time
 import threading
@@ -22,7 +21,8 @@ from loguru import logger as _lg
 from collections.abc import Callable
 from urllib.parse import urlsplit
 from copy import deepcopy
-from dotenv import dotenv_values
+from io import StringIO
+from dotenv.parser import parse_stream
 from pydantic_ai.usage import UsageLimits
 
 
@@ -36,7 +36,7 @@ def _frozen() -> bool:
 def resource_root() -> Path:
     """随包只读资源根（redlotus 包目录）。
 
-    - 正常 / editable 安装：本文件位于 redlotus/infra/paths.py，上溯两级即包根。
+    - 正常 / editable 安装：本文件位于 redlotus/core/config.py，上溯两级即包根。
     - PyInstaller 冻结：优先 _MEIPASS/redlotus，回退 exe 目录。
     """
     if _frozen():
@@ -51,9 +51,7 @@ def user_data_dir() -> Path:
     """Persistent memory state; the explicit environment override remains supported."""
     if override := os.environ.get("REDLOTUS_DATA_DIR"):
         return Path(override)
-    return _storage_path(
-        "state_dir", Path(platformdirs.user_data_dir(APP_NAME, appauthor=False))
-    )
+    return _storage_path("state_dir", Path.home() / ".redlotus")
 
 
 def _storage_path(name: str, default: Path) -> Path:
@@ -66,27 +64,42 @@ def user_config_dir() -> Path:
     """用户配置根：config.json / .env / bot config.yaml。"""
     return Path(
         os.environ.get("REDLOTUS_CONFIG_DIR")
-        or platformdirs.user_config_dir(APP_NAME, appauthor=False)
-    )
+        or Path.home() / ".redlotus"
+    ).expanduser().resolve()
 
 
 # ---- 工作产物：跟随当前工作目录 ----
 # ---- 配置 / 密钥：用户配置目录 ----
+def local_config_root() -> Path:
+    """开发覆盖只搜索一个目录；冻结程序使用 EXE 目录。"""
+    return Path(sys.executable).resolve().parent if _frozen() else Path.cwd()
+
+
+def config_sources() -> tuple[Path, Path, Path]:
+    """配置优先级：本地 JSON、本地 .env、全局 JSON。"""
+    local = os.environ.get("REDLOTUS_CONFIG_FILE")
+    return (
+        Path(local).expanduser().resolve() if local else local_config_root() / "src/redlotus/config.json",
+        dotenv_file(),
+        user_config_dir() / "config.json",
+    )
+
+
+def config_source_summary() -> str:
+    """缺项提示使用可直接定位的三层文件路径。"""
+    return " → ".join(map(str, config_sources()))
+
+
 def config_file() -> Path:
-    if path := os.environ.get("REDLOTUS_CONFIG_FILE"):
-        return Path(path).resolve()
-    return user_config_dir().resolve() / "config.json"
-
-
-def default_config_file() -> Path:
-    """随包默认 config.json（首次运行 seed 用）。"""
-    return resource_root() / "core" / "config.json"
+    """配置命令只修改已有本地 JSON，否则修改全局 JSON。"""
+    local, _, global_file = config_sources()
+    return local if local.is_file() else global_file
 
 
 def dotenv_file() -> Path:
     if path := os.environ.get("REDLOTUS_DOTENV_FILE"):
-        return Path(path).resolve()
-    return user_config_dir() / ".env"
+        return Path(path).expanduser().resolve()
+    return local_config_root() / ".env"
 
 
 def project_data_dir(workspace) -> Path:
@@ -732,148 +745,176 @@ if TYPE_CHECKING:
 
 
 _CONFIG: tuple[tuple, dict[str, Any]] | None = None
-_DOTENV_CACHE: dict[tuple, dict[str, str]] | None = None
-_API_CONFIG_KEYS = {"BASE_URL", "API_KEY", "SILICONFLOW_BASE", "SILICONFLOW_KEY"}
+class ConfigError(ValueError):
+    """配置错误只包含字段和来源，不包含可能敏感的值。"""
 
 
-def _copy_missing_defaults(config, defaults, section=""):
-    for key, value in defaults.items():
-        if key not in config:
-            config[key] = deepcopy(value)
-        elif (
-            isinstance(value, dict)
-            and isinstance(config[key], dict)
-            and section != "models"
-            and key not in ("gateways", "model_presets")
-        ):
-            if key == "context":
-                contexts = config[key]
-                roles = set(defaults["models"]) & set(value)
-                if (
-                    not roles.intersection(contexts)
-                    and "default_context_tokens" in contexts
-                ):
-                    _copy_missing_defaults(contexts, value["coordinator"])
-                    _copy_missing_defaults(
-                        contexts, {"compression": value["compression"]}
-                    )
+class ConfigValues(dict):
+    """保持字典接口，同时为必填项和凭据保留路径及来源。"""
+
+    def __init__(self, values=(), *, path=(), origins=None):
+        self.path, self.origins = path, origins if origins is not None else {}
+        super().__init__()
+        for key, value in dict(values).items():
+            self[key] = (
+                ConfigValues(value, path=(*path, key), origins=self.origins)
+                if isinstance(value, dict) else value
+            )
+
+    def __getitem__(self, key):
+        if key not in self:
+            raise ConfigError(f"缺少配置 {'.'.join((*self.path, key))}；检查来源: {config_source_summary()}")
+        return super().__getitem__(key)
+
+
+def _connection_field(key: str) -> bool:
+    lowered = key.lower()
+    return lowered in {"api_key", "base_url", "siliconflow_base", "siliconflow_key"} or lowered.endswith(("_api_key", "_base_url"))
+
+
+def _validate_config(value, source: Path, path=()) -> None:
+    """校验结构和服务字段；不提供任何模型或策略默认值。"""
+    objects = {"models", "gateways", "model_presets", "RAG_models", "context", "storage",
+               "execution", "bot", "lifecycle", "memory_perception", "agent_run_policy",
+               "short_term_memory", "long_term_memory", "model_gateway", "model_metadata",
+               "rag_service", "input_limits", "task_title", "conversation_log"}
+    key = path[-1] if path else ""
+    expected = None
+    if not path or len(path) == 1 and key in objects:
+        expected = dict
+    elif len(path) == 2 and path[0] in {"gateways", "model_presets"}:
+        expected = dict
+    elif len(path) == 2 and path[0] == "models":
+        expected = (dict, str)
+    elif _connection_field(key) or key == "api_key_env" or (
+        len(path) == 2 and path[0] == "RAG_models"
+        or path and path[0] == "storage" and key.endswith("_dir")
+    ):
+        expected = str
+    elif path and path[0] == "gateways" and key in {"timeout", "connect_timeout"}:
+        expected = (int, float)
+    elif path and path[0] in {"models", "model_presets"} and key in {"max_tokens", "temperature", "top_p"}:
+        expected = int if key == "max_tokens" else (int, float)
+    if expected and (value is not None or expected is dict) and (not isinstance(value, expected) or isinstance(value, bool) and expected != bool):
+        raise ConfigError(f"配置 {source}: 字段 {'.'.join(path) or '<root>'} 类型错误")
+    if isinstance(value, dict):
+        for name, child in value.items():
+            _validate_config(child, source, (*path, name))
+
+
+def _parse_config(path: Path, raw: bytes | None, *, dotenv=False) -> dict:
+    """解析一个来源；.env 不做环境变量展开，嵌套键用双下划线。"""
+    if raw is None:
+        return {}
+    try:
+        if not dotenv:
+            result = json.loads(raw)
+        else:
+            result = {}
+            for binding in parse_stream(StringIO(raw.decode("utf-8-sig"))):
+                if binding.error:
+                    raise ConfigError(f"配置 {path}: 第 {binding.original.line} 行语法错误")
+                if binding.key is None or binding.value is None:
                     continue
-                value = deepcopy(value)
-                for role in roles:
-                    value[role] = {
-                        k: v
-                        for k, v in value[role].items()
-                        if k not in contexts.get("defaults", {})
-                    }
-            _copy_missing_defaults(config[key], value, key)
+                try:
+                    value = json.loads(binding.value)
+                except json.JSONDecodeError:
+                    value = binding.value
+                parts = binding.key.split("__")
+                node = result
+                for key in parts[:-1]:
+                    node = node.setdefault(key, {})
+                    if not isinstance(node, dict):
+                        raise ConfigError(f"配置 {path}: 字段 {binding.key} 结构冲突")
+                if parts[-1] in node or not all(parts):
+                    raise ConfigError(f"配置 {path}: 字段 {binding.key} 重复或结构冲突")
+                node[parts[-1]] = value
+        _validate_config(result, path)
+        if not isinstance(result, dict):
+            raise ConfigError(f"配置 {path}: 根节点必须是对象")
+        return result
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"配置 {path}: 无效编码或 JSON，无法读取") from exc
 
 
-def initialize_config() -> None:
-    path = config_file()
-    with file_lock(path):
-        defaults = json.loads(default_config_file().read_text(encoding="utf-8"))
-        if not path.exists():
-            atomic_write_json(path, defaults)
-            return
-        raw = path.read_bytes()
-        current = json.loads(raw)
-        updated = deepcopy(current)
-        _copy_missing_defaults(updated, defaults)
-        updated["agent_run_policy"].pop("max_worker_concurrent", None)
-        updated["memory_perception"].pop("max_concurrent", None)
-        execution = updated["execution"]
-        if "blocked_code_patterns" in execution["permissions"]:
-            execution["permissions"].pop("blocked_code_patterns")
-            execution["inherit_env"] = list(
-                dict.fromkeys(
-                    [
-                        *execution["inherit_env"],
-                        *defaults["execution"]["inherit_env"],
-                    ]
-                )
-            )
-        if updated != current:
-            backup = (
-                path.parent
-                / "config-backups"
-                / (hashlib.sha256(raw).hexdigest() + ".json")
-            )
-            if not backup.exists():
-                atomic_write_json(backup, current)
-            atomic_write_json(path, updated)
+def _merge_config(target, incoming, origins, source, path=()):
+    """较高层逐字段覆盖；空白连接配置才继续使用低层值。"""
+    for key, value in incoming.items():
+        field = (*path, key)
+        if _connection_field(key) and (value is None or isinstance(value, str) and not value.strip()):
+            continue
+        if isinstance(value, dict):
+            if not isinstance(target.get(key), dict):
+                target[key] = {}
+            _merge_config(target[key], value, origins, source, field)
+        else:
+            target[key] = deepcopy(value)
+            origins[field] = source
+
+
+@contextmanager
+def _config_locks(*, writing=False):
+    """统一锁顺序，配置读写都覆盖相同的三层来源。"""
+    paths = set(path for path in config_sources() if path.exists())
+    if writing:
+        paths.add(config_file())
+    with ExitStack() as locks:
+        for path in sorted(paths):
+            locks.enter_context(file_lock(path))
+        yield
+
+
+def _config_version():
+    return tuple((path, path.read_bytes() if path.is_file() else None) for path in config_sources())
+
+
+def settings() -> dict[str, Any]:
+    """缓存命中直接深拷贝；来源变化才在锁内重新读取和校验。"""
+    global _CONFIG
+    cached = _CONFIG
+    if cached is not None and _config_version() == cached[0]:
+        return deepcopy(cached[1])
+    with _config_locks():
+        version = _config_version()
+        if _CONFIG is None or version != _CONFIG[0]:
+            value, origins = {}, {}
+            for index in reversed(range(len(version))):
+                path, raw = version[index]
+                _merge_config(value, _parse_config(path, raw, dotenv=index == 1), origins, index)
+            _CONFIG = version, ConfigValues(value, origins=origins)
+        return deepcopy(_CONFIG[1])
 
 
 def load_config() -> dict[str, Any]:
     global _CONFIG
-    initialize_config()
-    path = config_file()
-    with file_lock(path):
-        raw = path.read_bytes()
-        value = json.loads(raw)
-        version = (path, raw)
-    _CONFIG = (version, value)
-    return deepcopy(value)
+    _CONFIG = None
+    return settings()
 
 
 def reload_config() -> dict[str, Any]:
-    global _CONFIG, _DOTENV_CACHE
-    _CONFIG = None
-    _DOTENV_CACHE = None
     return load_config()
 
 
-def settings() -> dict[str, Any]:
-    path = config_file()
-    with file_lock(path):
-        version = (path, path.read_bytes()) if path.exists() else None
-    cached = _CONFIG
-    if cached is None or version != cached[0]:
-        return load_config()
-    return deepcopy(cached[1])
-
-
-def _dotenv_values() -> dict[str, str]:
-    """Read only the selected credential file, never an arbitrary project's .env."""
-    global _DOTENV_CACHE
-    files = [dotenv_file()]
-    key = tuple(
-        (str(path), path.stat().st_mtime_ns if path.is_file() else None)
-        for path in files
-    )
-    if _DOTENV_CACHE is None:
-        _DOTENV_CACHE = {}
-    if key not in _DOTENV_CACHE:
-        values = {}
-        for path in files:
-            if path.is_file():
-                values.update(
-                    {
-                        str(k): str(v).strip()
-                        for k, v in dotenv_values(path).items()
-                        if v and str(v).strip()
-                    }
-                )
-        _DOTENV_CACHE[key] = values
-    return _DOTENV_CACHE[key]
-
-
-def _config_scalar(key: str, cfg=None) -> str:
-    raw = (settings() if cfg is None else cfg).get(key)
-    if raw is not None and not isinstance(raw, (dict, list)):
-        return raw.strip() if isinstance(raw, str) else str(raw).strip()
-    return ""
+def credential_value(gateway_name: str, cfg: dict) -> str:
+    """命名网关的直接值和命名引用按各自来源排序，同层优先直接值。"""
+    gateway = cfg["gateways"][gateway_name]
+    candidates = [(gateway.get("api_key"), ("gateways", gateway_name, "api_key"))]
+    if reference := gateway.get("api_key_env"):
+        candidates.append((get_env(reference, warn=False, cfg=cfg), (reference,)))
+    origins = getattr(cfg, "origins", {})
+    candidates.sort(key=lambda item: origins.get(item[1], 0))
+    return next((str(value).strip() for value, _ in candidates if value is not None and str(value).strip()), "")
 
 
 def get_env(key: str, *, warn: bool = True, default: str = "", cfg=None) -> str:
-    """配置读取唯一入口；/api 管理的 key 让 config.json 优先于 .env。"""
-    if env_val := (os.environ.get(key) or "").strip():
-        return env_val
-    configured, dotenv = _config_scalar(key, cfg), _dotenv_values().get(key, "")
-    value = (
-        (configured or dotenv) if key in _API_CONFIG_KEYS else (dotenv or configured)
-    )
+    """旧标量读取接口共享配置快照；不从宿主环境变量读取业务值。"""
+    configuration = settings() if cfg is None else cfg
+    raw = configuration.get(key)
+    if isinstance(raw, (dict, list)):
+        raise ConfigError(f"配置字段 {key} 必须是标量；检查来源: {config_source_summary()}")
+    value = str(raw).strip() if raw is not None else ""
     if not value and warn and not default:
-        warning("未配置 %r，请在 .env 或 config.json 根中填写。", key)
+        raise ConfigError(f"缺少配置 {key}；检查来源: {config_source_summary()}")
     return value or default
 
 
@@ -895,20 +936,31 @@ def missing_rag_api_keys() -> tuple[str, ...]:
     return _missing_keys(("SILICONFLOW_BASE", "SILICONFLOW_KEY"))
 
 
-def save_config(cfg: dict[str, Any] | None = None) -> None:
-    cfg = settings() if cfg is None else cfg
-    save_locked_json(config_file(), cfg)
-    reload_config()
+def _persist_changes(target, before, after):
+    """只把用户改动落到写入层，不复制回退层的其他字段。"""
+    for key in before.keys() - after.keys():
+        target.pop(key, None)
+    for key, value in after.items():
+        if key in before and before[key] == value:
+            continue
+        if isinstance(value, dict) and isinstance(before.get(key), dict):
+            child = target.setdefault(key, {})
+            _persist_changes(child, before[key], value)
+        else:
+            target[key] = deepcopy(value)
 
 
 def update_config(change) -> None:
-    """Apply a local edit to the latest document under the cross-process lock."""
-    path = config_file()
-    initialize_config()
-    with file_lock(path):
-        config = json.loads(path.read_text(encoding="utf-8"))
-        change(config)
-        atomic_write_json(path, config)
+    """锁内读取最新有效值，只保存本次编辑产生的差异。"""
+    with _config_locks(writing=True):
+        path = config_file()
+        raw = _parse_config(path, path.read_bytes() if path.is_file() else None)
+        before = settings()
+        after = deepcopy(before)
+        change(after)
+        _persist_changes(raw, before, after)
+        _validate_config(raw, path)
+        atomic_write_json(path, raw)
     reload_config()
 
 
@@ -965,8 +1017,16 @@ def get_model_and_params(role: str, *, cfg=None) -> tuple[str, dict[str, Any]]:
         raw = {"preset": raw}
     if preset := raw.pop("preset", None):
         base = deepcopy(cfg["model_presets"][preset])
+        origins = getattr(cfg, "origins", {})
+        selection = origins.get(("models", role, "preset"), 0)
+        raw = {key: value for key, value in raw.items()
+               if min((rank for path, rank in origins.items()
+                       if path[:3] == ("models", role, key)), default=0) <= selection}
         raw = {**base.pop("settings", {}), **base, **raw.pop("settings", {}), **raw}
-    name = str(raw.pop("name")).strip()
+    name = raw.pop("name", None)
+    if not isinstance(name, str) or not name.strip():
+        raise ConfigError(f"缺少有效配置 models.{role}.name；检查来源: {config_source_summary()}")
+    name = name.strip()
     raw = {**raw.pop("settings", {}), **raw}
     return name, raw
 
@@ -1012,6 +1072,8 @@ def get_agent_roles(*, cfg=None) -> tuple[str, ...]:
 
 def get_context_profile_roles() -> tuple[str, ...]:
     roles = get_agent_roles()
+    if "default_context_tokens" in settings()["context"]:
+        return roles
     return tuple(role for role in roles if role in settings()["context"]) or roles
 
 
@@ -1021,9 +1083,15 @@ def get_context_config(role: str, *, cfg=None) -> dict[str, Any]:
     roles = get_agent_roles(cfg=cfg)
     if role not in roles:
         raise ValueError(f"Unknown Agent role: {role}")
-    if not any(key in raw for key in roles):
-        return dict(raw)  # Legacy shared context configuration.
-    return {**raw.get("defaults", {}), **raw.get(role, {})}
+    shared = {key: value for key, value in raw.items()
+              if key not in {*roles, "defaults", "compression"}}
+    groups = [("context", "defaults"), ("context",), ("context", role)]
+    values = (raw.get("defaults", {}), shared, raw.get(role, {}))
+    origins = getattr(cfg, "origins", {})
+    entries = [(-origins.get((*prefix, key), 0), specificity, key, value)
+               for specificity, (prefix, group) in enumerate(zip(groups, values))
+               for key, value in group.items()]
+    return {key: deepcopy(value) for _, _, key, value in sorted(entries, key=lambda entry: entry[:2])}
 
 
 class ExitDeadline:
@@ -1059,7 +1127,7 @@ async def run_cli(system=None):
     from redlotus.core.system import AgentSystem
 
     if system is None:
-        initialize_config()
+        load_config()
         system = AgentSystem()
     stop_event = asyncio.Event()
     install_stop_handlers(stop_event)
@@ -1075,10 +1143,14 @@ def main() -> None:
     """CLI entrypoint used by root ``main.py``."""
     from redlotus.core.system import AgentSystem
 
-    initialize_config()
-    deadline = ExitDeadline(settings()["lifecycle"]["shutdown_grace_seconds"])
-    system = AgentSystem(exit_deadline=deadline)
     try:
-        asyncio.run(run_cli(system))
-    finally:
-        deadline.close()
+        load_config()
+        deadline = ExitDeadline(settings()["lifecycle"]["shutdown_grace_seconds"])
+        try:
+            system = AgentSystem(exit_deadline=deadline)
+            asyncio.run(run_cli(system))
+        finally:
+            deadline.close()
+    except ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from None

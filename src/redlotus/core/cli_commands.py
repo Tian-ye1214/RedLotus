@@ -29,6 +29,7 @@ from redlotus.core.config import (
     set_model_name,
     settings,
     config_file,
+    config_sources,
 )
 from redlotus.core.agents import AgentInvocationState, TRACE_STORE
 from redlotus.core.gateway import ModelTarget
@@ -216,7 +217,10 @@ def print_config_summary() -> None:
     base = (get_env("BASE_URL", warn=False) or "").strip()
     key_set = bool((get_env("API_KEY", warn=False) or "").strip())
     lines = [
-        f"配置文件: {config_file()}",
+        "读取顺序（仅存在的文件参与）:",
+        *(f"  {index}. {path} {'[存在]' if path.is_file() else '[不存在]'}"
+          for index, path in enumerate(config_sources(), 1)),
+        f"修改目标: {config_file()}",
         f"BASE_URL: {base or '(空)'}",
         f"API_KEY: {'已填写' if key_set else '(空)'}",
         f"工作目录: {current_workspace()}",

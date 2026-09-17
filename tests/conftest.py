@@ -33,13 +33,19 @@ def isolate_background_services(monkeypatch, tmp_path):
     monkeypatch.setenv("REDLOTUS_DATA_DIR", str(state))
     config = tmp_path.parent / "config_files" / (tmp_path.name + ".json")
     config.parent.mkdir(parents=True, exist_ok=True)
-    settings = json.loads((ROOT / "src/redlotus/core/config.json").read_text(encoding="utf-8"))
+    settings = json.loads((ROOT / "src/redlotus/config.json").read_text(encoding="utf-8"))
+    settings.update(API_KEY="test-only", BASE_URL="https://example.test/v1")
     settings["short_term_memory"]["db_path"] = str(state / "rag")
     settings["storage"]["sessions_dir"] = str(tmp_path / "sessions")
     settings["storage"]["references_dir"] = str(tmp_path / "references")
     settings["storage"]["runtime_dir"] = str(tmp_path / "runtime")
     config.write_text(json.dumps(settings), encoding="utf-8")
+    global_config = tmp_path.parent / "global_settings" / tmp_path.name / "config.json"
+    global_config.parent.mkdir(parents=True)
+    global_config.write_text(json.dumps(settings), encoding="utf-8")
+    monkeypatch.setenv("REDLOTUS_CONFIG_DIR", str(global_config.parent))
     monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(config))
+    monkeypatch.setenv("REDLOTUS_DOTENV_FILE", str(tmp_path / ".env"))
     # Keep native LanceDB on the test volume, including Windows exFAT fallback.
     monkeypatch.setenv("RAG_DB_PATH", str(state / "rag"))
     monkeypatch.setattr(

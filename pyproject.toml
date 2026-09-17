@@ -20,7 +20,6 @@ dependencies = [
     "openai>=2.32.0",
     "openpyxl>=3.1.5",
     "pandas>=3.0.2",
-    "platformdirs>=4.9.0",
     "prompt-toolkit>=3.0.0",
     "pydantic-ai-slim[openai,anthropic,google]==2.0.0",
     "pymupdf>=1.27.2.3",
@@ -59,7 +58,6 @@ include-package-data = false
 
 [tool.setuptools.package-data]
 redlotus = [
-    "core/config.json",
     "prompts/*.md",
     "tools/skills/**/*",
     "api/config.yaml.example",

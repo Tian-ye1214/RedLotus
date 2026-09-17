@@ -8,12 +8,9 @@ def main():
 
     if getattr(sys, "frozen", False):
         os.environ["LOGFIRE_PYDANTIC_RECORD"] = "off"
+        root = Path(sys.executable).resolve().parent
     else:
         root = Path(__file__).resolve().parent
-        os.environ.setdefault(
-            "REDLOTUS_CONFIG_FILE", str(root / "src/redlotus/config.json")
-        )
-        os.environ.setdefault("REDLOTUS_DOTENV_FILE", str(root / ".env"))
         # A shared editable environment must not mix another checkout's packages.
         source = root / "src"
         sys.path[:] = [str(source), *[
@@ -21,6 +18,8 @@ def main():
             if Path(path).resolve() != source
             and not (Path(path).name == "src" and (Path(path) / "redlotus").is_dir())
         ]]
+    os.environ.setdefault("REDLOTUS_CONFIG_FILE", str(root / "src/redlotus/config.json"))
+    os.environ.setdefault("REDLOTUS_DOTENV_FILE", str(root / ".env"))
     from redlotus.core.config import main as run
 
     run()

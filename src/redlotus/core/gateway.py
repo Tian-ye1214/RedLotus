@@ -24,6 +24,9 @@ from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from redlotus.core.config import (
     apply_thinking_config,
+    ConfigError,
+    config_source_summary,
+    credential_value,
     get_context_config,
     get_env,
     get_model_and_params,
@@ -179,13 +182,12 @@ class ModelTarget:
             else get_env("BASE_URL", warn=False, cfg=cfg)
         )
         if gateway_name:
-            key = gateway.get("api_key", "")
-            if variable := gateway.get("api_key_env"):
-                key = get_env(variable, warn=False, cfg=cfg) or key
+            key = credential_value(gateway_name, cfg)
         else:
             key = get_env("API_KEY", warn=False, cfg=cfg)
         limits = cfg.get("input_limits", {})
         options = {
+            "credential_field": f"gateways.{gateway_name}.api_key" if gateway_name else "API_KEY",
             "connect_timeout": float(
                 gateway.get("connect_timeout", defaults["connect_timeout"])
             ),
@@ -233,6 +235,13 @@ def create_model(model_name: str | ModelTarget, parameter: dict | None = None):
         if isinstance(model_name, ModelTarget)
         else ModelTarget.from_values(model_name, parameter or {})
     )
+    credential_field = json.loads(target.options_json).get("credential_field", "API_KEY")
+    address_field = credential_field.removesuffix("api_key") + "base_url" if credential_field.startswith("gateways.") else "BASE_URL"
+    missing = credential_field if not target.api_key else (
+        address_field if not target.base_url else None
+    )
+    if missing:
+        raise ConfigError(f"缺少配置 {missing}；检查来源: {config_source_summary()}")
     policy = ModelInputPolicy.from_limits(target.limits)
 
     def new_client():

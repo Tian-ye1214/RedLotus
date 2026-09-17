@@ -9,8 +9,7 @@ from redlotus.core.gateway import create_model
 
 
 async def test_model_name_does_not_choose_transport_protocol(monkeypatch):
-    monkeypatch.setenv("API_KEY", "test-only")
-    monkeypatch.setenv("BASE_URL", "https://chat.example/v1")
+    app_config.set_api(api_key="test-only", base_url="https://chat.example/v1")
     model = create_model("claude-through-a-chat-gateway", {"thinking": "disabled"})
     assert isinstance(model, OpenAIChatModel)
     from redlotus.core.config import close_all_clients
@@ -23,6 +22,7 @@ def test_named_preset_binds_settings_credentials_and_limits(tmp_path, monkeypatc
     selected.write_text(
         json.dumps(
             {
+                "TEST_NATIVE_KEY": "preset-test-key",
                 "gateways": {
                     "native": {
                         "protocol": "openai-responses",
@@ -45,7 +45,7 @@ def test_named_preset_binds_settings_credentials_and_limits(tmp_path, monkeypatc
         encoding="utf-8",
     )
     monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(selected))
-    monkeypatch.setenv("TEST_NATIVE_KEY", "preset-test-key")
+    monkeypatch.setenv("TEST_NATIVE_KEY", "host-must-not-override-json")
     monkeypatch.setenv("API_KEY", "unrelated-test-key")
     from redlotus.core.gateway import ModelTarget
 

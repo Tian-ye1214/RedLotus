@@ -402,9 +402,9 @@ async def live(args, evidence):
 
 
 async def run(args, evidence):
-    from redlotus.core.config import initialize_config
+    from redlotus.core.config import load_config
 
-    initialize_config()
+    load_config()
     evidence.install()
     sampler = asyncio.create_task(evidence.sample())
     try:

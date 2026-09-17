@@ -170,7 +170,12 @@
     "sessions_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\sessions",
     "references_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\references",
     "compression_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\sessions\\compression",
-    "runtime_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\runtime"
+    "runtime_dir": "E:\\代码\\Agent\\WorkDatabase\\evaluation\\20260914-012826\\runtime",
+    "cleanup": {
+      "enabled": true,
+      "session_retention_days": 7,
+      "execution_cache": true
+    }
   },
   "task_title": {
     "max_chars": 50

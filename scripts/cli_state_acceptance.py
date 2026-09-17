@@ -485,10 +485,10 @@ class AcceptanceRun:
 
     async def start(self) -> None:
         from redlotus.core import config as logger
-        from redlotus.core.config import initialize_config
+        from redlotus.core.config import load_config
 
         self.memory_root, self.config_fingerprint = configure(self.args)
-        initialize_config()
+        load_config()
         self.evidence.install()
         self.evidence.logs = []
         self.log_sink = logger._lg.add(

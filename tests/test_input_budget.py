@@ -13,7 +13,7 @@ async def test_encoded_attachment_budget_rejects_before_network(tmp_path, monkey
     path.write_text(
         json.dumps(
             {
-                "models": {"coordinator": {"name": "model-a"}},
+                "models": {"coordinator": {"name": "model-a", "max_tokens": 512}},
                 "context": {
                     "coordinator": {
                         "default_context_tokens": 32000,

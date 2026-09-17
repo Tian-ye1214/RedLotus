@@ -14,7 +14,7 @@ from redlotus.core.agents import WorkspaceContext
 from redlotus.memory.records import ObservationStore
 
 
-def test_installed_configuration_ignores_the_working_directory(tmp_path, monkeypatch):
+def test_installed_configuration_uses_explicit_developer_dotenv(tmp_path, monkeypatch):
     global_root = tmp_path / "global"
     global_root.mkdir()
     global_file = global_root / "config.json"
@@ -32,7 +32,7 @@ def test_installed_configuration_ignores_the_working_directory(tmp_path, monkeyp
     set_workspace(tmp_path)
     assert paths.config_file() == global_file
     monkeypatch.setattr(app_config, "_CONFIG", None)
-    assert app_config.get_env("API_KEY") == "global-test-key"
+    assert app_config.get_env("API_KEY") == "wrong-project-key"
 
 
 def test_configuration_source_can_be_selected_after_import(tmp_path, monkeypatch):
@@ -105,7 +105,7 @@ def test_settings_returns_independent_nested_snapshots(tmp_path, monkeypatch):
     assert settings()["models"]["worker"]["max_tokens"] == 12345
 
 
-def test_old_execution_policy_migrates_once_without_changing_models(
+def test_loading_existing_configuration_never_migrates_or_rewrites_it(
     tmp_path, monkeypatch
 ):
     from copy import deepcopy
@@ -118,21 +118,15 @@ def test_old_execution_policy_migrates_once_without_changing_models(
     selected = tmp_path / "old-config.json"
     selected.write_text(json.dumps(original), encoding="utf-8")
     monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(selected))
-    app_config.initialize_config()
-    migrated = json.loads(selected.read_text(encoding="utf-8"))
-    assert "HOME" in migrated["execution"]["inherit_env"]
-    assert "blocked_code_patterns" not in migrated["execution"]["permissions"]
-    assert migrated["models"] == saved["models"]
-    backups = list((tmp_path / "config-backups").glob("*.json"))
-    assert (
-        len(backups) == 1
-        and json.loads(backups[0].read_text(encoding="utf-8")) == saved
-    )
-    app_config.initialize_config()
-    assert len(list((tmp_path / "config-backups").glob("*.json"))) == 1
+    original_bytes = selected.read_bytes()
+    app_config.load_config()
+    assert json.loads(selected.read_text(encoding="utf-8")) == saved
+    assert not (tmp_path / "config-backups").exists()
+    app_config.load_config()
+    assert selected.read_bytes() == original_bytes
 
 
-def test_partial_configuration_adds_roles_without_overwriting_preset_or_shared_context(
+def test_partial_configuration_falls_back_to_explicit_global_roles(
     tmp_path, monkeypatch
 ):
     path = tmp_path / "config.json"
@@ -156,10 +150,11 @@ def test_partial_configuration_adds_roles_without_overwriting_preset_or_shared_c
     )
     monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(path))
     config = app_config.settings()
-    assert config["models"]["coordinator"] == selected
+    assert config["models"]["coordinator"]["preset"] == selected["preset"]
     assert set(config["models"]) >= {"coordinator", "manager", "worker", "compressor"}
     assert config["RAG_models"]["embedding"] == "operator-embedding"
     assert config["RAG_models"]["reranker"]
+    assert config["context"]["default_context_tokens"] == 98765
     assert app_config.get_context_config("worker")["default_context_tokens"] == 98765
     assert set(app_config.get_context_profile_roles()) == set(config["models"])
 
@@ -181,8 +176,8 @@ def test_config_reader_holds_writer_lock_until_parse_finishes(tmp_path, monkeypa
     import threading
 
     path = tmp_path / "config.json"
+    path.write_text(json.dumps(app_config.settings()), encoding="utf-8")
     monkeypatch.setenv("REDLOTUS_CONFIG_FILE", str(path))
-    app_config.initialize_config()
     entered, release, written = threading.Event(), threading.Event(), threading.Event()
     original = json.loads
     errors = []

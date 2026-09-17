@@ -105,11 +105,13 @@ playwright install chromium
 
 ## Initial configuration
 
-The development launcher `python main.py` explicitly selects `src/redlotus/config.json`. The installed `redlotus` command and frozen executables use the current OS user's global configuration, independent of the working directory. On Windows this is `%LOCALAPPDATA%/RedLotus/config.json`; `/config` shows the actual source.
+After pip installation, run `redlotus`. Global configuration lives at `~/.redlotus/config.json`. Optional developer overrides use this field-by-field order: local `src/redlotus/config.json`, local `.env`, then global JSON. The source launcher searches from the checkout root, pip from the current directory, and PyInstaller from the executable's directory. `/config` shows the sources and write target. No parent-directory search or AppData configuration is used.
 
-Set `REDLOTUS_CONFIG_FILE` to select another file, or `REDLOTUS_CONFIG_DIR` to select a directory containing `config.json`. A missing explicitly selected file is initialized from the bundled defaults. Logs, persistent memory and immutable references remain in the user data directory, configurable through `REDLOTUS_DATA_DIR`.
+Nested `.env` fields use JSON names separated by `__`, such as `models__worker__max_tokens=393216`. Numbers, booleans, arrays and objects use JSON values. Host environment variables never override business settings. Missing required fields produce an error; no bundled configuration is silently copied or merged. Configuration editing writes only the changes to an existing local JSON, otherwise to the global JSON. Credentials are never included in packages.
 
-At minimum, configure the model API endpoint and key:
+For isolated tests, `REDLOTUS_CONFIG_FILE`, `REDLOTUS_DOTENV_FILE`, and `REDLOTUS_CONFIG_DIR` explicitly select the three sources. `REDLOTUS_DATA_DIR` isolates state. Memory and logs default to `~/.redlotus`; project artifacts and separately configured session/reference directories retain their configured locations. The legacy `%LOCALAPPDATA%/RedLotus` directory is not read, migrated, or recreated.
+
+For a new installation, provide a complete configuration at `~/.redlotus/config.json`; the maintained [source configuration](src/redlotus/config.json) shows the available fields. Set its storage paths for your machine. The following connection fields are only a fragment, not a complete configuration:
 
 ```json
 {
@@ -120,7 +122,7 @@ At minimum, configure the model API endpoint and key:
 
 Gateways support Pydantic AI's OpenAI Chat, OpenAI Responses, Anthropic Messages and Google adapters. Manager, Worker, Coordinator and Compressor models can be configured independently or select named presets. Memory perception uses the role selected by `memory_perception.model_role` (Worker by default), independently of context compression. Vector retrieval and reranking use `SILICONFLOW_BASE`, `SILICONFLOW_KEY`, `RAG_models` and `rag_service`.
 
-Credentials may be supplied by named environment references or the global configuration directory's `.env`. Only the development launcher explicitly selects the repository's `.env`; installed entry points do not search the working directory. Do not commit credentials. See [configuration and gateway examples](docs/gateway-installation.md).
+Named credential references such as `api_key_env` resolve fields in the same three-layer configuration, including the local `.env`; they do not read the host environment or a global `.env`. Direct keys and references follow the same source priority. Do not commit credentials. See [configuration and gateway examples](docs/gateway-installation.md).
 
 ## Terminal usage
 
