@@ -54,11 +54,31 @@ onedir 未压缩约 755 MiB，LanceDB 原生库约 296 MiB。onefile 会在项�
 
 | 产物 | 字节 | SHA-256 |
 | --- | ---: | --- |
-| RedLotus-1.0.1-py3-none-any.whl | 376,323 | `04baacbc953d8768b0a35a463de9684f471a09632cb26f2c00d3e065fa640f81` |
+| redlotus-1.0.1-py3-none-any.whl | 376,321 | `57b161b3d24eeb43d50eaffd00275f247c3e8a8efad3427ea7df594d130371e8` |
 | redlotus-1.0.1.tar.gz | 428,322 | `38647b878493cb6b732c7dba5edbd7bc8a91ffd9e93c657ff1ae8649c95b67a3` |
 | RedLotus-1.0.1-windows-x64-onedir.zip | 320,502,097 | `1ad68eef936ada61eff4f42b0da47d7cdef2906dfcfa6ea417941630327543ee` |
 | RedLotus-1.0.1-windows-x64.exe | 302,997,726 | `25b8478b86d908d12172175e855facd5c44bc6213436c5923366276233379182` |
 
 ## 发布与清理
 
-本文件记录发布前已完成的验证。PyPI／GitHub 上传、下载复核和分支／worktree 清理结果在执行后追加，不能仅凭本地构建视为发布完成。正式会话、配置、记忆和项目产物不在清理范围。
+- 已合并并推送 `develop@765ee50b`；`v1.0.1` 指向完整提交 `765ee50b3daf863b532fdb04d61faf35861b2841`。
+- [PyPI 1.0.1](https://pypi.org/project/RedLotus/1.0.1/) 已发布 wheel、sdist，公开 JSON 中的哈希逐项与本地一致。
+- [GitHub v1.0.1](https://github.com/Tian-ye1214/RedLotus/releases/tag/v1.0.1) 已公开且设为最新正式版。两份 Windows 包、说明和 SHA256SUMS 均完成服务端哈希核对。
+- GitHub 首次草稿请求因缩写 target_commitish 被拒绝，改用完整标签提交后成功；未改为从默认 master 发布。
+- PyPI 接收 sdist 后拒绝旧构建工具生成的大写 wheel 文件名和内部 dist-info 路径。使用标准 `wheel pack` 规范化路径并重建 RECORD，逐字节确认其他应用、资源和元数据内容不变；未重复上传已接受的 sdist。新 wheel 在日常环境重装、启动及加载通过，exit 0，25.88 秒，再补传成功。上表为最终发布哈希，原候选 wheel 哈希 `04baacbc953d8768b0a35a463de9684f471a09632cb26f2c00d3e065fa640f81` 未作为公开 wheel 发布。
+- 从正式 PyPI 执行强制升级：本次 pip 选取 sdist，经标准构建后安装到日常 Miniconda。通过 CMD `redlotus` 启动、恢复原会话并真实追问，正确回复校验词，exit 0，104.78 秒。没有将 pip 的临时构建目录作为额外 RedLotus 测试环境。
+- GitHub 重新下载耗时 100.58 秒，四份文件与本地校验一致；onedir 解压耗时 36.11 秒。首次下载尚未结束时的提前哈希检查被拒绝，等待下载进程 exit 0 后重新检查通过，未将未完成下载当作产物损坏。
+
+- 重新下载的 onedir 实际启动、恢复 21 条 SDK 消息并正常退出，exit 0，89.53 秒；下载的 onefile 同样恢复原会话并正常退出，exit 0，139.39 秒。它们与发布前测试的二进制哈希一致。
+
+## 清理记录
+
+- 已删除本地 `codex/release-1.0.1`。远端查询无 `codex/*` 分支；本次开发分支未推送到远端。
+- `git worktree list --porcelain` 仅剩主工作区。旧 `project-storage-sqlite` 与不存在的 `session-refactor-worktree` 不再是有效 worktree。
+- 旧 worktree 的可读残留文件已逐项删除 **51,188 个**。整树删除会因一处既有文件系统损坏提前停止，因此改为同一边界内逐文件删除，没有扩大目标目录。
+- **未能完全删除的旧缓存**：`E:\代码\Agent\WorkDatabase\worktrees\project-storage-sqlite\WorkDatabase\runtime\packaging\uv-cache\archive-v0\XtU2bKtESdhjJfuK\redlotus-1.0.0.dist-info`。Windows 枚举返回“文件或目录损坏且无法读取”，删除返回“目录不是空的”；这个节点及祖先目录仍保留。未执行整卷修复或改变磁盘文件系统。
+
+- 本轮临时根目录 `E:\代码\Agent\WorkDatabase\runtime\release-1.0.1` 已删除；清理前包含 8,155 个文件、约 3.47 GiB，涵盖构建产物、重复下载、测试项目、缓存及工具。生成的 `src/RedLotus.egg-info` 也已删除；复查仓库 `build`、`dist` 均不存在。
+- `.git/worktrees/project-storage-sqlite` 和 `.git/worktrees/session-refactor-worktree` 的残留管理目录仍可被 `Test-Path` 发现，此前清理返回访问拒绝；它们已不出现在 Git 的有效 worktree 列表中。与上述损坏缓存一并保留为未完全清除项，不宣称磁盘上已无任何旧 worktree 残留。
+
+正式会话、配置、记忆和项目产物不在清理范围。日常 Miniconda 中已升级的 RedLotus 1.0.1 保留，发布标签保持指向经过构建和验收的应用提交；此后的文档提交只补记发布复核与清理结果。
