@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "RedLotus"
-version = "1.0.0"
+version = "1.0.1"
 description = "红莲极意 · 一个会自己长技能、记得住、能出门的终端 Agent"
 readme = "README.md"
 requires-python = ">=3.12"

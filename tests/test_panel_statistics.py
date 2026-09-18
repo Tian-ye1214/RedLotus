@@ -1,6 +1,7 @@
 """Panel counts distinguish new content, billable requests, and live Agents."""
 
 import asyncio
+from io import StringIO
 import threading
 from types import SimpleNamespace
 
@@ -8,11 +9,14 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.usage import RequestUsage
 from textual.app import App
-from textual.widgets import ProgressBar, Sparkline, Static
+from textual.widgets import ProgressBar, Static
+from rich.console import Console
 
 from redlotus.core.agents import AgentRegistry, SubagentFactory, SubagentSpec, WorkspaceContext
 from redlotus.core.history import ChatHistory
-from redlotus.core.presentation import build_panel_snapshot, _collect_runtime
+from redlotus.core.presentation import (
+    PanelSessionSummary, build_panel_snapshot, _collect_runtime, _render_sessions,
+)
 from redlotus.core.session import SessionController, SessionFile
 from redlotus.core.tui import RedLotusTui
 from redlotus.tools.interaction import TaskManager, UserMessage
@@ -22,14 +26,11 @@ from redlotus.tools.references import ReferenceFile, ReferencePart
 class ChartApp(App):
     """Mount the actual panel widgets without launching a model or the main CLI."""
 
-    _update_token_trend = RedLotusTui._update_token_trend
     _update_content_chart = RedLotusTui._update_content_chart
     _update_api_usage = RedLotusTui._update_api_usage
     _update_agent_counts = RedLotusTui._update_agent_counts
 
     def compose(self):
-        yield Sparkline(id="panel-trend")
-        yield Static(id="panel-trend-note")
         yield Static(id="panel-content-note")
         yield Static(id="panel-api-usage")
         yield Static(id="panel-agent-counts")
@@ -48,19 +49,63 @@ async def snapshot(root, values=()):
     return await build_panel_snapshot(log_root=root)
 
 
-@pytest.mark.parametrize("values, visible, note", [
-    ([], False, "暂无"), ([7292], False, "7,292"),
-    ([0, 0], False, "无变化"), ([35, 35], False, "无变化"),
-    ([10, 35], True, ""),
-])
-async def test_trend_requires_multiple_distinct_values(tmp_path, values, visible, note):
-    data = await snapshot(tmp_path, values)
+def render_sessions(rows, width=120, include_all=False):
+    output = StringIO()
+    Console(file=output, width=width, color_system=None).print(
+        _render_sessions(rows, include_all=include_all)
+    )
+    return output.getvalue()
+
+
+@pytest.mark.parametrize("values", [[], [7292], [0, 0], [35, 35], [10, 120000]])
+def test_session_comparison_labels_every_value(values):
+    rows = [PanelSessionSummary(topic=f"会话{i}", date="2026-09-17", input_tokens=value,
+                                responses=1, agents={"coordinator"}) for i, value in enumerate(values)]
+    output = render_sessions(rows)
+    assert "会话 API 用量" in output
+    assert "最近 20 个" in output
+    if not rows:
+        assert "暂无会话用量" in output
+        return
+    assert "条长" in output and "最大值" in output
+    assert "coordinator" in output
+    for i, value in enumerate(values):
+        assert f"会话{i}" in output
+        assert f"{value:,}" in output
+    assert ("█" in output) is any(values)
+
+
+@pytest.mark.parametrize("width", [60, 80, 120, 220])
+def test_session_comparison_preserves_exact_values_in_narrow_terminal(width):
+    rows = [PanelSessionSummary(topic="长标题" * 18, saved_at="2026-09-17T13:35:00+00:00",
+                                input_tokens=1234567, output_tokens=12345,
+                                responses=27, agents={"coordinator", "worker"})]
+    output = render_sessions(rows, width=width)
+    assert "1,246,912" in output
+    assert "长标题" in output
+    assert "27" in output
+    assert "coordinator" in output and "worker" in output
+    assert "2026-09-17T" not in output
+
+
+def test_session_comparison_identifies_incomplete_usage_and_preserves_order():
+    rows = [
+        PanelSessionSummary(topic="当前任务", input_tokens=7500, responses=2, missing_usage_responses=1),
+        PanelSessionSummary(topic="未知任务", responses=1, missing_usage_responses=1),
+        PanelSessionSummary(topic="旧任务", input_tokens=100, responses=1),
+    ]
+    output = render_sessions(rows, include_all=True)
+    assert "全部" in output
+    assert "已报告部分" in output and "7,500" in output
+    assert "用量未知" in output
+    assert output.index("当前任务") < output.index("未知任务") < output.index("旧任务")
+
+
+async def test_empty_plan_remains_separate_from_agent_activity(tmp_path):
+    data = await snapshot(tmp_path)
     app = ChartApp()
     async with app.run_test():
         RedLotusTui._update_panel_charts(app, data)
-        assert app.query_one("#panel-trend").display is visible
-        if note:
-            assert note in str(app.query_one("#panel-trend-note").render())
         assert not app.query_one("#panel-task-progress").display
         assert "暂无计划任务" in str(app.query_one("#panel-task-counts").render())
 

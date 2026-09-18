@@ -20,7 +20,6 @@ from textual.widgets import (
     OptionList,
     ProgressBar,
     RichLog,
-    Sparkline,
     Static,
 )
 from textual.widgets.option_list import Option
@@ -199,7 +198,6 @@ class RedLotusTui(App[None]):
     #review-view { display: none; height: 1fr; border: round $warning; padding: 0 1; }
     #panel-view { display: none; height: 1fr; border: round $success; padding: 0 1; }
     .panel-chart-title { color: $text-muted; text-style: bold; margin-top: 1; }
-    #panel-trend { height: 3; }
     .panel-bar-row { height: auto; min-height: 1; width: 1fr; }
     .panel-bar-label { width: 22; }
     .panel-bar-row ProgressBar { width: 1fr; }
@@ -256,9 +254,6 @@ class RedLotusTui(App[None]):
             yield OptionList(id="review-view")
             with VerticalScroll(id="panel-view"):
                 yield Static("", id="panel-content")
-                yield Label("API 累计 Token 趋势（按会话 旧→新）", classes="panel-chart-title")
-                yield Sparkline(id="panel-trend")
-                yield Static("", id="panel-trend-note")
                 yield Label(
                     "新增内容 Token 占比（当前项目全部会话）",
                     classes="panel-chart-title",
@@ -541,26 +536,9 @@ class RedLotusTui(App[None]):
 
     def _update_panel_charts(self, snapshot: Any) -> None:
         """Render independent content, API, Agent and plan counters without rebuilding widgets."""
-        self._update_token_trend(snapshot.token_trend)
         self._update_content_chart(snapshot)
         self._update_api_usage(snapshot.history)
         self._update_agent_counts(snapshot.runtime)
-
-    def _update_token_trend(self, values) -> None:
-        """Only draw a sparkline when session samples express a real change."""
-        trend = self.query_one("#panel-trend", Sparkline)
-        series = [float(v) for v in values]
-        trend.data = series if len(set(series)) > 1 else []
-        trend.display = bool(trend.data)
-        note = ""
-        if not series:
-            note = "暂无 Token 数据"
-        elif len(series) == 1:
-            note = f"{series[0]:,.0f} tokens · 仅一个会话，暂无趋势"
-        elif not trend.data:
-            note = f"{len(series)} 个会话均为 {series[0]:,.0f} tokens · 无变化"
-        self.query_one("#panel-trend-note", Static).update(note)
-        self.query_one("#panel-trend-note", Static).display = bool(note)
 
     def _update_content_chart(self, snapshot) -> None:
         """Show once-counted content and mark measurements with incomplete coverage."""

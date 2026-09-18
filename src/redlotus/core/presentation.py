@@ -8,6 +8,7 @@ import math
 import asyncio
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol, Callable
 from rich.console import Console, Group
 from rich.text import Text
@@ -528,8 +529,6 @@ class PanelSnapshot:
     history: PanelHistoryStats
     visible_sessions: list[PanelSessionSummary]
     include_all: bool = False
-    # 可见会话按时间从旧到新排列的每会话总 token 数（供 Sparkline 趋势图使用）
-    token_trend: list[int] = field(default_factory=list)
 
     @property
     def content(self):
@@ -576,13 +575,11 @@ async def build_panel_snapshot(
     )
     visible_sessions = sessions if include_all else sessions[:RECENT_SESSION_LIMIT]
     runtime = await _collect_runtime(system, coordinator_history, manager_history)
-    token_trend = [_session_total_tokens(s) for s in reversed(visible_sessions)]
     return PanelSnapshot(
         runtime=runtime,
         history=history,
         visible_sessions=visible_sessions,
         include_all=include_all,
-        token_trend=token_trend,
     )
 
 
@@ -764,28 +761,31 @@ def _session_total_tokens(session: PanelSessionSummary) -> int:
 def _render_sessions(
     sessions: list[PanelSessionSummary], *, include_all: bool
 ) -> Table:
-    title = (
-        "历史对话（全部）"
-        if include_all
-        else f"历史对话（最近 {RECENT_SESSION_LIMIT}）"
-    )
-    table = _new_table(
-        title,
-        ("时间", "Topic", "Agents", "Responses", "Tokens"),
-        right_columns=("Responses", "Tokens"),
-    )
+    """Compare labeled session totals without implying continuous time or quota progress."""
+    scope = "全部" if include_all else f"最近 {RECENT_SESSION_LIMIT} 个"
+    table = Table(title=f"会话 API 用量 · {scope} · 最近活动优先", expand=True, show_lines=True)
+    table.add_column("时间 / 会话", min_width=12, ratio=1, overflow="fold")
+    table.add_column("相对用量", width=12, overflow="crop", no_wrap=True)
+    table.add_column("API 总 Token", justify="right", min_width=13, no_wrap=True)
     if not sessions:
-        table.add_row("-", "暂无历史对话", "-", "0", "0")
+        table.add_row("暂无会话用量", "", "—")
         return table
+    maximum = max((_session_total_tokens(s) for s in sessions if not s.missing_usage_responses), default=0)
+    table.caption = "API 输入＋输出，包含历史重发；条长按列表中完整用量的最大值比较。"
     for session in sessions:
-        agents = ",".join(sorted(session.agents))
         tokens = _session_total_tokens(session)
+        when = (datetime.fromisoformat(session.saved_at).astimezone().strftime("%m-%d %H:%M")
+                if session.saved_at else session.date or "—")
+        label = Text(when + "\n", style="dim")
+        label.append(session.topic or "未命名会话", style="bold")
+        label.append(f"\n{', '.join(sorted(session.agents)) or '—'} · {session.responses:,} 次响应", style="dim")
+        value = f"{tokens:,}"
+        if session.missing_usage_responses:
+            value = f"{tokens:,}\n已报告部分" if tokens else "用量未知"
         table.add_row(
-            session.saved_at or session.date,
-            session.topic,
-            agents,
-            str(session.responses),
-            _fmt_int(tokens),
+            label,
+            Text(_block_bar(tokens, maximum) if not session.missing_usage_responses else "", style="cyan"),
+            Text(value, style="yellow" if session.missing_usage_responses else "bold"),
         )
     return table
 

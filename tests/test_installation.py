@@ -75,8 +75,8 @@ def test_import_order_does_not_initialize_user_storage(tmp_path, module):
         [
             sys.executable, "-c",
             "import sys; from pathlib import Path; "
-            "sys.path[:] = [sys.argv[1], *[p for p in sys.path "
-            "if not (Path(p) / 'redlotus').is_dir()]]; "
+            "sys.path.insert(0, sys.argv[1]); import redlotus; "
+            "redlotus.__path__ = [str(Path(sys.argv[1]) / 'redlotus')]; "
             "__import__('redlotus.' + sys.argv[2])",
             str(Path(__file__).resolve().parents[1] / "src"), module,
         ],

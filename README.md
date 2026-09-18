@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/PyPI-pending-lightgrey.svg" alt="PyPI release pending">
+  <a href="https://pypi.org/project/RedLotus/"><img src="https://img.shields.io/pypi/v/RedLotus" alt="PyPI version"></a>
   <img src="https://img.shields.io/badge/Python-3.12%2B-3776ab.svg" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-555.svg" alt="Platform">
   <a href="https://ai.pydantic.dev/"><img src="https://img.shields.io/badge/built%20with-Pydantic%20AI-7c3aed.svg" alt="Pydantic AI"></a>
@@ -22,7 +22,7 @@
 RedLotus is an AI agent that runs in your terminal. It chooses how to handle each request based on its complexity: work directly, delegate a focused task to one Worker, or ask a Manager to break down and coordinate a larger job. It supports OpenAI-compatible model APIs and includes memory, runtime Skills, file extraction, browser automation, and chat bot integrations.
 
 ```bash
-pip install "redlotus @ git+https://github.com/Tian-ye1214/RedLotus.git"
+python -m pip install --upgrade redlotus
 redlotus
 ```
 
@@ -36,7 +36,7 @@ redlotus
 |---------|-------------|
 | Multi-agent orchestration | The Coordinator selects the execution path. For complex work, the Manager creates dependent tasks and Workers execute them in dependency-aware batches. |
 | Goal mode | RedLotus keeps iterating toward a defined goal until it finishes. Additional user input can be incorporated while the goal is running. |
-| Three memory layers | Append-only traces, LLM perception over 25-turn windows, project-scoped episodes and global long-term RAG. MEMORY.md contains the core profile and reusable experience. |
+| Three memory layers | Incremental session records, LLM perception over 20 new user turns, project-scoped episodes and global long-term RAG. MEMORY.md contains the core profile and reusable experience. |
 | Runtime Skills | `SKILL.md` files provide instructions, references, and scripts on demand. Skill directories are rescanned at the start of each user turn, so newly installed skills do not require a restart. |
 | File and media handling | RedLotus can read images and extract content from PDF, Word, Excel, HTML, Markdown, CSV, JSON, and text files. PDF extraction preserves page text, tables, links, and embedded images. |
 | Review workflow and safeguards | The full-screen TUI includes hunk-by-hunk diff review. Runtime safeguards include path sandboxing, dangerous-command blocking, and child-process cleanup. |
@@ -73,28 +73,30 @@ flowchart LR
 
 RedLotus requires Python 3.12 or later and supports Windows, Linux, and macOS.
 
-### Install from GitHub
+### Install or upgrade from PyPI
 
 ```bash
-pip install "redlotus @ git+https://github.com/Tian-ye1214/RedLotus.git"
+python -m pip install --upgrade redlotus
 redlotus
 ```
 
 To install the command in an isolated environment, use `uv`:
 
 ```bash
-uv tool install git+https://github.com/Tian-ye1214/RedLotus.git
+uv tool install redlotus
 ```
 
-After a PyPI release is available, `pip install redlotus` and `uv tool install redlotus` can be used instead.
+Windows x64 builds are available on [GitHub Releases](https://github.com/Tian-ye1214/RedLotus/releases). Extract the onedir ZIP before running `Agent.exe`, or run the onefile EXE. Both use the same user configuration and project session storage as the pip entry point. Existing configuration and memory are preserved on upgrade.
+
+The panel compares each session's API usage with its title, exact Token count and a relative bar. Repeated API context remains in API usage; separately displayed new input is counted only once.
 
 ### Optional dependencies
 
 ```bash
-pip install "redlotus[browser] @ git+https://github.com/Tian-ye1214/RedLotus.git"  # Browser automation
-pip install "redlotus[bots] @ git+https://github.com/Tian-ye1214/RedLotus.git"     # QQ and WeChat bots
-pip install "redlotus[viz] @ git+https://github.com/Tian-ye1214/RedLotus.git"      # Plotting and image tools
-pip install "redlotus[all] @ git+https://github.com/Tian-ye1214/RedLotus.git"      # All optional dependencies
+pip install "redlotus[browser]"  # Browser automation
+pip install "redlotus[bots]"     # QQ and WeChat bots
+pip install "redlotus[viz]"      # Plotting and image tools
+pip install "redlotus[all]"      # All optional dependencies
 ```
 
 Install Chromium before using browser automation:
@@ -198,7 +200,7 @@ New skills are discovered automatically on subsequent user turns.
 - `MEMORY.md` contains the core profile, environment, constraints and general experience without a fixed character cap. Its complete contents and the system prompt are snapshotted for the session; memory writes do not rewrite that prefix. New confirmed information is consumed through tool results and retrieval, and a new session loads a fresh snapshot.
 - File and command tools use the current project. Generated artifacts go to `WorkDatabase/`. `/cd` cancels the old session before switching context.
 
-Ordinary input is consumed as separate FIFO turns. `/urgent` joins the active inner loop together with the completed tool batch. Child Agents use dedicated threads, event loops, and clients, with three active children by default. Finished turns append observations. LLM perception processes 25 turns with a 5-turn overlap, plus short windows at session end. Explicit remember requests are handled immediately; failed production remains pending.
+Enter queues a separate FIFO turn. Ctrl+Enter adds an urgent supplement to the active turn, together with the completed tool batch at the next request boundary. Child Agents use dedicated threads, event loops, and clients within the configured session limit. Perception processes each set of 20 new user turns in the current session, with three earlier turns for continuity. Opening, loading, or exiting a session does not create a short perception window. Explicit remember requests are handled immediately; failed production remains pending.
 
 Model parameters, retrieval settings and runtime limits are declared in JSON and read as independent copies. See [architecture and migration](docs/refactor.md) for window-based production and the retained RAG parameters.
 

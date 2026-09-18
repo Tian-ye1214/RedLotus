@@ -52,7 +52,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Optional SDK imports found in a shared development environment: notebook
+    # display, local tensor embeddings, and the unused Hugging Face gateway.
+    # RedLotus uses its configured HTTP embedding service and four SDK protocols;
+    # Skill scripts still run in the configured external interpreter.
+    excludes=["IPython", "torch", "transformers", "huggingface_hub"],
     noarchive=False,
     optimize=0,
 )

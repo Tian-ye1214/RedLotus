@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/PyPI-pending-lightgrey.svg" alt="PyPI release pending">
+  <a href="https://pypi.org/project/RedLotus/"><img src="https://img.shields.io/pypi/v/RedLotus" alt="PyPI 版本"></a>
   <img src="https://img.shields.io/badge/Python-3.12%2B-3776ab.svg" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-555.svg" alt="Platform">
   <a href="https://ai.pydantic.dev/"><img src="https://img.shields.io/badge/built%20with-Pydantic%20AI-7c3aed.svg" alt="Pydantic AI"></a>
@@ -23,7 +23,7 @@
 RedLotus 是一个运行在终端中的 AI Agent。它会根据任务复杂度选择直接处理、委派单个 Worker，或由 Manager 拆解任务并协调多个 Worker 执行。项目兼容 OpenAI 风格的模型接口，并提供记忆、Skills、文件解析、浏览器操作和聊天机器人接入。
 
 ```bash
-pip install "redlotus @ git+https://github.com/Tian-ye1214/RedLotus.git"
+python -m pip install --upgrade redlotus
 redlotus
 ```
 
@@ -37,7 +37,7 @@ redlotus
 |------|------|
 | 多 Agent 编排 | Coordinator 判断处理路径；复杂任务由 Manager 构建带依赖的任务列表，Worker 按依赖分批执行并汇总结果。 |
 | 目标模式 | 给定一个明确目标后持续迭代，直到任务完成；执行期间仍可接收用户补充信息。 |
-| 三层记忆 | 会话原始轨迹、25 回合窗口的 LLM 情景感知、全局长期 RAG，以及每轮注入的用户画像与通用经验。 |
+| 三层记忆 | 会话增量记录、每 20 个新增用户回合的 LLM 情景感知、项目情景与全局长期 RAG，以及会话内固定的用户画像与通用经验快照。 |
 | 运行时 Skills | 通过 `SKILL.md` 按需加载指令、参考资料和脚本；技能目录会在用户回合开始时重新扫描，无需重启。 |
 | 文件与多媒体处理 | 可读取图片，并提取 PDF、Word、Excel、HTML、Markdown、CSV、JSON 和文本文件中的内容。PDF 支持按页提取正文、表格、链接与内嵌图片。 |
 | 终端审查与安全护栏 | 提供全屏 TUI、逐块 diff 审查、路径沙箱、危险命令拦截和子进程回收。 |
@@ -74,28 +74,30 @@ flowchart LR
 
 要求 Python 3.12 或更高版本，支持 Windows、Linux 和 macOS。
 
-### 从 GitHub 安装
+### 从 PyPI 安装或更新
 
 ```bash
-pip install "redlotus @ git+https://github.com/Tian-ye1214/RedLotus.git"
+python -m pip install --upgrade redlotus
 redlotus
 ```
 
 如果希望将命令安装到独立环境，可以使用 `uv`：
 
 ```bash
-uv tool install git+https://github.com/Tian-ye1214/RedLotus.git
+uv tool install redlotus
 ```
 
-项目发布到 PyPI 后，也可以使用 `pip install redlotus` 或 `uv tool install redlotus`。
+Windows x64 安装包见 [GitHub Releases](https://github.com/Tian-ye1214/RedLotus/releases)。onedir ZIP 解压后运行 `Agent.exe`，onefile EXE 可直接运行；两者与 pip 入口共用用户配置和项目会话存储，升级不覆盖现有配置与记忆。
+
+面板以会话标题、准确 Token 数及横向条形对比 API 用量。API 用量包含历史重发，单独展示的新增用户输入只计一次。
 
 ### 可选能力
 
 ```bash
-pip install "redlotus[browser] @ git+https://github.com/Tian-ye1214/RedLotus.git"  # 浏览器自动化
-pip install "redlotus[bots] @ git+https://github.com/Tian-ye1214/RedLotus.git"     # QQ / 微信机器人
-pip install "redlotus[viz] @ git+https://github.com/Tian-ye1214/RedLotus.git"      # 绘图与图像处理
-pip install "redlotus[all] @ git+https://github.com/Tian-ye1214/RedLotus.git"      # 全部可选依赖
+pip install "redlotus[browser]"  # 浏览器自动化
+pip install "redlotus[bots]"     # QQ / 微信机器人
+pip install "redlotus[viz]"      # 绘图与图像处理
+pip install "redlotus[all]"      # 全部可选依赖
 ```
 
 浏览器能力首次使用前还需要安装 Chromium：
@@ -106,9 +108,9 @@ playwright install chromium
 
 ## 首次配置
 
-开发入口 `python main.py` 显式读取 `src/redlotus/config.json`。pip 安装的 `redlotus` 和 PyInstaller 程序读取当前操作系统用户的全局配置，不随启动目录变化；Windows 默认为 `%LOCALAPPDATA%\RedLotus\config.json`。`/config` 显示实际来源。
+全局配置位于 `~/.redlotus/config.json`。逐字段优先级为本地 `src/redlotus/config.json` → 本地 `.env` → 全局 JSON；源码以仓库根目录、pip 以当前目录、PyInstaller 以 EXE 目录为本地查找基准，不向父目录搜索，也不使用 AppData 配置。`/config` 显示实际来源和修改目标。
 
-可用 `REDLOTUS_CONFIG_FILE` 指定另一份配置，或用 `REDLOTUS_CONFIG_DIR` 指定包含 `config.json` 的目录。显式指定的文件不存在时，会复制随包默认配置。日志、长期记忆和引用原件仍放在用户数据目录，可用 `REDLOTUS_DATA_DIR` 指定独立位置。
+可用 `REDLOTUS_CONFIG_FILE` 或 `REDLOTUS_CONFIG_DIR` 显式选择配置。缺少必填项时会明确报错，不从隐藏模板补齐。项目会话与日志保存在项目 `.redlotus`，引用、缓存和产物位于项目 `WorkDatabase`；记忆数据库及长期记忆文档位于用户 `.redlotus`。安装包不含凭据。
 
 至少需要配置模型服务地址和密钥：
 
@@ -197,7 +199,7 @@ npx clawhub --dir skills install <slug>
 - `MEMORY.md` 保存用户画像、环境、行为约束与通用经验，不设固定字符上限。它与 system prompt 在会话开始时完整形成快照，写入记忆不重写本会话前缀；新信息通过工具结果和检索消费，新会话读取最新版本。
 - 文件和命令工具默认操作当前项目，生成产物保存在 `WorkDatabase/`。`/cd` 先取消旧会话，再切换运行上下文。
 
-普通输入逐条 FIFO 消费，`/urgent` 与当前工具批次结果合并进入后续模型请求。子 Agent 各自拥有线程、事件循环和客户端，默认最多同时运行 3 个。每个结束的回合只追加原始事件；默认 25 回合、5 回合重叠后由 LLM 聚合，收尾时补处理短窗口。主动记忆通过 remember 即时处理，失败和取消不会自动成为成功经验。
+Enter 将输入排入 FIFO 队列；Ctrl+Enter 将加急补充加入当前回合，在下一请求边界与本批工具结果一起送给模型。子 Agent 各自拥有线程、事件循环和客户端，遵守配置中的会话线程上限。感知只处理当前会话每 20 个新增用户回合，附带前 3 回合衔接；新建、加载和退出不额外产生短窗口。主动记忆通过 remember 即时处理，失败和取消不会自动成为成功经验。
 
 向量模型、重排、分块、相似度阈值、候选数量和索引参数继续保留。完整的保留项、替代项与迁移行为见 [重构及 RAG 参数说明](docs/refactor.md)。
 
