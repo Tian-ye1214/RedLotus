@@ -1,4 +1,4 @@
-"""Configured execution environments and owned process lifecycles."""
+"""Existing interpreters, project caches, and owned command execution."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ import shutil
 import signal
 import subprocess
 import sys
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -29,23 +28,23 @@ _PIP_RESTRICTED_OPTIONS = {
     "--prefix",
     "--root",
     "--python",
+    "--isolated",
+    "--system",
     "-t",
 }
 _UV_NAMES = {"uv", "uv.exe"}
-_EXPLICIT_ENV_OVERRIDES = {"CLAWHUB_WORKDIR", "PLAYWRIGHT_BROWSERS_PATH"}
 
 
 @dataclass(frozen=True)
 class ExecutionEnvironment:
-    """A project-scoped interpreter and the minimal environment passed to it."""
+    """The existing interpreter and the project environment passed to commands."""
 
     workspace_root: Path
     project_id: str
-    root: Path
-    python: Path
+    root: Path | None
+    python: Path | None
     cache: Path
     variables: dict[str, str] = field(repr=False)
-    base_command: tuple[str, ...] = field(default_factory=tuple, repr=False)
 
 
 @dataclass(frozen=True)
@@ -78,13 +77,6 @@ class CommandResult:
         )
 
 
-def _execution_config() -> dict:
-    """Load execution settings lazily so importing this leaf has no config I/O."""
-    from redlotus.core.config import settings
-
-    return deepcopy(settings().get("execution") or {})
-
-
 def _workspace_for(cwd: str | Path | None, workspace=None):
     if workspace is None:
         from redlotus.core.agents import active_workspace
@@ -97,13 +89,6 @@ def _workspace_for(cwd: str | Path | None, workspace=None):
     return WorkspaceContext.from_path(cwd or Path.cwd())
 
 
-def _runtime_path(template: str, *, runtime: Path, project_id: str) -> Path:
-    value = str(template).replace("{runtime}", str(runtime))
-    value = value.replace("{project_id}", project_id)
-    path = Path(value).expanduser()
-    return path if path.is_absolute() else runtime / path
-
-
 def _extended_path(path: Path) -> str:
     value = str(path)
     if _platform.system() == "Windows" and not value.startswith("\\\\?\\"):
@@ -111,371 +96,117 @@ def _extended_path(path: Path) -> str:
     return value
 
 
-def _runtime_root(workspace) -> Path:
+def existing_python() -> Path:
+    """Use the host interpreter, or an external PATH interpreter when frozen."""
+    if not getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+    for name in ("python", "python3"):
+        found = shutil.which(name)
+        if found and not _same_path(found, Path(sys.executable)):
+            return Path(found).resolve()
+    if launcher := shutil.which("py"):
+        from redlotus.core.config import get_agent_run_policy
+
+        result = subprocess.run(
+            [launcher, "-3", "-c", "import sys; print(sys.executable)"],
+            capture_output=True,
+            timeout=get_agent_run_policy().max_command_timeout_seconds,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if not result.returncode:
+            path = Path(os.fsdecode(result.stdout.strip()))
+            if path.is_file() and not _same_path(path, Path(sys.executable)):
+                return path.resolve()
+    raise FileNotFoundError("未找到外部 Python，请将现有 Python 加入 PATH；普通命令和聊天仍可使用。")
+
+
+def execution_cache_dir(workspace) -> Path:
+    """Resolve owned, regenerable caches under the configured project runtime."""
     from redlotus.core.config import runtime_dir
 
-    return runtime_dir(workspace).resolve()
-
-
-def _configured_base_python(
-    config: dict, *, runtime: Path, project_id: str
-) -> tuple[str, ...]:
-    configured = str(config.get("python_executable", "")).strip()
-    if configured:
-        configured = _unquote_shell_word(configured)
-        if "{runtime}" in configured or "{project_id}" in configured:
-            configured = str(
-                _runtime_path(configured, runtime=runtime, project_id=project_id)
-            )
-        candidate = Path(configured).expanduser()
-        found = str(candidate) if candidate.is_file() else shutil.which(configured)
-        if not found:
-            raise FileNotFoundError(
-                f"配置的 Python 解释器不存在或不在 PATH 中: {configured}"
-            )
-        resolved = Path(found).resolve()
-        if getattr(sys, "frozen", False) and os.path.normcase(
-            str(resolved)
-        ) == os.path.normcase(str(Path(sys.executable).resolve())):
-            raise ValueError("冻结程序不能把自身可执行文件作为外部 Python 解释器。")
-        return (str(resolved),)
-
-    if getattr(sys, "frozen", False):
-        found = shutil.which("python") or shutil.which("python3")
-        if found:
-            resolved = Path(found).resolve()
-            if os.path.normcase(str(resolved)) != os.path.normcase(
-                str(Path(sys.executable).resolve())
-            ):
-                return (str(resolved),)
-        launcher = shutil.which("py")
-        if launcher:
-            return (str(Path(launcher).resolve()), "-3")
-        raise FileNotFoundError(
-            "冻结程序未找到外部 Python 解释器，请在 config.json execution.python_executable 中配置。"
-        )
-    return (str(Path(sys.executable).resolve()),)
-
-
-def _build_execution_variables(
-    config: dict,
-    *,
-    runtime: Path,
-    root: Path,
-    cache: Path,
-    project_id: str,
-    overrides: dict[str, str] | None,
-    use_python: bool = True,
-) -> dict[str, str]:
-    inherited_names = tuple(config.get("inherit_env") or ())
-    variables = {
-        name: os.environ[name] for name in inherited_names if name in os.environ
-    }
-    bin_dir = root / ("Scripts" if _platform.system() == "Windows" else "bin")
-    replacements = dict(
-        runtime=runtime,
-        environment=root,
-        cache=cache,
-        project_id=project_id,
-    )
-    for name, template in config.get("variables", {}).items():
-        value = str(template)
-        for token, replacement in replacements.items():
-            value = value.replace("{" + token + "}", str(replacement))
-        variables[name] = value
-    for name, value in (overrides or {}).items():
-        if name in inherited_names or name in _EXPLICIT_ENV_OVERRIDES:
-            variables[name] = str(value)
-    if use_python:
-        variables["VIRTUAL_ENV"] = str(root)
-        variables["PATH"] = os.pathsep.join(
-            value for value in (str(bin_dir), variables.get("PATH", "")) if value
-        )
-    return variables
+    return runtime_dir(workspace).resolve() / "cache"
 
 
 def get_execution_environment(
-    *,
-    cwd: str | Path | None = None,
-    workspace=None,
-    overrides: dict[str, str] | None = None,
-    python_required: bool = True,
+    *, cwd: str | Path | None = None, workspace=None,
+    overrides: dict[str, str] | None = None, python_required: bool = True,
 ) -> ExecutionEnvironment:
-    """Resolve configuration and paths without starting an interpreter."""
-    config = _execution_config()
+    """Describe the existing environment without creating or rebuilding Python."""
+    from redlotus.core.config import runtime_dir
+
     active = _workspace_for(cwd, workspace)
-    workspace_root = Path(active.root).resolve()
-    if not config:
-        variables = dict(os.environ)
-        variables.update(
-            {name: str(value) for name, value in (overrides or {}).items()}
-        )
-        return ExecutionEnvironment(
-            workspace_root,
-            active.project_id,
-            Path(sys.prefix).resolve(),
-            Path(sys.executable).resolve(),
-            Path(sys.prefix).resolve(),
-            variables,
-            (str(Path(sys.executable).resolve()),),
-        )
-
-    runtime = _runtime_root(active)
-    root = _runtime_path(
-        config["environment_dir"], runtime=runtime, project_id=active.project_id
-    ).resolve()
-    cache = _runtime_path(
-        config["cache_dir"], runtime=runtime, project_id=active.project_id
-    ).resolve()
-    base_command = (
-        _configured_base_python(config, runtime=runtime, project_id=active.project_id)
-        if python_required
-        else ()
+    runtime = runtime_dir(active).resolve()
+    python = existing_python() if python_required or not getattr(sys, "frozen", False) else None
+    root = (
+        Path(sys.prefix).resolve() if not getattr(sys, "frozen", False)
+        else python.parent.parent if python and python.parent.name.lower() in {"scripts", "bin"}
+        else python.parent if python else None
     )
-    python = (
-        root
-        / ("Scripts" if _platform.system() == "Windows" else "bin")
-        / ("python.exe" if _platform.system() == "Windows" else "python")
-    )
-    environment = ExecutionEnvironment(
-        workspace_root,
-        active.project_id,
-        root,
-        python,
-        cache,
-        _build_execution_variables(
-            config,
-            runtime=runtime,
-            root=root,
-            cache=cache,
-            project_id=active.project_id,
-            overrides=overrides,
-            use_python=python_required,
-        ),
-        base_command,
-    )
-    return environment
-
-
-async def ensure_execution_environment(environment: ExecutionEnvironment) -> None:
-    """Create a project venv once under a cross-process lock."""
-    marker = environment.root / ".redlotus-environment.json"
-    from filelock import AsyncFileLock
-
-    from redlotus.core.config import atomic_write_json
-
-    timeout = _provision_timeout()
-    environment.root.parent.mkdir(parents=True, exist_ok=True)
-    lock = environment.root.with_name(environment.root.name + ".create.lock")
-    async with AsyncFileLock(lock, timeout=timeout, run_in_executor=False):
-        identity = await asyncio.to_thread(_python_identity, environment.base_command)
-        state = "creating"
-        if environment.python.is_file() and not marker.is_file():
-            raise RuntimeError(
-                "项目 Python 环境缺少基础解释器记录，拒绝复用；请清理该项目环境后重试。"
-            )
-        if marker.is_file():
-            try:
-                marker_data = json.loads(marker.read_text(encoding="utf-8"))
-                recorded = tuple(str(value) for value in marker_data["base_command"])
-                state = marker_data.get("state", "ready")
-            except (OSError, ValueError, KeyError, TypeError) as exc:
-                raise RuntimeError(
-                    "项目 Python 环境来源标记损坏，拒绝复用；请清理该项目环境后重试。"
-                ) from exc
-            recorded_identity = marker_data.get("identity")
-            if recorded_identity is None:
-                recorded_identity = await asyncio.to_thread(_python_identity, recorded)
-            if recorded_identity != identity:
-                raise RuntimeError(
-                    "项目 Python 环境由其他基础解释器创建，请修改配置或清理该项目环境后重试。"
-                )
-            if environment.python.is_file() and state == "ready":
-                actual = await asyncio.to_thread(
-                    _python_identity, (str(environment.python),)
-                )
-                if actual != identity:
-                    raise RuntimeError(
-                        "项目 Python 环境解释器与来源记录不一致，拒绝复用。"
-                    )
-                if "identity" not in marker_data:
-                    atomic_write_json(marker, {**marker_data, "identity": identity})
-                _prepare_runtime_dirs(environment)
-                return
-        _prepare_runtime_dirs(environment)
-        source = {
-            "project_id": environment.project_id,
-            "python": str(environment.python),
-            "base_command": list(environment.base_command),
-            "identity": identity,
-            "state": state,
-        }
-        atomic_write_json(marker, source)
-        steps = []
-        if state != "python_ready" or not environment.python.is_file():
-            steps.append(
-                (
-                    [
-                        *environment.base_command,
-                        "-m",
-                        "venv",
-                        "--without-pip",
-                        _extended_path(environment.root),
-                    ],
-                    "python_ready",
-                )
-            )
-        steps.append(
-            (
-                [
-                    _extended_path(environment.python),
-                    "-m",
-                    "ensurepip",
-                    "--upgrade",
-                    "--default-pip",
-                ],
-                "ready",
-            )
-        )
-        bootstrap_env = {
-            name: value
-            for name, value in environment.variables.items()
-            if name not in {"VIRTUAL_ENV", "PATH"}
-        }
-        bootstrap_env["PATH"] = os.environ.get("PATH", "")
-        for command, next_state in steps:
-            try:
-                result = await _run_owned_process(
-                    command,
-                    shell=False,
-                    cwd=str(environment.workspace_root),
-                    env=bootstrap_env,
-                    timeout=timeout,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise TimeoutError(f"创建项目 Python 环境超时（{timeout} 秒）") from exc
-            if result.returncode or not result.output_decoded:
-                raise RuntimeError(f"创建项目 Python 环境失败: {result.to_text()}")
-            if not environment.python.is_file():
-                raise RuntimeError(
-                    f"Python 环境创建后未找到解释器: {environment.python}"
-                )
-            atomic_write_json(marker, {**source, "state": next_state})
-
-
-def _provision_timeout() -> int:
-    from redlotus.core.config import get_agent_run_policy
-
-    return get_agent_run_policy().max_command_timeout_seconds
-
-
-def _python_identity(command: tuple[str, ...]) -> dict:
-    """Ask the interpreter itself, rather than comparing venv launcher paths."""
-    probe = (
-        "import json,os,sys,struct; print(json.dumps(dict("
-        "base=os.path.normcase(os.path.realpath(sys._base_executable)),"
-        "implementation=sys.implementation.name,version=list(sys.version_info[:2]),"
-        "bits=struct.calcsize('P')*8)))"
-    )
-    config = _execution_config()
-    env = {
-        name: os.environ[name]
-        for name in config.get("inherit_env", [])
-        if name in os.environ
+    # OS/CLI interfaces preserve Git, SSH and proxies, without model credentials.
+    inherited = {
+        "PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "SYSTEMDRIVE",
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "HOME", "USERPROFILE",
+        "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH", "XDG_CONFIG_HOME",
+        "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+        "GIT_SSH", "GIT_SSH_COMMAND", "NPM_CONFIG_USERCONFIG",
+        "GIT_ASKPASS", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "GIT_TERMINAL_PROMPT",
+        "PLAYWRIGHT_BROWSERS_PATH", "CLAWHUB_WORKDIR",
     }
-    kwargs = (
-        {"creationflags": subprocess.CREATE_NO_WINDOW}
-        if _platform.system() == "Windows"
-        else {}
-    )
-    try:
-        result = subprocess.run(
-            [*command, "-c", probe],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=env,
-            timeout=_provision_timeout(),
-            **kwargs,
-        )
-        if result.returncode:
-            raise ValueError(result.stderr.strip())
-        return json.loads(result.stdout)
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"无法验证基础解释器 {command}: {exc}") from exc
+    variables = {k: v for k, v in os.environ.items() if k.upper() in inherited}
+    variables.update({k: str(v) for k, v in (overrides or {}).items() if k.upper() in inherited})
+    cache = execution_cache_dir(active)
+    project_cache = cache / active.project_id
+    for name, folder in (
+        ("PIP_CACHE_DIR", "pip"), ("npm_config_cache", "npm"),
+        ("UV_CACHE_DIR", "uv"), ("XDG_CACHE_HOME", "xdg"),
+    ):
+        variables[name] = str(project_cache / folder)
+    for name in ("TEMP", "TMP", "TMPDIR"):
+        variables[name] = str(runtime / "tmp")
+    variables.update(PYTHONUTF8="1", PYTHONNOUSERSITE="1", PIP_DISABLE_PIP_VERSION_CHECK="1")
+    if python:
+        variables.update(PIP_PYTHON=str(python), UV_PYTHON=str(python))
+        bins = [str(python.parent)]
+        if os.name == "nt":
+            bins.append(str(root / "Scripts"))
+        path_key = next((k for k in variables if k.upper() == "PATH"), "PATH")
+        variables[path_key] = os.pathsep.join([*bins, variables.get(path_key, "")])
+    if getattr(sys, "frozen", False):
+        bundle = str(getattr(sys, "_MEIPASS", ""))
+        if bundle:
+            path_key = next((k for k in variables if k.upper() == "PATH"), "PATH")
+            variables[path_key] = os.pathsep.join(
+                item for item in variables.get(path_key, "").split(os.pathsep)
+                if not item or not Path(item).resolve().is_relative_to(Path(bundle).resolve())
+            )
+        if "LD_LIBRARY_PATH_ORIG" in os.environ:
+            variables["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH_ORIG"]
+    return ExecutionEnvironment(active.root.resolve(), active.project_id, root, python, cache, variables)
 
 
 def _prepare_runtime_dirs(environment: ExecutionEnvironment) -> None:
-    project_cache = environment.cache / environment.project_id
-    paths = {project_cache}
-    for name in (
-        "PIP_CACHE_DIR",
-        "XDG_CACHE_HOME",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "npm_config_cache",
-        "UV_CACHE_DIR",
-    ):
-        if name in environment.variables:
-            paths.add(Path(environment.variables[name]))
-    for path in paths:
-        path.mkdir(parents=True, exist_ok=True)
-    (project_cache / ".redlotus-cache").write_text(
+    """Create owned cache/temp directories and their cleanup ownership marker."""
+    for name in ("PIP_CACHE_DIR", "XDG_CACHE_HOME", "TEMP", "npm_config_cache", "UV_CACHE_DIR"):
+        Path(environment.variables[name]).mkdir(parents=True, exist_ok=True)
+    (environment.cache / environment.project_id / ".redlotus-cache").write_text(
         json.dumps({"project_id": environment.project_id}), encoding="utf-8"
     )
 
 
-def describe_execution_environment(
-    *, cwd: str | Path | None = None, workspace=None
-) -> str:
-    """Return the selected interpreter and paths without guessing host state."""
+def describe_execution_environment(*, cwd=None, workspace=None) -> str:
+    """Report the real interpreter and install location without provisioning."""
     try:
         environment = get_execution_environment(cwd=cwd, workspace=workspace)
     except (OSError, ValueError) as exc:
-        return f"Environment state: error\nReason: {exc}"
-    state = _environment_state(environment)
-    return "\n".join(
-        (
-            f"Project: {environment.project_id}",
-            f"Workspace: {environment.workspace_root}",
-            f"Python: {environment.python}",
-            f"Environment: {environment.root}",
-            f"Environment state: {state}",
-            f"Environment ready: {'yes' if state == 'ready' else 'no'}",
-            "Python/pip commands automatically prepare or reuse this environment; no manual activation is needed.",
-            f"Cache: {environment.cache}",
-        )
-    )
-
-
-def _environment_state(environment: ExecutionEnvironment) -> str:
-    marker = environment.root / ".redlotus-environment.json"
-    if not marker.is_file():
-        return (
-            "error: missing identity record"
-            if environment.python.is_file()
-            else "missing"
-        )
-    try:
-        record = json.loads(marker.read_text(encoding="utf-8"))
-        state = record.get("state", "ready")
-        if state != "ready":
-            return state
-        if not environment.python.is_file():
-            return "error: interpreter missing"
-        expected = _python_identity(environment.base_command)
-        recorded = record.get("identity") or _python_identity(
-            tuple(record["base_command"])
-        )
-        if (
-            recorded != expected
-            or _python_identity((str(environment.python),)) != expected
-        ):
-            return "incompatible"
-        return "ready"
-    except (OSError, ValueError, KeyError, RuntimeError) as exc:
-        return f"error: {exc}"
+        return f"Environment state: unavailable\nReason: {exc}"
+    return "\n".join((
+        f"Project: {environment.project_id}", f"Workspace: {environment.workspace_root}",
+        f"Python: {environment.python}", f"Install environment: {environment.root}",
+        f"Environment state: {'ready' if environment.python.is_file() else 'missing'}",
+        "This is the existing environment. Dependency installation changes this environment.",
+        "pip and uv target the Python shown above; the pip program may be hosted in another environment.",
+        f"Cache: {environment.cache}",
+    ))
 
 
 def _shell_tokens(command: str) -> list[str]:
@@ -553,26 +284,23 @@ def validate_agent_command(command, *, cwd: str) -> None:
     from redlotus.tools.registry import read_script
 
     role = current_execution_role()
-    policy = _execution_config().get("permissions", {})
-    if not policy:
-        return
-    restricted = role in policy.get("restricted_roles", [])
+    restricted = role in {"worker", "manager"}
     visited = set()
 
     def source(text, *, python=False, javascript=False, shell=False):
         if python:
             try:
-                PythonCommandCheck(policy, inspect, restricted=restricted).check(text)
+                PythonCommandCheck(inspect, restricted=restricted).check(text)
             except SyntaxError as exc:
                 raise ValueError(f"Cannot inspect Python source: {exc}") from exc
         else:
             if shell:
                 inspect(text)
             if javascript:
-                JavaScriptCommandCheck(policy, inspect, restricted=restricted).check(text)
+                JavaScriptCommandCheck(inspect, restricted=restricted).check(text)
             if restricted and any(
                 re.search(pattern, code_without_literals(text), re.I | re.M)
-                for pattern in policy["blocked_script_patterns"]
+                for pattern in (r"\bprocess\s*\.\s*kill\s*\(", r"\b(?:TerminateProcess|NtTerminateProcess|TerminateJobObject)\s*\(")
             ):
                 raise PermissionError(
                     f"Permission denied for {role}: restricted process API."
@@ -583,22 +311,26 @@ def validate_agent_command(command, *, cwd: str) -> None:
             name = _program_name(values[0]).removesuffix(".exe")
             words = [_unquote_shell_word(item) for item in values]
             lower = [item.lower() for item in words]
-            if restricted and policy.get("require_explicit_commands") and (
+            if restricted and (
                 words[0].startswith(("$", "%")) and "=" not in words and "=" not in words[0]
             ):
                 raise PermissionError("Use an explicit command; the executable cannot be resolved before execution.")
-            if name in policy["background_commands"] and not (
+            if name in {"start", "nohup", "setsid", "start-process"} and not (
                 name == "start-process" and "-wait" in lower
             ):
                 raise PermissionError(
                     "Background process launches are not allowed; run the command synchronously."
                 )
             if restricted and (
-                name in policy["blocked_commands"]
+                name in {
+                    "kill", "pkill", "killall", "taskkill", "tskill", "stop-process",
+                    "spps", "shutdown", "restart-computer", "stop-computer",
+                    "stop-service", "restart-service",
+                }
                 or (
                     name in {"powershell", "pwsh"}
                     and any(
-                        item in policy["blocked_shell_options"]
+                        item in {"-encodedcommand", "-enc", "-ec"}
                         or (item.startswith("-e") and "-encodedcommand".startswith(item))
                         for item in lower
                     )
@@ -638,7 +370,7 @@ def validate_agent_command(command, *, cwd: str) -> None:
                         target = words[index]
                     index += 1
                 if not target or arguments is None or any("$" in part for part in [target, *arguments]):
-                    if restricted and policy.get("require_explicit_commands"):
+                    if restricted:
                         raise PermissionError("Use an explicit command for Start-Process, including its arguments.")
                 else:
                     inspect([target, *arguments])
@@ -666,7 +398,7 @@ def validate_agent_command(command, *, cwd: str) -> None:
             for item in candidates:
                 path = Path(cwd) / item
                 if (
-                    path.suffix.lower() not in policy["script_extensions"]
+                    path.suffix.lower() not in {".py", ".pyw", ".ps1", ".sh", ".bat", ".cmd", ".js", ".mjs", ".cjs"}
                     or not path.is_file()
                 ):
                     continue
@@ -703,13 +435,15 @@ def _same_path(left: str | Path, right: Path) -> bool:
 
 def _selected_pip(python: Path) -> Path:
     folder = python.parent
-    return folder / ("pip.exe" if _platform.system() == "Windows" else "pip")
+    if os.name == "nt" and folder.name.lower() != "scripts":
+        folder /= "Scripts"
+    return folder / ("pip.exe" if os.name == "nt" else "pip")
 
 
 def validate_pip_command(
     command: str | list[str] | tuple[str, ...], *, selected_python: Path
 ) -> None:
-    """Reject pip installs that escape the selected venv or its project paths."""
+    """Reject installs that silently escape the reported execution environment."""
     tokens = (
         _shell_tokens(command)
         if isinstance(command, str)
@@ -757,7 +491,7 @@ def validate_pip_command(
                     break
         elif name in _UV_NAMES:
             lowered = [_unquote_shell_word(value).lower() for value in values]
-            if len(lowered) >= 2 and lowered[1:3] == ["pip", "install"]:
+            if lowered[1:2] == ["pip"]:
                 pip_index = 1
         if pip_index is None:
             return
@@ -766,17 +500,17 @@ def validate_pip_command(
             and (name in _PY_LAUNCHER_NAMES or not _is_bare(interpreter))
             and not _same_path(interpreter, selected_python)
         ):
-            raise ValueError("pip 请求指定了其他 Python 解释器，请使用当前项目环境。")
+            raise ValueError("pip 请求指定了其他 Python 解释器，请使用当前执行环境。")
         if (
             pip_index == 0
             and not _is_bare(program)
             and not _same_path(program, selected_pip)
         ):
-            raise ValueError("pip 请求指定了其他安装环境，请使用当前项目环境。")
+            raise ValueError("pip 请求指定了其他安装环境，请使用当前执行环境。")
         for value in values[pip_index + 1 :]:
             option = _unquote_shell_word(value).lower().split("=", 1)[0]
             if option in _PIP_RESTRICTED_OPTIONS:
-                raise ValueError(f"禁止 pip 安装参数 {option}，请使用当前项目环境。")
+                raise ValueError(f"禁止 pip 安装参数 {option}，请使用当前执行环境。")
 
     for token in tokens:
         if token in _SEPARATORS:
@@ -787,17 +521,32 @@ def validate_pip_command(
     inspect(segment)
 
 
-def _rewrite_python_command(args, environment: ExecutionEnvironment):
-    values = list(args)
+def _rewrite_python_command(args, environment: ExecutionEnvironment, *, shell=False):
+    """Use existing pip to manage the selected Python, including pip-less venvs."""
+    values = [_unquote_shell_word(value) for value in _shell_tokens(args)] if shell else list(args)
     if not values:
-        return values
+        return args
     name = _program_name(str(values[0]))
+    module_pip = name in _PYTHON_NAMES and values[1:3] == ["-m", "pip"]
+    pip = shutil.which("pip", path=next(
+        (v for k, v in environment.variables.items() if k.upper() == "PATH"), ""
+    ))
+    if module_pip and pip:
+        if shell:
+            prefix = re.match(r'''^\s*(?:"[^"]+"|'[^']+'|\S+)\s+-m\s+pip(?=\s|$)''', args)
+            if prefix:
+                quoted = subprocess.list2cmdline([pip]) if os.name == "nt" else shlex.quote(pip)
+                return quoted + args[prefix.end():]
+        else:
+            return [pip, *values[3:]]
+    if shell:
+        return args
     if name in _PYTHON_NAMES and (
         _is_bare(str(values[0])) or _same_path(values[0], environment.python)
     ):
         values[0] = _extended_path(environment.python)
     elif _is_bare(str(values[0])) and name in _PIP_NAMES:
-        values[0] = str(_selected_pip(environment.python))
+        values[:1] = [pip] if pip else [str(environment.python), "-m", "pip"]
     return values
 
 
@@ -847,7 +596,7 @@ async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
         await proc.wait()
         raise  # Do not report successful tree cleanup when the OS denied it.
     # Drain inherited pipes too: descendants can still be releasing files after
-    # the root process has exited, which matters when retrying venv creation.
+    # the root process has exited.
     await asyncio.wait_for(proc.communicate(), timeout=5)
 
 
@@ -862,30 +611,21 @@ async def run_subprocess(
 ) -> CommandResult:
     """Run a command with its launch evidence, reclaiming owned processes on cancellation."""
     await asyncio.to_thread(validate_agent_command, args, cwd=cwd)
-    configured = await asyncio.to_thread(_execution_config)
-    python_on_path = None
-    if configured:
-        python_required = any(
-            _program_name(values[0]) in _PYTHON_NAMES | _PY_LAUNCHER_NAMES | _PIP_NAMES
-            or (_program_name(values[0]) in _UV_NAMES and "pip" in values[1:3])
-            for values in _command_invocations(args)
-        )
-        environment = await asyncio.to_thread(
-            get_execution_environment,
-            cwd=cwd,
-            workspace=workspace,
-            overrides=env,
-            python_required=python_required,
-        )
+    python_required = any(
+        _program_name(values[0]) in _PYTHON_NAMES | _PY_LAUNCHER_NAMES | _PIP_NAMES
+        or (_program_name(values[0]) in _UV_NAMES and "pip" in values[1:3])
+        for values in _command_invocations(args)
+    )
+    environment = await asyncio.to_thread(
+        get_execution_environment, cwd=cwd, workspace=workspace,
+        overrides=env, python_required=python_required,
+    )
+    if python_required:
         validate_pip_command(args, selected_python=environment.python)
-        if python_required:
-            await ensure_execution_environment(environment)
-            python_on_path = str(environment.python)
-        else:
-            await asyncio.to_thread(_prepare_runtime_dirs, environment)
-        env = environment.variables
-        if not shell:
-            args = _rewrite_python_command(args, environment)
+        args = _rewrite_python_command(args, environment, shell=shell)
+    await asyncio.to_thread(_prepare_runtime_dirs, environment)
+    env = environment.variables
+    python_on_path = str(environment.python) if environment.python else None
 
     result = await _run_owned_process(
         args, shell=shell, cwd=cwd, env=env, timeout=timeout
@@ -943,7 +683,7 @@ async def _run_owned_process(
     except asyncio.CancelledError:
         await _terminate_process_tree(proc)
         raise
-    encodings = _execution_config()["output_encodings"]
+    encodings = ["utf-8-sig", locale.getencoding()]
     stdout, stdout_decoded = _decode_output(out, encodings)
     stderr, stderr_decoded = _decode_output(err, encodings)
     return CommandResult(

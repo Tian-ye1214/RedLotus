@@ -6,7 +6,6 @@ import sys
 import difflib
 import math
 import asyncio
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, Callable
@@ -60,8 +59,6 @@ class LegacyOutputSink:
     def update(self, action: str, *args) -> None:
         if action == "rule":
             self.console.rule(*args)
-        elif action == "set_status":
-            self.console.print(Text(args[0], style="dim"))
 
 
 _console = Console(highlight=False, legacy_windows=sys.platform == "win32")
@@ -85,14 +82,6 @@ def emit_rule(title: str) -> None:
     _sink.update("rule", title)
 
 
-def set_status(message: str) -> None:
-    _sink.update("set_status", message)
-
-
-def clear_status() -> None:
-    _sink.update("clear_status")
-
-
 def set_context_usage(items: list[ContextUsageItem]) -> None:
     _sink.update("set_context_usage", items)
 
@@ -105,21 +94,18 @@ def begin_model_stream(title: str) -> None:
     _sink.update("begin_model_stream", title)
 
 
-def append_model_stream_delta(text: str) -> None:
-    _sink.update("append_model_stream_delta", text)
+def append_model_stream_delta(text: str, kind: str = "text") -> None:
+    _sink.update("append_model_stream_delta", text, kind)
+
+
+def end_model_stream(status: str) -> None:
+    _sink.update("end_model_stream", status)
 
 
 def clear_model_stream() -> None:
     _sink.update("clear_model_stream")
 
 
-@contextmanager
-def status_message(message: str):
-    set_status(message)
-    try:
-        yield
-    finally:
-        clear_status()
 
 
 class DiffKind(StrEnum):
@@ -426,43 +412,44 @@ def show_model_output(text: str, *, title: str = "模型", markdown: bool = True
 
 
 def finish_model_stream(text: str, *, title: str = "模型", markdown: bool = True) -> None:
-    clear_model_stream()
+    end_model_stream("已完成")
     show_model_output(text, title=title, markdown=markdown)
 
 
-def _text_from_stream_event(event: Any) -> str:
+def _text_from_stream_event(event: Any) -> tuple[str, str]:
     event_kind = getattr(event, "event_kind", "")
     if event_kind == "part_start":
         part = getattr(event, "part", None)
-        if getattr(part, "part_kind", None) == "text":
-            return getattr(part, "content", "") or ""
+        kind = getattr(part, "part_kind", None)
+        if kind in {"text", "thinking"}:
+            return kind, getattr(part, "content", "") or ""
     if event_kind == "part_delta":
         delta = getattr(event, "delta", None)
-        if getattr(delta, "part_delta_kind", None) == "text":
-            return getattr(delta, "content_delta", "") or ""
-    return ""
+        kind = getattr(delta, "part_delta_kind", None)
+        if kind in {"text", "thinking"}:
+            return kind, getattr(delta, "content_delta", "") or ""
+    return "", ""
 
 
 class TextEventStreamHandler:
-    def __init__(self, *, title: str) -> None:
+    def __init__(self, *, title: str, is_current: Callable[[], bool] | None = None) -> None:
         self.title = title
         self._started = False
+        self._is_current = is_current or (lambda: True)
 
     async def __call__(self, _run_ctx: Any, event_stream: Any) -> None:
-        try:
-            async for event in event_stream:
-                text = _text_from_stream_event(event)
-                if not text:
-                    continue
-                if not self._started:
-                    begin_model_stream(f"{self.title} 正在回复")
-                    self._started = True
-                append_model_stream_delta(text)
-        except BaseException:
-            if self._started:
-                clear_model_stream()
-                self._started = False
-            raise
+        response_started = False
+        async for event in event_stream:
+            kind, text = _text_from_stream_event(event)
+            if not text or not self._is_current():
+                continue
+            if not self._started:
+                begin_model_stream(f"{self.title} 正在回复")
+                self._started = True
+            if not response_started:
+                _sink.update("begin_model_response")
+                response_started = True
+            append_model_stream_delta(text, kind)
 
 
 def print_phase(title: str) -> None:
@@ -546,6 +533,8 @@ class PanelSnapshotCache:
             signature = (
                 stat.st_mtime_ns,
                 stat.st_size,
+                tuple((child.name, child.stat().st_mtime_ns, child.stat().st_size)
+                      for child in sorted(path.parent.glob("model_messages.*.json"))),
             )
             cached = self._cache.get(path)
             if cached and cached[0] == signature:

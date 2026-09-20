@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+import inspect
 from dataclasses import dataclass, field, asdict
 from copy import deepcopy
 from pydantic_ai import (
@@ -14,14 +15,11 @@ from pydantic_ai import (
     PromptedOutput,
     RunContext,
 )
-from pydantic_ai.models import create_async_http_client
-from pydantic_ai.models.anthropic import AnthropicModel
-from pydantic_ai.models.google import GoogleModel
-from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
-from pydantic_ai.profiles.deepseek import deepseek_model_profile
+from pydantic_ai.models import create_async_http_client, get_user_agent, infer_model, parse_model_id
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers import infer_provider_class
 from pydantic_ai.providers.anthropic import AnthropicProvider
-from pydantic_ai.providers.google import GoogleProvider
-from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.providers.deepseek import DeepSeekProvider
 from redlotus.core.config import (
     apply_thinking_config,
     ConfigError,
@@ -36,11 +34,10 @@ from redlotus.core.config import (
     get_agent_run_policy,
     get_agent_usage_limits,
     close_all_clients,
-    safe_name,
 )
-from pydantic_ai.capabilities import AbstractCapability, Capability
+from pydantic_ai.capabilities import AbstractCapability
 from typing import Any
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     FunctionToolResultEvent,
@@ -171,11 +168,13 @@ class ModelTarget:
         cfg = settings() if config is None else config
         gateway_name = params.pop("gateway", None)
         gateway = cfg["gateways"][gateway_name] if gateway_name else {}
-        defaults = cfg["model_gateway"]
-        protocol = params.pop("provider", gateway.get("protocol", defaults["protocol"]))
-        protocol = {"openai": "openai-chat"}.get(protocol, protocol)
-        if protocol not in ("openai-chat", "openai-responses", "anthropic", "google"):
-            raise ValueError(f"Unsupported gateway protocol: {protocol}")
+        protocol, name = parse_model_id(name)
+        if not protocol or not name:
+            field_name = f"models.{role}.name" if role else "model name"
+            raise ConfigError(
+                f"配置 {field_name} 需要 Pydantic AI 的 服务:模型 标识；检查来源: {config_source_summary()}"
+            )
+        params.pop("provider", None)
         base = (
             gateway.get("base_url")
             if gateway_name
@@ -185,30 +184,26 @@ class ModelTarget:
             key = credential_value(gateway_name, cfg)
         else:
             key = get_env("API_KEY", warn=False, cfg=cfg)
+        context = get_context_config(role, cfg=cfg) if role else {}
+        for field_name in ("max_context_windows", "auto_compress_ratio", "compress_head_turns", "compress_tail_turns"):
+            if field_name in params:
+                context[field_name] = params.pop(field_name)
+        params.pop("context", None)
         limits = cfg.get("input_limits", {})
+        params["parallel_tool_calls"] = True
+        timeout = float(gateway["timeout"] if "timeout" in gateway else cfg["MODEL_HTTP_TIMEOUT"])
         options = {
             "credential_field": f"gateways.{gateway_name}.api_key" if gateway_name else "API_KEY",
-            "connect_timeout": float(
-                gateway.get("connect_timeout", defaults["connect_timeout"])
-            ),
+            "connect_timeout": float(gateway.get("connect_timeout", timeout)),
             "limits": {
                 **limits.get("defaults", {}),
                 **gateway.get("input_limits", {}),
                 **params.pop("input_limits", {}),
                 **limits.get(role, {}),
             },
-            "context": {
-                **(get_context_config(role, cfg=cfg) if role else {}),
-                **params.pop("context", {}),
-            },
-            "settings": {**deepcopy(defaults["settings"]), **params},
+            "context": context,
+            "settings": params,
         }
-        timeout = float(
-            gateway.get(
-                "timeout",
-                cfg["MODEL_HTTP_TIMEOUT"],
-            )
-        )
         return cls(
             name,
             protocol,
@@ -229,6 +224,128 @@ class CompatibleChatModel(OpenAIChatModel):
         return mapped
 
 
+def _anthropic_uses_httpx2() -> bool:
+    """Whether the installed Anthropic SDK requires its newer httpx2 client."""
+    from anthropic import AsyncAnthropic
+
+    parameter = inspect.signature(AsyncAnthropic).parameters.get("http_client")
+    return parameter is not None and "httpx2" in str(parameter.annotation)
+
+
+def _create_anthropic_http_client(timeout: float, connect_timeout: float, policy):
+    """Create the transport required by current Anthropic SDK releases."""
+    import httpx2
+
+    client = httpx2.AsyncClient(
+        timeout=httpx2.Timeout(timeout=timeout, connect=connect_timeout),
+        headers={"User-Agent": get_user_agent()},
+    )
+    if policy.max_request_bytes is not None:
+        client.event_hooks["request"].append(policy.check_http_request)
+    return client
+
+
+def _adapt_anthropic_message_api(client):
+    """Move legacy sampling values into the SDK's supported ``extra_body`` hook."""
+    from anthropic import NotGiven, Omit
+
+    create = client.beta.messages.create
+    parameters = inspect.signature(create).parameters.values()
+    if any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+    ):
+        return client
+    supported = {parameter.name for parameter in parameters}
+    unsupported = {"temperature", "top_p", "top_k"} - supported
+    if not unsupported:
+        return client
+
+    async def compatible_create(*args, **kwargs):
+        moved = {
+            key: kwargs.pop(key)
+            for key in unsupported
+            if key in kwargs
+            and not isinstance(kwargs[key], (Omit, NotGiven))
+        }
+        if moved:
+            extra_body = kwargs.get("extra_body")
+            if extra_body is None or isinstance(extra_body, (Omit, NotGiven)):
+                extra_body = {}
+            elif isinstance(extra_body, Mapping):
+                extra_body = dict(extra_body)
+            else:
+                raise ConfigError("Anthropic extra_body 必须是对象，无法保留采样参数。")
+            for key, value in moved.items():
+                extra_body.setdefault(key, value)
+            kwargs["extra_body"] = extra_body
+        return await create(
+            *args,
+            **{key: value for key, value in kwargs.items() if key not in unsupported},
+        )
+
+    client.beta.messages.create = compatible_create
+    return client
+
+
+def _create_anthropic_provider(target: ModelTarget, policy: ModelInputPolicy):
+    """Bind Anthropic to the HTTP client type supported by its installed SDK."""
+    if not _anthropic_uses_httpx2():
+        client = get_client(
+            f"model:anthropic:{target.timeout}:{target.connect_timeout}:{policy.max_request_bytes}",
+            lambda: _create_http_client(target, policy),
+        )
+        return AnthropicProvider(
+            api_key=target.api_key, base_url=target.base_url, http_client=client
+        )
+
+    from anthropic import AsyncAnthropic
+
+    transport = get_client(
+        f"model:anthropic-httpx2:{target.timeout}:{target.connect_timeout}:{policy.max_request_bytes}",
+        lambda: _create_anthropic_http_client(
+            target.timeout, target.connect_timeout, policy
+        ),
+    )
+    client = AsyncAnthropic(
+        api_key=target.api_key,
+        base_url=target.base_url,
+        http_client=transport,
+    )
+    return AnthropicProvider(anthropic_client=_adapt_anthropic_message_api(client))
+
+
+def _create_http_client(target: ModelTarget, policy: ModelInputPolicy):
+    client = create_async_http_client(
+        timeout=target.timeout, connect=target.connect_timeout
+    )
+    if policy.max_request_bytes is not None:
+        client.event_hooks["request"].append(policy.check_http_request)
+    return client
+
+
+def _create_provider(provider_name: str, target: ModelTarget, policy: ModelInputPolicy):
+    """Supply configured credentials and transport to the provider selected by the SDK."""
+    provider_type = infer_provider_class(provider_name)
+    if provider_type is AnthropicProvider:
+        return _create_anthropic_provider(target, policy)
+    client = get_client(
+        f"model:{provider_name}:{target.timeout}:{target.connect_timeout}:{policy.max_request_bytes}",
+        lambda: _create_http_client(target, policy),
+    )
+    parameters = inspect.signature(provider_type).parameters
+    if "openai_client" in parameters:
+        from openai import AsyncOpenAI
+
+        return provider_type(openai_client=AsyncOpenAI(
+            base_url=openai_base_url(target.base_url),
+            api_key=target.api_key,
+            http_client=client,
+        ))
+    if "base_url" in parameters:
+        return provider_type(base_url=target.base_url, api_key=target.api_key, http_client=client)
+    raise ConfigError(f"当前 SDK 的 {provider_type.__name__} 不支持此处配置的自定义服务地址。")
+
+
 def create_model(model_name: str | ModelTarget, parameter: dict | None = None):
     target = (
         model_name
@@ -243,21 +360,13 @@ def create_model(model_name: str | ModelTarget, parameter: dict | None = None):
     if missing:
         raise ConfigError(f"缺少配置 {missing}；检查来源: {config_source_summary()}")
     policy = ModelInputPolicy.from_limits(target.limits)
-
-    def new_client():
-        client = create_async_http_client(
-            timeout=target.timeout, connect=target.connect_timeout
-        )
-        if policy.max_request_bytes is not None:
-            client.event_hooks["request"].append(policy.check_http_request)
-        return client
-
-    client = get_client(
-        f"model:{target.timeout}:{target.connect_timeout}:{policy.max_request_bytes}",
-        new_client,
+    model = infer_model(
+        f"{target.protocol}:{target.name}",
+        provider_factory=lambda provider: _create_provider(provider, target, policy),
     )
     params = apply_thinking_config(target.settings, model_name=target.name)
-    if "deepseek" in target.name.lower() and target.protocol.startswith("openai"):
+    profile = model.profile.copy()
+    if isinstance(model.provider, DeepSeekProvider):
         requested = str(target.settings.get("reasoning_effort", "")).strip().lower()
         if params.get("thinking") and requested:
             params["openai_reasoning_effort"] = {
@@ -266,47 +375,23 @@ def create_model(model_name: str | ModelTarget, parameter: dict | None = None):
                 "xhigh": "high",
                 "ultra": "max",
             }.get(requested, requested)
-    provider_args = dict(api_key=target.api_key, http_client=client)
-    if target.protocol == "google":
-        provider = GoogleProvider(base_url=target.base_url, **provider_args)
-        return GoogleModel(
-            target.name, provider=provider, settings=ModelSettings(**params)
-        )
-    if target.protocol == "anthropic":
-        provider = AnthropicProvider(base_url=target.base_url, **provider_args)
-        return AnthropicModel(
-            target.name, provider=provider, settings=ModelSettings(**params)
-        )
-    provider = OpenAIProvider(
-        base_url=openai_base_url(target.base_url), **provider_args
-    )
-    if target.protocol == "openai-responses":
-        return OpenAIResponsesModel(
-            target.name, provider=provider, settings=ModelSettings(**params)
-        )
-    name = target.name.rsplit("/", 1)[-1]
-    profile = OpenAIProvider.model_profile(name)
-    if "deepseek" in name.lower():
-        profile = deepseek_model_profile(name)
-        profile.update(
-            openai_supports_tool_choice_required=False,
-            openai_chat_supports_max_completion_tokens=False,
-            openai_chat_thinking_field="reasoning_content",
-            openai_chat_send_back_thinking_parts="field",
-        )
-    return CompatibleChatModel(
-        target.name,
-        provider=provider,
+        # Retain the verified DeepSeek wire-field fix; the SDK selects the provider/profile.
+        profile["openai_chat_supports_max_completion_tokens"] = False
+    model_type = CompatibleChatModel if type(model) is OpenAIChatModel else type(model)
+    return model_type(
+        model.model_name,
+        provider=model.provider,
         profile=profile,
         settings=ModelSettings(**params),
     )
 
 
 class RequestPolicy(AbstractCapability):
-    def __init__(self, role, target, model, *, follow_config=False, task_state=None):
+    def __init__(self, role, target, model, *, follow_config=False, task_state=None, persist_context=None):
         self.role, self.target, self.model = role, target, model
         self.follow_config = follow_config
         self.task_state = task_state
+        self.persist_context = persist_context
 
     async def before_model_request(self, ctx, request_context):
         target = ModelTarget.for_role(self.role) if self.follow_config else self.target
@@ -319,30 +404,16 @@ class RequestPolicy(AbstractCapability):
         if self.role in ("coordinator", "manager", "worker"):
             from redlotus.core.history import compact_request_messages
 
-            request_context.messages = await compact_request_messages(
+            candidate = await compact_request_messages(
                 request_context.messages,
                 role=self.role,
                 target=target,
                 task_state=self.task_state() if self.task_state else "",
                 tools=tool_definitions,
             )
-        else:
-            from redlotus.core.history import get_effective_max_context_async
-            from redlotus.core.history import estimate_context_tokens
-
-            limit = await get_effective_max_context_async(
-                target.name, role=self.role, context=target.context
-            )
-            if (
-                estimate_context_tokens(
-                    request_context.messages, tools=tool_definitions
-                )
-                + int(target.settings.get("max_tokens") or 0)
-                >= limit
-            ):
-                raise InputLimitError(
-                    "Input and configured output budget exceed the target context capacity."
-                )
+            if candidate is not request_context.messages and self.persist_context:
+                await self.persist_context(candidate)
+            request_context.messages = candidate
         self.target, self.model = target, model
         ModelInputPolicy.from_limits(target.limits).check_messages(
             request_context.messages
@@ -454,18 +525,21 @@ class AgentRunner:
                         on_complete()  # Later input is a new turn, even while trace writes are draining.
                     node = next_node
             except BaseException as exc:
-                if on_complete:
-                    on_complete()
-                self._close_interrupted_calls(
-                    run.ctx.state.message_history, results, exc
-                )
-                if on_node:
-                    await on_node(run)
-                if isinstance(exc, InputLimitError) and not response_received:
-                    # The rejected input remains in the journal, outside the next request's view.
-                    run.ctx.state.message_history[:] = original_history
+                try:
+                    if on_complete:
+                        on_complete()
+                    self._close_interrupted_calls(
+                        run.ctx.state.message_history, results, exc
+                    )
                     if on_node:
                         await on_node(run)
+                    if isinstance(exc, InputLimitError) and not response_received:
+                        # Retain the rejected input only in the journal.
+                        run.ctx.state.message_history[:] = original_history
+                        if on_node:
+                            await on_node(run)
+                except BaseException as recording_error:
+                    raise exc from recording_error
                 raise
         return run.result
 
@@ -490,7 +564,7 @@ class AgentRunner:
                 content={
                     "status": status,
                     "execution_outcome": "unknown",
-                    "error": "Execution interrupted; completion is unverified.",
+                    "error": type(error).__name__,
                 },
                 outcome="failed",
                 metadata={
@@ -506,24 +580,11 @@ class AgentRunner:
         messages.append(
             ModelResponse(
                 parts=[
-                    TextPart(
-                        f"Execution {status}. Unfinished actions are unverified; await the next user instruction."
-                    )
+                    TextPart(json.dumps({"execution_status": status}))
                 ],
                 metadata={"origin": "execution_status", "status": status},
             )
         )
-
-
-_TOOL_DESCRIPTIONS = {
-    "core": "Always-available Worker tools for reading, searching, user input, and coordination.",
-    "file_mutation": "Use for writing, editing, appending files, or creating directories.",
-    "execution": "Use for running shell commands or executing files.",
-    "browser": "Use for browser navigation, screenshots, page interaction, and browser inspection.",
-    "media": "Use for reading images or extracting text from documents and attachments.",
-    "memory": "Use for querying short-term memory or maintaining long-term memory.",
-    "skills": "Use for listing, loading, refreshing, or executing Agent Skills.",
-}
 
 
 def create_function_toolset(
@@ -544,35 +605,6 @@ def create_function_toolset(
         instructions=instructions,
         defer_loading=defer_loading,
     )
-
-
-def create_worker_toolsets_and_capabilities(tool_groups):
-    """Build resident and deferred tools with the same descriptions, wrapping and IDs."""
-    resident, capabilities = [], []
-    for group, description in _TOOL_DESCRIPTIONS.items():
-        tools = tool_groups.get(group)
-        if not tools:
-            continue
-        identity = "worker_" + group
-        deferred = group != "core"
-        toolset = create_function_toolset(
-            list(tools),
-            toolset_id=identity,
-            instructions=description,
-            defer_loading=deferred,
-        )
-        if deferred:
-            capabilities.append(
-                Capability(
-                    id=identity,
-                    description=description,
-                    toolsets=[toolset],
-                    defer_loading=True,
-                )
-            )
-        else:
-            resident.append(toolset)
-    return resident, capabilities
 
 
 def _validate_current_text(ctx: RunContext, output: str) -> str:
@@ -599,6 +631,7 @@ def create_agent(
     role: str | None = None,
     follow_config: bool = False,
     task_state=None,
+    persist_context=None,
 ):
     model = (
         create_model(model_name, parameter)
@@ -615,6 +648,7 @@ def create_agent(
                 model,
                 follow_config=follow_config,
                 task_state=task_state,
+                persist_context=persist_context,
             )
         )
     agent = Agent(
@@ -637,6 +671,7 @@ async def create_coordinator_agent(
     task_state=None,
     *,
     instructions: str | None = None,
+    persist_context=None,
 ):
     from redlotus.prompts.prompt import get_coordinator_system_prompt
 
@@ -657,6 +692,7 @@ async def create_coordinator_agent(
         role="coordinator",
         follow_config=True,
         task_state=task_state,
+        persist_context=persist_context,
     )
 
 
@@ -711,29 +747,18 @@ class TaskTitle(BaseModel):
         return value
 
 
-def _max_chars() -> int:
-    return int(settings()["task_title"]["max_chars"])
-
-
-def _fallback(user_text: str, max_chars: int) -> str:
-    first_line = next(
-        (line.strip() for line in user_text.splitlines() if line.strip()), ""
-    )
-    return safe_name(first_line, max_len=max_chars, fallback="task")
-
-
-def _title_from_output(output: object, max_chars: int) -> str:
+def _title_from_output(output: object) -> str:
     if not isinstance(output, TaskTitle):
         raise ValueError("title response did not match the structured output")
-    if len(output.title) > max_chars:
-        raise ValueError(f"title exceeds configured limit of {max_chars} characters")
     return output.title
 
 
 async def generate_task_title(user_text: str) -> str:
     """Generate a short task title with the dedicated configured title role."""
-    max_chars = _max_chars()
-    fallback = _fallback(user_text, max_chars)
+    fallback = next(
+        (line.strip() for line in user_text.splitlines() if line.strip()),
+        "",
+    )
     try:
         target = ModelTarget.for_role("title")
         agent = create_agent(
@@ -753,11 +778,7 @@ async def generate_task_title(user_text: str) -> str:
                 ensure_ascii=False,
             ),
         )
-        return safe_name(
-            _title_from_output(result.output, max_chars),
-            max_len=max_chars,
-            fallback=fallback,
-        )
+        return _title_from_output(result.output)
     except Exception as exc:
         logger.warning("LLM 标题生成失败，使用用户输入命名: %s", exc)
         return fallback

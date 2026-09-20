@@ -3,7 +3,8 @@
 from __future__ import annotations
 import asyncio
 import json
-from pydantic_ai.messages import BinaryContent, ModelMessagesTypeAdapter, TextContent
+from dataclasses import asdict
+from pydantic_ai.messages import BinaryContent, ImageUrl, ModelMessagesTypeAdapter, TextContent
 from redlotus.core.config import (
     settings,
     iso_utc_now,
@@ -13,19 +14,17 @@ from redlotus.core.config import (
     project_data_dir,
 )
 from redlotus.core.gateway import ModelInputPolicy
+from redlotus.core.agents import Outcome
 from redlotus.tools.references import ReferenceStore
 from redlotus.tools.registry import tool_result_succeeded
 
 
 from typing import Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 import re
 import shutil
 from pathlib import Path
 import hashlib
-
-
-Outcome = Literal["success", "failed", "cancelled", "needs_input", "unverified"]
 
 
 class MemoryContent(BaseModel):
@@ -41,12 +40,10 @@ class MemoryContent(BaseModel):
     attempts: list[str] = Field(default_factory=list)
     result: str = ""
     unresolved: list[str] = Field(default_factory=list)
-    status: Outcome = Field(
-        default="unverified",
-        description="Outcome of the user's goal, not the completion of an Agent turn. Required steps still failed or unverified cannot be success.",
-    )
+    status: Outcome = "unverified"
     source_turn_ids: list[str] = Field(default_factory=list)
     reference_ids: list[str] = Field(default_factory=list)
+    behavior_evidence_ids: list[str] = Field(default_factory=list)
 
     def text(self) -> str:
         return "\n".join(
@@ -75,6 +72,14 @@ class MemoryRecord(MemoryContent):
     last_change_id: str = ""
     source_updated_at: str = ""
     request_created_at: str = ""
+    source_memory_ids: list[str] = Field(default_factory=list)
+    reference_sources: dict[str, str] = Field(default_factory=dict)
+
+    @computed_field
+    @property
+    def occurrence_count(self) -> int:
+        """Count independent user turns, never duplicate excerpts or overlap."""
+        return len({identity.rsplit(":u", 1)[0] for identity in self.behavior_evidence_ids})
 
 
 class MemoryDraft(MemoryContent):
@@ -83,12 +88,26 @@ class MemoryDraft(MemoryContent):
     core_old_text: str = ""
     source_turn_ids: list[str] = Field(min_length=1)
     evidence_ids: list[str] = Field(default_factory=list)
+    search_id: str = ""
+    promotion_basis: str = ""
+
+    def validate_behavior(self, sources, previous=None, *, related=()):
+        """Only genuine user evidence can support the recorded behavior count."""
+        known = set(previous.behavior_evidence_ids) if previous else set()
+        known.update(identity for record in related if record.scope == "project" and record.state == "active"
+                     for identity in record.behavior_evidence_ids)
+        for identity in set(self.behavior_evidence_ids) - known:
+            evidence = sources.get(identity, {})
+            if (evidence.get("kind") != "user" or not evidence.get("verified")
+                or evidence.get("event_id") not in self.source_turn_ids):
+                valid = sorted(known | {key for key, source in sources.items()
+                                      if source.get("kind") == "user" and source.get("verified")
+                                      and source.get("event_id") in self.source_turn_ids})
+                raise ValueError(json.dumps({"error": "memory_behavior_evidence", "invalid": identity, "valid": valid}))
 
     def validated_scope(self, requested_scope):
         if requested_scope != "auto" and self.scope != requested_scope:
-            raise ValueError(
-                f"本次请求只允许 scope={requested_scope}；不要混入其他范围或其他记忆提议。"
-            )
+            raise ValueError(json.dumps({"error": "memory_requested_scope", "expected": requested_scope, "actual": self.scope}))
         return self
 
     def validated_sources(self, current_ids, new_ids, reference_ids, previous=None):
@@ -96,14 +115,10 @@ class MemoryDraft(MemoryContent):
         if set(self.source_turn_ids) - set(current_ids) - historical or not set(
             self.source_turn_ids
         ) & set(new_ids):
-            raise ValueError(
-                "source_turn_ids 必须来自提供的事件，且至少包含一个新增事件；保留旧出处时只能引用目标记录已有的出处。"
-            )
+            raise ValueError(json.dumps({"error": "memory_turn_sources", "current": list(current_ids), "new": list(new_ids), "actual": self.source_turn_ids}))
         old_refs = set(previous.reference_ids) if previous else set()
         if set(self.reference_ids) - set(reference_ids) - old_refs:
-            raise ValueError(
-                "reference_ids 只能逐字使用已提供的引用 ID；文件路径和文件名不是引用 ID，没有引用时使用空数组。"
-            )
+            raise ValueError(json.dumps({"error": "memory_reference_sources", "allowed": list(reference_ids), "actual": self.reference_ids}))
         return self.model_copy(
             update={
                 "source_turn_ids": [
@@ -212,11 +227,7 @@ class LongTermMemory:
         )
 
     def get_injection(self):
-        return (
-            "MEMORY.md 是常用画像、环境、约束与通用经验；详细资料用 search_memory/read_memory 召回。\n<core_memory>\n"
-            + self.read()
-            + "</core_memory>"
-        )
+        return "<core_memory>\n" + self.read() + "\n</core_memory>"
 
     def apply_record(self, record, previous=None, *, core_old_text=""):
         self.read()
@@ -431,6 +442,10 @@ class EvidenceReader:
                     for asset_index, item in enumerate(content):
                         if isinstance(item, str):
                             texts.append(item)
+                        elif isinstance(item, ImageUrl):
+                            images = packets[event.id].setdefault("image_urls", [])
+                            if not any(image["url"] == item.url for image in images):
+                                images.append(asdict(item))
                         elif (
                             isinstance(item, TextContent)
                             and (item.metadata or {}).get("origin") == "runtime_control"
@@ -472,6 +487,8 @@ class EvidenceReader:
                 )
                 if tool in (
                     "remember",
+                    "update_memory",
+                    "delete_memory",
                     "read_memory",
                     "search_memory",
                     "list_memory",

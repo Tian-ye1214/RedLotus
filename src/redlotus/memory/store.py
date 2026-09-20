@@ -17,8 +17,9 @@ from copy import deepcopy
 from filelock import AsyncFileLock
 
 from redlotus.core import config as logger
-from redlotus.memory.retrieval import RAG
+from redlotus.memory.retrieval import RAG, missing_rag_settings
 from redlotus.core.config import missing_rag_api_keys, settings, file_lock, iso_utc_now
+from redlotus.tools.references import ReferenceStore
 
 
 MEMORY_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -99,6 +100,12 @@ class MemoryStore:
             raise KeyError(identity)
         return MemoryRecord.model_validate_json(rows[0]["payload"])
 
+    def revision(self, scope):
+        """Fingerprint one memory scope for search-to-commit conflict detection."""
+        rows = sorted(self._rows(scope, active_only=False), key=lambda row: row["id"])
+        records = [(row["id"], row["payload"]) for row in rows]
+        return hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+
     def save(self, records: list[MemoryRecord]):
         if not records:
             return
@@ -162,14 +169,33 @@ class MemoryStore:
             )
         }
 
+    def rag_unavailable_reason(self, scope=None):
+        """Describe incomplete optional-RAG setup without attempting a request."""
+        names = [scope] if scope else self.indexes
+        use_rerank = any(self.indexes[name].config["use_rerank"] for name in names)
+        missing = missing_rag_settings(
+            use_rerank=use_rerank,
+            configuration=settings(),
+            api_missing=missing_rag_api_keys(),
+        )
+        if not missing:
+            return ""
+        return (
+            "RAG 配置不完整：缺少 "
+            + "、".join(missing)
+            + "；记忆已保存，可使用文本检索。补齐后执行 /STM retry 继续索引。"
+        )
+
     async def search(self, query, scope=None):
         records = await asyncio.to_thread(self.all, scope)
         by_id = {row.id: row for row in records}
+        reason = self.rag_unavailable_reason(scope)
         if not query.strip() or not records:
+            self.retrieval_error = reason
             return []
         ranked, errors = [], []
-        if missing_rag_api_keys():
-            errors.append("向量服务未配置，使用项目内文本检索。")
+        if reason:
+            errors.append(reason)
         else:
             for name in [scope] if scope else self.indexes:
                 index = self.indexes[name]
@@ -195,8 +221,8 @@ class MemoryStore:
         return [by_id[key] for key in dict.fromkeys(ranked)][:limit]
 
     async def reconcile(self):
-        if missing_rag_api_keys():
-            self.last_error = "向量服务未配置；记忆已保存，可使用文本检索。"
+        if reason := self.rag_unavailable_reason():
+            self.last_error = reason
             return
         async with self._index_lock:
             try:
@@ -307,6 +333,7 @@ class MemoryStore:
         draft = draft.validated_sources(
             events, new_ids, job.reference_ids, job.bases.get(draft.target_id)
         )
+        draft.validate_behavior(job.sources, job.bases.get(draft.target_id), related=job.bases.values())
         if any(
             events[key].created_at <= cleared_at(draft.scope)
             for key in draft.source_turn_ids
@@ -375,8 +402,24 @@ class MemoryStore:
                 for row in job.bases.values()
             ):
                 return None
+        source_memories = []
+        if not explicit and draft.scope == "global" and draft.action != "delete":
+            if not draft.behavior_evidence_ids:
+                raise ValueError("L2 promotion requires independent user evidence from L1.")
+            event_ids = {key.rsplit(":u", 1)[0] for key in draft.behavior_evidence_ids}
+            source_memories = [
+                row.id for row in job.bases.values()
+                if row.scope == "project" and row.state == "active"
+                and event_ids & set(row.source_turn_ids)
+            ]
+            for position, candidate in enumerate(job.result.records):
+                if (candidate.scope == "project" and candidate.action != "delete"
+                    and event_ids & set(candidate.source_turn_ids)):
+                    source_memories.append(candidate.target_id or hashlib.sha256(f"{job.id}:{position}".encode()).hexdigest()[:32])
+            if not source_memories:
+                raise ValueError("L2 promotion requires a related L1 record.")
         body = draft.model_dump(
-            exclude={"action", "target_id", "core_old_text", "evidence_ids"}
+            exclude={"action", "target_id", "core_old_text", "evidence_ids", "search_id", "promotion_basis"}
         )
         outcomes = {events[key].status for key in draft.source_turn_ids}
         if draft.kind == "episode":
@@ -397,8 +440,15 @@ class MemoryStore:
                 created_at=min(events[key].created_at for key in draft.source_turn_ids),
             )
         )
-        for field in ("source_turn_ids", "reference_ids"):
+        for field in ("source_turn_ids", "reference_ids", "behavior_evidence_ids"):
             body[field] = list(dict.fromkeys([*getattr(record, field), *body[field]]))
+        body["source_memory_ids"] = list(dict.fromkeys([*record.source_memory_ids, *source_memories]))
+        reference_root = ReferenceStore(self.workspace).root
+        body["reference_sources"] = {
+            **record.reference_sources,
+            **{key: str(reference_root / "manifests" / f"{key}.json")
+               for key in draft.reference_ids if key in job.reference_ids},
+        }
         body["evidence"] = list(
             dict.fromkeys(
                 [
@@ -434,9 +484,31 @@ class MemoryReader:
         self.store, self.long_term, self.references = store, long_term, references
         self.owner_memory_allowed = owner_memory_allowed
 
-    async def search_memory(self, query: str) -> str:
-        """Recall current-project episodes and the owner's global knowledge using RAG."""
-        rows = await self.store.search(query) if self.owner_memory_allowed else []
+    async def search_memory(
+        self, query: str = "", scope: str | None = None, id: str | None = None,
+        include_references: bool = False,
+    ):
+        """Search permitted memories or retrieve one complete record by ID.
+
+        Project scope contains L1 memories of the current project. Global scope contains
+        L2 memories available across the owner's projects. Personal memories are not
+        available to unauthenticated channels.
+
+        Args:
+            query: The complete semantic search query; unused when id is supplied.
+            scope: project for L1, global for L2, or omitted to search both permitted scopes.
+            id: A known record ID to retrieve instead of performing a search.
+            include_references: Include original referenced content when retrieving by ID.
+
+        Returns:
+            Matching records or the requested full record, with retrieval errors reported explicitly."""
+        if not self.owner_memory_allowed:
+            return "Error: Personal memory unavailable."
+        if scope not in (None, "project", "global"):
+            return "Error: scope must be project (L1) or global (L2)."
+        if id is not None:
+            return await self.read_memory(id, include_references=include_references, scope=scope)
+        rows = await self.store.search(query, scope)
         return json.dumps(
             dict(
                 memories=[row.model_dump(mode="json") for row in rows],
@@ -445,7 +517,7 @@ class MemoryReader:
             ensure_ascii=False,
         )
 
-    async def read_memory(self, id: str, include_references: bool = False):
+    async def read_memory(self, id: str, include_references: bool = False, *, scope=None):
         """Read a permitted complete memory; optionally include original referenced media."""
         if not self.owner_memory_allowed:
             return "Error: Personal memory unavailable."
@@ -455,21 +527,25 @@ class MemoryReader:
             record = self.store.get(id)
         except KeyError:
             return "Error: Memory not found or unavailable."
+        if scope is not None and record.scope != scope:
+            return "Error: Memory not found in the selected scope."
         if record.state != "active":
             return json.dumps(dict(id=record.id, state=record.state))
         if not include_references:
             return record.model_dump_json()
-        references = await asyncio.gather(
-            *(
-                self.references.parse(self.references.load(key))
-                for key in record.reference_ids
-            )
-        )
+        references, errors = [], []
+        for key in record.reference_ids:
+            try:
+                source = record.reference_sources.get(key)
+                store = (ReferenceStore(self.references.workspace, root=Path(source).parent.parent)
+                         if source else self.references)
+                reference = await store.parse(await asyncio.to_thread(store.load, key))
+                references.extend(await asyncio.to_thread(reference.to_prompt))
+            except (OSError, ValueError) as exc:
+                errors.append(dict(id=key, error=str(exc)))
         return ToolReturn(
-            return_value=record.model_dump_json(),
-            content=[
-                part for reference in references for part in reference.to_prompt()
-            ],
+            return_value=json.dumps({**record.model_dump(mode="json"), "reference_errors": errors}, ensure_ascii=False),
+            content=references,
         )
 
     async def search_episodes(self, query: str) -> str:

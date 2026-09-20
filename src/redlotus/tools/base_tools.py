@@ -1,4 +1,4 @@
-"""Registered tools and delegation composed for each Agent."""
+"""Common file, command, web, document and media tool implementations."""
 
 from __future__ import annotations
 
@@ -12,13 +12,10 @@ import threading
 import mimetypes
 import shlex
 import platform as _platform
-import copy
-import uuid
 from redlotus.core import config as logger
 from redlotus.core.config import (
     get_env,
     get_agent_run_policy,
-    get_agent_usage_limits,
     runtime_dir,
     user_skills_dir,
 )
@@ -29,26 +26,12 @@ from redlotus.tools.registry import SkillsManager, resolve_readable_path
 from redlotus.core.agents import (
     WorkspaceContext,
     bind_to_loop,
-    SubagentFactory,
-    SubagentSpec,
-    AgentRunner,
-    AgentRegistry,
-    SubagentResult,
 )
 from redlotus.core.session import current_workspace
 from redlotus.tools.execution import describe_execution_environment, run_subprocess
 from redlotus.tools.references import PlaywrightBrowserSession, ReferenceStore
 from redlotus.core.presentation import show_file_diff
-from redlotus.tools.interaction import PendingReviewStore, Task, TaskManager, TaskStatus
-from typing import Callable
-from redlotus.core.gateway import (
-    create_agent,
-    create_function_toolset,
-    create_worker_toolsets_and_capabilities,
-    ModelTarget,
-)
-from redlotus.prompts.prompt import with_runtime_context, get_worker_system_prompt, get_manager_system_prompt
-from redlotus.core.history import ChatHistory, messages_safe_for_new_prompt
+from redlotus.tools.interaction import PendingReviewStore
 
 
 async def generate_image_from_flux(prompt: str, width: int = 1024, height: int = 1024, max_wait_time: int = 300):
@@ -60,7 +43,7 @@ async def generate_image_from_flux(prompt: str, width: int = 1024, height: int =
     - "give me an image" / "produce image"
     - Any request involving creating visual content, artwork, diagrams, or images (any language)
 
-    Parameters:
+    Args:
         prompt: The text description of what image to generate. Be detailed and specific about the visual content, style, composition, colors, mood, etc. This is the most important parameter.
         width: Image width in pixels. Default: 1024. Common values: 512, 768, 1024, 1536, etc.
         height: Image height in pixels. Default: 1024. Common values: 512, 768, 1024, 1536, etc.
@@ -164,7 +147,6 @@ class BasicToolkit:
         self,
         skills_manager: SkillsManager,
         *,
-        extra_worker_tools: list | None = None,
         workspace: WorkspaceContext | None = None,
     ):
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
@@ -179,7 +161,6 @@ class BasicToolkit:
         self._command_lock = asyncio.Lock()
         self._review_store = PendingReviewStore(self._file_lock)
         self._references = ReferenceStore(self.workspace)
-        self._extra_worker_tools: list = list(extra_worker_tools or [])
         self._ask_user_handler = None
         self._skills_manager = skills_manager
         self._browser_session = PlaywrightBrowserSession(self.workspace)
@@ -227,7 +208,6 @@ class BasicToolkit:
         child = BasicToolkit(
             SkillsManager(workspace=self.workspace),
             workspace=self.workspace,
-            extra_worker_tools=[bind_to_loop(t, owner_loop) for t in self._extra_worker_tools],
         )
         child._file_lock = self._file_lock
         child._review_store = self._review_store
@@ -239,7 +219,7 @@ class BasicToolkit:
         """
         Set a dedicated work directory for the current task.
 
-        Parameters:
+        Args:
             task_name: Task name; used to create a subdirectory under WorkDatabase.
 
         Returns:
@@ -317,8 +297,10 @@ class BasicToolkit:
     async def ask_user(self, question: str) -> str:
         """
         Ask the user a question and return their reply.
-        Parameters:
+
+        Args:
             question: The question to ask
+
         Returns:
             The user's answer
         """
@@ -343,7 +325,13 @@ class BasicToolkit:
         """Parse a project document that has not already been supplied as a reference.
 
         Returns structured text and native media. Use supplied reference contents directly;
-        read_reference(id) retrieves a registered immutable version when it is needed again.
+        read_reference(reference_id) retrieves an immutable version when it is needed again.
+
+        Args:
+            name: Document path within the project or an allowed Skill directory.
+
+        Returns:
+            The registered reference identity, parsed text and original media, or an error.
         """
         from redlotus.core.gateway import ModelInputPolicy
 
@@ -364,7 +352,8 @@ class BasicToolkit:
         Use for source code, generated artifacts, changes since a reference was captured,
         or an explicit reread. Reference blocks already contain the stated snapshot content;
         use read_reference for that immutable version when it is absent from context.
-        Parameters:
+
+        Args:
             name: File name/path
         """
         try:
@@ -378,7 +367,8 @@ class BasicToolkit:
     def list_files(self, directory: str = "") -> str:
         """
         List all files and folders in a directory.
-        Parameters:
+
+        Args:
             directory: Optional, subdirectory path, defaults to root directory
         """
         try:
@@ -416,9 +406,9 @@ class BasicToolkit:
 
     def write_file(self, name: str, content: str) -> str:
         """
-        Create or overwrite a file with SHORT content only.
+        Create or overwrite a project file and display the resulting diff.
 
-        Parameters:
+        Args:
             name: Path relative to the current project; use WorkDatabase/ for generated artifacts.
             content: Content to write
         """
@@ -430,7 +420,7 @@ class BasicToolkit:
         Prefer this over write_file when modifying an existing file: it makes a precise,
         local change and shows a colored diff instead of rewriting the whole file.
 
-        Parameters:
+        Args:
             name: Path relative to the current project; use WorkDatabase/ for generated artifacts.
             old_string: Exact text to replace. Must occur EXACTLY ONCE in the file —
                 include enough surrounding context (indentation, neighboring lines) to be unique.
@@ -452,7 +442,8 @@ class BasicToolkit:
     def search_in_files(self, keyword: str, file_extension: str = None) -> str:
         """
         Search for a keyword in files.
-        Parameters:
+
+        Args:
             keyword: Keyword to search for
             file_extension: Optional, limit search to specific file types, e.g., ".py", ".txt"
         """
@@ -481,7 +472,8 @@ class BasicToolkit:
     def search_web(self, query: str, max_results: int = 5) -> str:
         """
         Search web pages. Returns a list of search results (title, link, summary).
-        Parameters:
+
+        Args:
             query: Search keywords
             max_results: Maximum number of results to return, defaults to 5
         """
@@ -511,11 +503,16 @@ class BasicToolkit:
     async def run_command(self, command: str, timeout: int = 60) -> str:
         """
         Execute a Shell/terminal command.
-        Python and pip commands automatically prepare/reuse the configured project
-        environment; bare python/pip use it. A missing environment before the first
-        command is expected. Run the requested command directly: no manual venv
-        activation, framework-source inspection or host installation is needed.
-        Parameters:
+        Python uses the interpreter running this application, or an external PATH
+        interpreter for a packaged executable. Dependency installation changes
+        that existing environment; inspect execution_environment for its path.
+        Use pip for package operations: its installation target is pinned to that
+        interpreter even when the pip executable itself belongs to another environment.
+        An explicit Python invocation with extra flags still requires its own pip module.
+        No environment is created automatically. Missing Python or packages are
+        reported as errors; ordinary commands do not require Python.
+
+        Args:
             command: Command to execute
             timeout: Timeout in seconds, defaults to 60
         """
@@ -568,34 +565,11 @@ class BasicToolkit:
             return f"Error executing command: {e}"
 
     def execution_environment(self) -> str:
-        """Report the configured project interpreter and cache paths."""
+        """Report the existing interpreter, dependency install location and project cache paths."""
         return describe_execution_environment(
             cwd=self._base_dir,
             workspace=self.workspace,
         )
-
-    async def read_image(self, image_path: str) -> ToolReturn | str:
-        """Read an original image from the current project or an explicitly requested HTTP(S) URL.
-
-        The registered immutable reference can be consumed again by memory perception.
-        """
-        from redlotus.core.gateway import ModelInputPolicy
-
-        try:
-            policy = ModelInputPolicy.for_role()
-            if image_path.startswith(("http://", "https://")):
-                reference = await self._references.import_url(image_path, policy=policy)
-            else:
-                path = self._readable_path(image_path)
-                reference = await self._references.import_file(path, policy=policy)
-            if not reference.media_type.startswith("image/"):
-                return "Error: The supplied reference is not an image."
-            return ToolReturn(
-                return_value=f"Image reference: {reference.name} ({reference.id})",
-                content=reference.to_prompt(),
-            )
-        except Exception as exc:
-            return f"Error reading image: {exc}"
 
     async def generate_image(
         self,
@@ -612,7 +586,7 @@ class BasicToolkit:
         - "give me an image" / "produce image"
         - Any request involving creating visual content, artwork, diagrams, or images (any language)
 
-        Parameters:
+        Args:
             prompt: The text description of what image to generate. Be detailed and specific about the visual content, style, composition, colors, mood, etc. This is the most important parameter.
             width: Image width in pixels. Default: 1024. Common values: 512, 768, 1024, 1536, etc.
             height: Image height in pixels. Default: 1024. Common values: 512, 768, 1024, 1536, etc.
@@ -648,232 +622,3 @@ class BasicToolkit:
                 BinaryContent(data=image_bytes, media_type=mime_type),
             ],
         )
-
-    def worker_tool_groups(self, *, include_browser: bool) -> dict[str, list]:
-        """Worker tools grouped for resident tools and deferred capabilities."""
-        groups = {
-            "core": [
-                self.list_files,
-                self.read_file,
-                self.search_in_files,
-                self.search_web,
-                self.ask_user,
-                self._references.read_reference,
-            ],
-            "file_mutation": [
-                self.write_file,
-                self.edit_file,
-            ],
-            "execution": [
-                self.run_command,
-                self.execution_environment,
-            ],
-            "media": [
-                self.generate_image,
-                self.read_image,
-                self.extract_text,
-            ],
-            "memory": list(self._extra_worker_tools),
-            "skills": list(self._skills_manager.tools),
-        }
-        if include_browser:
-            groups["browser"] = self._browser_session.tools
-        return {name: tools for name, tools in groups.items() if tools}
-
-    def worker_tools(self, *, include_browser: bool) -> list:
-        return [
-            tool
-            for group in self.worker_tool_groups(
-                include_browser=include_browser
-            ).values()
-            for tool in group
-        ]
-
-
-class WorkerOrchestrator:
-    """Plan dependencies on the parent loop; execute every child through one factory."""
-
-    def __init__(
-        self,
-        toolkit,
-        task_manager: TaskManager,
-        *,
-        memory_injection_getter: Callable[[], str] | None = None,
-        registry: AgentRegistry,
-        factory: SubagentFactory | None = None,
-    ):
-        self._toolkit = toolkit
-        self._task_manager = task_manager
-        self._memory_injection_getter = memory_injection_getter or (lambda: "")
-        self._registry = registry
-        self.factory = factory or SubagentFactory()
-        self.session_file = None
-        self._session_key: str | None = None
-
-    def set_session_key(self, session_key: str | None) -> None:
-        self._session_key = session_key
-
-    async def _execute(
-        self,
-        prompt,
-        history: ChatHistory,
-        *,
-        turn_id: str | None,
-        task_id: str,
-        role: str = "worker",
-        planning_tools: tuple = (),
-    ):
-        if self._session_key is None:
-            raise RuntimeError("Worker requires a bound session")
-        owner_loop = asyncio.get_running_loop()
-        target = ModelTarget.for_role(role)
-        # Snapshot before starting the thread: no mutable messages or clients cross loops.
-        messages = copy.deepcopy(messages_safe_for_new_prompt(history.messages))
-        memory = self._memory_injection_getter()
-        spec = SubagentSpec(
-            self._session_key, turn_id, self._toolkit.workspace, role=role
-        )
-        invocation = uuid.uuid4().hex
-
-        async def execute_child():
-            toolkit = self._toolkit.clone_for_worker(owner_loop)
-            local_history = ChatHistory()
-            local_history.set_messages(messages)
-            try:
-                if role == "worker":
-                    toolsets, capabilities = create_worker_toolsets_and_capabilities(
-                        toolkit.worker_tool_groups(include_browser=True)
-                    )
-                    instructions = get_worker_system_prompt(
-                        toolkit.skills_manager, memory
-                    )
-                    output_type = SubagentResult
-                else:
-                    toolsets = [
-                        create_function_toolset(
-                            [bind_to_loop(t, owner_loop) for t in planning_tools], toolset_id="planning"
-                        )
-                    ]
-                    capabilities = []
-                    instructions = get_manager_system_prompt(
-                        toolkit.skills_manager, memory
-                    )
-                    output_type = str
-                agent = create_agent(
-                    target,
-                    instructions=instructions,
-                    toolsets=toolsets,
-                    capabilities=capabilities,
-                    output_type=output_type,
-                    role=role,
-                )
-
-                async def save_node(run):
-                    local_history.set_messages(list(run.all_messages()))
-                    if self.session_file:
-                        self.session_file.record_usage(run.new_messages(), role=role, invocation=invocation)
-
-                result = await AgentRunner().run(
-                    agent=agent,
-                    prompt=with_runtime_context(copy.deepcopy(prompt)),
-                    message_history=local_history.messages,
-                    usage_limits=get_agent_usage_limits(),
-                    on_node=save_node,
-                )
-                return result.output, list(result.all_messages())
-            finally:
-                await toolkit.close()
-
-        async def run_child():
-            return await self.factory.run(spec, execute_child)
-
-        try:
-            agent_id = await self._registry.ensure_agent(
-                self._session_key, role, task_id
-            )
-            report, returned_messages = await self._registry.run(
-                run_child, agent_id=agent_id, turn_id=turn_id
-            )
-            history.set_messages(returned_messages)
-            return report
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if role != "worker":
-                raise
-            return SubagentResult(
-                status="failed", summary=f"{type(exc).__name__}: {exc}"
-            )
-
-    async def plan(
-        self, prompt, history: ChatHistory, *, turn_id: str | None, tools: tuple = ()
-    ) -> str:
-        return await self._execute(
-            prompt,
-            history,
-            turn_id=turn_id,
-            task_id="planning",
-            role="manager",
-            planning_tools=tools,
-        )
-
-    async def execute_task_with_worker(
-        self,
-        task_description: str,
-        user_goal: str = "",
-        retry_info: str = "",
-        attachments: list | None = None,
-        *,
-        turn_id: str | None,
-    ) -> tuple[bool, str]:
-        prompt = f"[Delegated task, not a new user preference]\nGoal: {user_goal}\nTask: {task_description}"
-        if retry_info:
-            prompt += f"\nPrevious failure: {retry_info}"
-        content = [prompt, *attachments] if attachments else prompt
-        report = await self._execute(
-            content, ChatHistory(), turn_id=turn_id, task_id=uuid.uuid4().hex[:8]
-        )
-        return report.success, report.model_dump_json()
-
-    async def _execute_task(
-        self, task: Task, user_goal: str, attachments: list | None, turn_id: str | None
-    ):
-        task.status = TaskStatus.IN_PROGRESS
-        dependencies = "\n".join(
-            self._task_manager.tasks[d].result for d in task.dependencies
-        )
-        prompt = f"[Delegated task]\nGoal: {user_goal}\nTask: {task.description}\nDependencies:\n{dependencies}"
-        if task.failure_history:
-            prompt += "\nPrevious failures:\n" + "\n".join(task.failure_history)
-        content = [prompt, *attachments] if attachments else prompt
-        try:
-            report = await self._execute(
-                content, task.worker_chat_history, turn_id=turn_id, task_id=task.id
-            )
-            task.artifacts = list(dict.fromkeys([*task.artifacts, *report.artifacts]))
-            task.tool_summaries.extend(report.risks)
-            if report.status == "needs_input" or report.needs_user_confirmation:
-                task.status = TaskStatus.PENDING_CONFIRMATION
-                task.result = report.model_dump_json()
-            elif report.success:
-                self._task_manager.mark_task_complete(task.id, report.model_dump_json())
-            else:
-                self._task_manager.mark_task_failed(task.id, report.model_dump_json())
-        except asyncio.CancelledError:
-            task.status = TaskStatus.FAILED
-            task.failure_history.append(
-                "Cancelled by the owner; completion is unverified."
-            )
-            raise
-
-    async def execute_all_tasks_parallel(
-        self, user_goal: str, attachments: list | None = None, *, turn_id: str | None
-    ) -> str:
-        # The factory is the sole concurrency limit; TaskGroup owns cancellation of the batch.
-        while ready := self._task_manager.get_all_ready_tasks():
-            async with asyncio.TaskGroup() as group:
-                for task in ready:
-                    group.create_task(
-                        self._execute_task(task, user_goal, attachments, turn_id)
-                    )
-        return self._task_manager.get_final_summary()

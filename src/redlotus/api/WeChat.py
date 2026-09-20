@@ -1,12 +1,17 @@
+from __future__ import annotations
+
 import asyncio
 from functools import partial
+from typing import TYPE_CHECKING
 
 from pydantic_ai import BinaryContent
-from wechatbot import WeChatBot
 
 from redlotus.core import config as logger
 from redlotus.tools.interaction import UserMessage
 from redlotus.api.base import BotBase
+
+if TYPE_CHECKING:
+    from wechatbot import WeChatBot
 
 
 class WeChatAgentBot(BotBase):
@@ -58,6 +63,8 @@ class WeChatAgentBot(BotBase):
         )
 
     async def _async_main(self) -> None:
+        from wechatbot import WeChatBot
+
         self._released = False
         kwargs: dict = {
             "on_qr_url": lambda url: logger.info(f"[WeChat] 请扫码登录: {url}"),

@@ -23,7 +23,7 @@ def resource_files(source: Path, destination: str):
         for path in source.rglob("*")
         if path.is_file()
         and "__pycache__" not in path.relative_to(source).parts
-        and path.name != ".env"
+        and path.name not in {".env", "config.json"}
         and path.suffix not in {".pyc", ".pyo"}
         and not path.name.endswith(".log")
         and ".log." not in path.name

@@ -25,11 +25,11 @@ from redlotus.core.config import (
     get_model_and_params,
     role_supported_thinking_efforts,
     update_config,
-    set_api,
     set_model_name,
     settings,
     config_file,
     config_sources,
+    configure_api,
 )
 from redlotus.core.agents import AgentInvocationState, TRACE_STORE
 from redlotus.core.gateway import ModelTarget
@@ -135,7 +135,7 @@ def print_agent_models() -> None:
         lines.append(f"• {labels.get(role, role)}")
         lines.append(f"  模型名: {name}")
         target = ModelTarget.for_role(role)
-        lines.append(f"  协议: {target.protocol}")
+        lines.append(f"  SDK 路由: {target.protocol}")
         th_s = f"  thinking: {p.get('thinking', 'default')}"
         lines.append(
             f"  temperature: {p.get('temperature', 'default')}  max_tokens: {p.get('max_tokens', 'default')}{th_s}"
@@ -174,34 +174,8 @@ def _print_effort_usage(roles: tuple[str, ...]) -> None:
 
 async def interactive_set_api(*, embedding=False, ask=None):
     """One API configuration dialog shared by terminal adapters; cancel never writes."""
-    if ask is None:
-        import getpass
-
-        async def ask(question, *, secret=False):
-            return await asyncio.to_thread(
-                getpass.getpass if secret else input, question
-            )
-
-    keys = (
-        (("embedding_url", "SILICONFLOW_BASE"), ("embedding_key", "SILICONFLOW_KEY"))
-        if embedding
-        else (("base_url", "BASE_URL"), ("api_key", "API_KEY"))
-    )
-    values = {}
-    try:
-        for argument, key in keys:
-            current = get_env(key, warn=False)
-            shown = ("已填写" if current else "空") if "KEY" in key else current
-            value = await ask(
-                f"{key}（当前 {shown}；回车保留，Esc 取消）：", secret="KEY" in key
-            )
-            if value is None:
-                return
-            values[argument] = value.strip() or None
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        return
-    set_api(**values)
-    print_success("已写入当前 config.json。")
+    if await configure_api(embedding=embedding, ask=ask, emit=print_warning):
+        print_success(f"已保存配置: {config_file()}")
 
 
 def print_loaded_skills(skills_manager: SkillsManager) -> None:
@@ -801,11 +775,6 @@ async def run_goal_loop(
 
 
 MODEL_MESSAGES_GLOB = "*/model_messages.json"
-
-
-def read_saved_model_messages_file(path, *, workspace=None):
-    session = SessionFile.load(path, workspace=workspace)
-    return session.model_messages(), session.info()
 
 
 @dataclass(frozen=True)

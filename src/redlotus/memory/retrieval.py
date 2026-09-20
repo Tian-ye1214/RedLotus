@@ -35,7 +35,30 @@ def resolve_lancedb_dir(configured_path: str, *, table_name: str = "") -> str:
     return str(p)
 
 
-_HTTP_KEY = "rag"
+def missing_rag_settings(
+    *,
+    use_rerank: bool = False,
+    configuration: dict | None = None,
+    api_missing: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    """Return incomplete optional-RAG fields without exposing their values."""
+    configuration = settings() if configuration is None else configuration
+    models = configuration.get("RAG_models", {})
+    models = models if isinstance(models, dict) else {}
+    missing = list(
+        api_missing
+        if api_missing is not None
+        else (
+            name
+            for name in ("SILICONFLOW_BASE", "SILICONFLOW_KEY")
+            if not str(configuration.get(name, "") or "").strip()
+        )
+    )
+    required = [("RAG_models.embedding", models.get("embedding", ""))]
+    if use_rerank:
+        required.append(("RAG_models.reranker", models.get("reranker", "")))
+    missing.extend(name for name, value in required if not str(value or "").strip())
+    return tuple(dict.fromkeys(missing))
 
 
 def _require_rag_model(role: str) -> str:
@@ -53,7 +76,7 @@ def _get_shared_client() -> httpx.AsyncClient:
         http2=config["http2"],
         timeout=config["timeout"],
     )
-    return get_client(f"{_HTTP_KEY}:{kwargs}", lambda: httpx.AsyncClient(**kwargs))
+    return get_client(f"{httpx.AsyncClient.__name__}:{kwargs}", lambda: httpx.AsyncClient(**kwargs))
 
 
 def _require_rag_api() -> None:
@@ -164,6 +187,21 @@ class EmbedDataBase:
             return None
         return await self._db.open_table(self.table_name)
 
+    def _write_lock_path(self) -> str:
+        """Keep the writer lock beside the actual database it protects."""
+        lock_path = Path(self.db_path) / (self.table_name + ".write.lock")
+        rendered = str(lock_path)
+        if os.name != "nt" or len(rendered) < 260:
+            return rendered
+
+        # `filelock` accepts the standard Windows extended-length spelling.  It
+        # still names the sidecar in the configured database directory, so two
+        # processes that share that database also share this lock.
+        resolved = str(lock_path.resolve())
+        if resolved.startswith("\\\\"):
+            return "\\\\?\\UNC\\" + resolved[2:]
+        return "\\\\?\\" + resolved
+
     async def upsert_vectors(self, rows):
         if not rows:
             return 0
@@ -185,8 +223,9 @@ class EmbedDataBase:
             schema=schema,
         )
         Path(self.db_path).mkdir(parents=True, exist_ok=True)
+        lock_path = self._write_lock_path()
         async with AsyncFileLock(
-            Path(self.db_path) / (self.table_name + ".write.lock"),
+            lock_path,
             run_in_executor=False,
         ):
             table = await self._table()
@@ -278,23 +317,43 @@ class RAG:
     def __init__(self, config: dict, *, project_id: str):
         self.config = deepcopy(config)
         self.project_id = project_id
-        self.embedding_model = settings()["RAG_models"]["embedding"]
-        space = hashlib.sha256(self.embedding_model.encode()).hexdigest()[:12]
-        table_name = str(config["table_name"]) + "_records_v2_" + space
+        self.embedding_model = ""
+        self._db = None
+        models = settings().get("RAG_models", {})
+        self._set_embedding_space(
+            str(models.get("embedding", "") if isinstance(models, dict) else "").strip()
+        )
+        self.last_error = ""
+
+    def _set_embedding_space(self, model: str) -> None:
+        """Point this index at the table owned by one embedding model name."""
+        self.embedding_model = model
+        space = hashlib.sha256(model.encode()).hexdigest()[:12]
+        table_name = str(self.config["table_name"]) + "_records_v2_" + space
         self._db = EmbedDataBase(
-            str(config["db_path"]),
+            str(self.config["db_path"]),
             table_name=table_name,
-            index_config=config["index"],
+            index_config=self.config["index"],
         )
         self.index_key = json.dumps(
             [
                 self._db.db_path,
                 table_name,
-                config["turn_token_limit"],
-                config["turn_chunk_overlap_tokens"],
+                self.config["turn_token_limit"],
+                self.config["turn_chunk_overlap_tokens"],
             ]
         )
-        self.last_error = ""
+
+    async def refresh_embedding_space(self) -> str:
+        """Bind late-provided configuration before any vector operation writes."""
+        model = _require_rag_model("embedding")
+        if model == self.embedding_model:
+            return model
+        previous = self._db
+        self._set_embedding_space(model)
+        if previous is not None:
+            await previous.close()
+        return model
 
     @property
     def where(self) -> str:
@@ -335,6 +394,7 @@ class RAG:
 
     async def prepare_records(self, records: list[dict]) -> list[dict]:
         """Embed complete record chunks without holding any database write lock."""
+        model = await self.refresh_embedding_space()
         rows = []
         for episode in records:
             if episode["project_id"] != self.project_id:
@@ -350,18 +410,22 @@ class RAG:
         if not rows:
             return []
         vectors = await embed_texts(
-            [row["text"] for row in rows], model=self.embedding_model
+            [row["text"] for row in rows], model=model
         )
         if len(vectors) != len(rows):
             raise ValueError("Embedding count does not match the submitted chunks")
         for row, vector in zip(rows, vectors):
             row["vector"] = vector
+            row["_embedding_model"] = model
         return rows
 
     async def write_records(self, rows: list[dict]) -> int:
         """Commit prepared vectors; callers can validate authoritative versions first."""
         if not rows:
             return 0
+        model = await self.refresh_embedding_space()
+        if any(row.get("_embedding_model", model) != model for row in rows):
+            raise RuntimeError("Embedding model changed before vector write")
         if any(row["project_id"] != self.project_id for row in rows):
             raise ValueError("Cannot index an episode from another project")
         identities = {row["record_id"] for row in rows}
@@ -377,15 +441,20 @@ class RAG:
         return len(identities)
 
     async def retrieve(self, query: str) -> list[dict]:
-        if not query.strip() or not await self.row_count():
+        if not query.strip():
+            return []
+        model = await self.refresh_embedding_space()
+        # A later request may refresh self._db while embedding awaits.
+        database = self._db
+        if not await database.row_count(self.where):
             return []
         vector = (
             await embed_texts(
-                settings()["rag_service"]["query_instruction"] + query,
-                model=self.embedding_model,
+                query,
+                model=model,
             )
         )[0]
-        candidates = await self._db.vector_search(
+        candidates = await database.vector_search(
             vector, int(self.config["vector_search_limit"]), where=self.where
         )
         minimum = float(self.config["min_similarity"])
@@ -428,13 +497,16 @@ class RAG:
         return list(unique.values())[: int(self.config["final_top_k"])]
 
     async def row_count(self) -> int:
+        await self.refresh_embedding_space()
         return await self._db.row_count(self.where)
 
     async def indexed_record_ids(self) -> set[str]:
+        await self.refresh_embedding_space()
         return await self._db.keys("record_id", self.where)
 
     async def delete_records(self, record_ids: list[str]) -> None:
         if record_ids:
+            await self.refresh_embedding_space()
             ids = ",".join("'" + value.replace("'", "''") + "'" for value in record_ids)
             await self._db.delete_where(f"{self.where} AND record_id IN ({ids})")
 

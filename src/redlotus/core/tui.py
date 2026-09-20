@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from textual import events
 from textual.binding import Binding
 from rich.ansi import AnsiDecoder
 from rich.text import Text
@@ -14,6 +17,7 @@ from textual.screen import ModalScreen
 from textual.suggester import Suggester
 from textual.widgets import (
     Button,
+    Collapsible,
     Footer,
     Input,
     Label,
@@ -47,6 +51,7 @@ from redlotus.core.agents import current_short_agent_id
 from redlotus.core.cli_commands import WorkspaceSnapshot
 
 READY_LABEL = "就绪"
+PREPARING_LABEL = "正在准备会话…"
 WORKING_LABEL = "工作中"
 WORKING_FRAMES = ("", ".", "..", "...")
 
@@ -70,18 +75,130 @@ class AgentInputSuggester(Suggester):
 
 
 class AgentInput(Input):
+    @dataclass
+    class Submitted(Input.Submitted, namespace="input"):
+        urgent: bool = False
+
     BINDINGS = [
         *Input.BINDINGS,
         Binding("tab", "cursor_right", "Complete", show=False),
-        # Traditional terminals encode Ctrl+Enter as LF (Textual's ctrl+j).
-        Binding(
-            "ctrl+enter,ctrl+j", "app.submit_urgent", "加急", key_display="Ctrl+Enter"
-        ),
+        Binding("ctrl+enter", "app.submit_urgent", "发送", key_display="Ctrl+Enter"),
     ]
+
+    async def on_key(self, event: events.Key) -> None:
+        """Capture submission in the same queue that applies typed characters."""
+        if event.key in {"enter", "ctrl+enter"}:
+            event.stop()
+            event.prevent_default()
+            await self.action_submit(urgent=event.key == "ctrl+enter")
+
+    async def action_submit(self, *, urgent=False) -> None:
+        """Consume this draft before another key can submit or replace it."""
+        if self.disabled:
+            return
+        if urgent:
+            self.post_message(self.Submitted(self, self.value, urgent=True))
+        else:
+            await super().action_submit()
+        self.value = ""
+
+
+class KeyCapture(Static):
+    """Capture only the two calibration keys, without involving the composer."""
+
+    can_focus = True
+
+    def on_key(self, event: events.Key) -> None:
+        event.stop()
+        event.prevent_default()
+        if event.key in {"escape", "ctrl+c"}:
+            self.screen.action_cancel()
+        elif not event.is_printable:
+            self.screen.capture_key(event.key)
+
+
+class KeyboardTestScreen(ModalScreen[str | None]):
+    """Test actual terminal events; never infer modifiers from the terminal name."""
+
+    BINDINGS = [Binding("escape,ctrl+c", "cancel", "取消", show=False)]
+    DEFAULT_CSS = """
+    KeyboardTestScreen { align: center middle; }
+    #keyboard-dialog { width: 80%; max-width: 100; height: auto;
+        max-height: 90%; border: thick $primary; background: $surface; padding: 1 2; }
+    #key-capture { padding: 1 0; }
+    #keyboard-buttons { height: auto; }
+    #keyboard-settings { display: none; height: auto; max-height: 12; }
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._step = 0
+        self.result = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="keyboard-dialog"):
+            yield Static("按键检测", markup=False)
+            yield KeyCapture("尚未验证。检测不会发送消息或更改终端设置。", id="key-capture")
+            with Horizontal(id="keyboard-buttons"):
+                yield Button("开始检测", id="key-start", variant="primary")
+                yield Button("跳过", id="key-close")
+                yield Button("Windows Terminal 配置", id="key-settings")
+            yield Static("", id="keyboard-settings", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#key-start", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "key-start":
+            self._step, self.result = 1, None
+            capture = self.query_one("#key-capture", KeyCapture)
+            capture.update("第 1 步：请按普通 Enter。")
+            capture.focus()
+        elif event.button.id == "key-close":
+            self.dismiss(self.result)
+        elif event.button.id == "key-settings":
+            panel = self.query_one("#keyboard-settings", Static)
+            panel.update(
+                "仅供手动审查，不会自动写入。此绑定影响 Windows Terminal 中的其他程序。\n"
+                '在 actions 中添加：\n{"id":"User.RedLotusCtrlEnter","command":'
+                '{"action":"sendInput","input":"\\u001b[13;5u"}}\n'
+                '在 keybindings 中添加：\n{"keys":"ctrl+enter","id":"User.RedLotusCtrlEnter"}\n'
+                "保留其他设置；保存后重新检测。PyCharm Classic 同码问题不能由此设置修复。"
+            )
+            panel.display = not panel.display
+
+    def capture_key(self, key: str) -> None:
+        """Verify Enter first, then require an actual ctrl+enter event."""
+        capture = self.query_one("#key-capture", KeyCapture)
+        if self._step == 1:
+            if key != "enter":
+                capture.update("第 1 步尚未完成：请仅按普通 Enter。")
+                return
+            self._step = 2
+            capture.update("第 2 步：请按 Ctrl+Enter。")
+        elif self._step == 2:
+            self.result = "supported" if key == "ctrl+enter" else "unsupported"
+            capture.update(
+                "已验证支持：Enter 排队；Ctrl+Enter 进入当前对话。"
+                if self.result == "supported" else
+                "终端未传递可用的独立 Ctrl+Enter 按键。可使用现有发送按钮；普通 Enter 仍排队。"
+            )
+            self._step = 0
+            self.query_one("#key-start", Button).label = "重新检测"
+            close = self.query_one("#key-close", Button)
+            close.label = "完成"
+            close.focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class SnapshotPickScreen(ModalScreen[SnapshotSelection]):
-    BINDINGS = [Binding("escape", "cancel", "取消", show=False)]
+    BINDINGS = [
+        Binding("escape", "cancel", "取消", show=False),
+        Binding("ctrl+c", "cancel", "取消", show=False),
+    ]
 
     DEFAULT_CSS = """
     SnapshotPickScreen {
@@ -206,8 +323,11 @@ class RedLotusTui(App[None]):
     #panel-task-counts { height: 1; }
     #context-usage { display: none; height: 1; padding: 0 1; color: $text-muted; }
     #stream-preview { display: none; height: 12; max-height: 12; padding: 0 1; }
+    #thinking-preview { display: none; height: auto; padding: 0 1; }
+    #thinking-scroll { height: 10; }
+    #thinking-content { height: auto; color: $text-muted; }
     #status { height: 1; padding: 0 1; background: $surface; color: $text-muted; }
-    #session-context { height: 1; padding: 0 1; color: $text-muted; }
+    #session-context { height: auto; padding: 0 1; color: $text-muted; }
     #input-row { height: 3; }
     #input { width: 1fr; height: 3; border: round $primary; }
     #session-load { width: 16; height: 3; }
@@ -233,10 +353,12 @@ class RedLotusTui(App[None]):
         self._ask_lock = asyncio.Lock()
         self._record_reply = True
         self._active_line_handlers = 0
-        self._status_is_working = False
         self._working_frame = 0
         self._model_stream_title = ""
         self._model_stream_text = ""
+        self._model_stream_thinking = ""
+        self._model_response_count = 0
+        self._stream_session = None
         self._ui_thread_id = 0
         self._run_mode = TuiRunMode.REVIEW
         self._review_mode = False
@@ -247,6 +369,11 @@ class RedLotusTui(App[None]):
         self._panel_cache = PanelSnapshotCache()
         self._panel_timer = None
         self._panel_refresh_task = None
+        # Mount starts asynchronous preparation before the workspace admission
+        # gate exists. Keep the composer closed across that gap.
+        self._startup_locked = True
+        self._keyboard_status = "unknown"
+        self._keyboard_screen = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -274,16 +401,21 @@ class RedLotusTui(App[None]):
                 yield ProgressBar(id="panel-task-progress", show_eta=False)
                 yield Static("", id="panel-task-counts")
             yield Static("", id="context-usage")
+            with Collapsible(title="思考", collapsed=False, id="thinking-preview"):
+                with VerticalScroll(id="thinking-scroll"):
+                    yield Static("", id="thinking-content")
             yield Static("", id="stream-preview")
-            yield Static(READY_LABEL, id="status")
+            yield Static(PREPARING_LABEL, id="status")
             yield Static(self._session_context_text(), id="session-context")
             with Horizontal(id="input-row"):
                 yield AgentInput(
                     placeholder="📝 请输入您的任务:",
                     id="input",
                     suggester=AgentInputSuggester(case_sensitive=True, use_cache=False),
+                    disabled=True,
                 )
-                yield Button("会话 / 加载", id="session-load")
+                yield Button("会话 / 加载", id="session-load", disabled=True)
+                yield Button("按键检测", id="keyboard-test", disabled=True)
             yield Footer()
 
     async def on_mount(self) -> None:
@@ -294,7 +426,6 @@ class RedLotusTui(App[None]):
         if self._run_mode == TuiRunMode.REVIEW:
             self.system.review_store.activate(self._on_reviews_changed)
         self.set_interval(0.5, self.refresh_status)
-        self.query_one("#input", AgentInput).focus()
         await self._prepare_cli_session()
         controller = self.system._cli_controller
         controller._active_session_state = self.state
@@ -320,12 +451,44 @@ class RedLotusTui(App[None]):
         self.query_one("#input", AgentInput).disabled = True
         self.query_one("#session-load", Button).disabled = True
         try:
-            loaded = await controller.enter_current_workspace()
+            await self.open_keyboard_test()
+            if await controller.enter_current_workspace():
+                self.state.is_first_input = False
+        except Exception as exc:
+            from redlotus.core.presentation import print_warning
+
+            print_warning(f"启动时加载会话失败: {exc}")
         finally:
-            self.refresh_status()
-            self.query_one("#input", AgentInput).focus()
-        if loaded:
-            self.state.is_first_input = False
+            self._startup_locked = False
+            if self.is_running and self.query("#input"):
+                self.refresh_status()
+                self.query_one("#input", AgentInput).focus()
+
+    async def open_keyboard_test(self) -> None:
+        """Run optional calibration without changing the draft or session state."""
+        if self._keyboard_screen is not None:
+            return
+        future = asyncio.get_running_loop().create_future()
+        screen = self._keyboard_screen = KeyboardTestScreen()
+
+        def completed(result):
+            if not future.done():
+                future.set_result(result)
+
+        try:
+            await self.push_screen(screen, callback=completed, wait_for_dismiss=False)
+            result = await future
+            if result is not None:
+                self._keyboard_status = result
+            self.query_one("#keyboard-test", Button).tooltip = {
+                "unknown": "尚未验证", "supported": "已验证支持", "unsupported": "终端未传递区别",
+            }[self._keyboard_status]
+        finally:
+            if self.screen is screen:
+                screen.dismiss(None)
+            self._keyboard_screen = None
+            if not self._startup_locked and self.is_running and self.query("#input"):
+                self.query_one("#input", AgentInput).focus()
 
     async def pick_snapshot(
         self,
@@ -370,6 +533,7 @@ class RedLotusTui(App[None]):
         entries = visible_conversation_entries(messages or [])
 
         def render() -> None:
+            self.clear_model_stream()
             log = self.query_one("#output", RichLog)
             log.write(
                 Text(
@@ -466,7 +630,10 @@ class RedLotusTui(App[None]):
             self.action_review()
             return
         if reject:
-            notice = f"用户在审查界面撤销了 {entry.name} 的 {hunk.location} 改动。保留撤销，不要重新写入被拒绝的改动，也不要为此创建探针文件。"
+            notice = json.dumps(
+                {"review": "rejected", "file": entry.name, "location": hunk.location},
+                ensure_ascii=False,
+            )
             if not self.system.add_urgent(notice):
                 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
@@ -663,14 +830,6 @@ class RedLotusTui(App[None]):
             self.system.review_store.deactivate()  # 清空待审查；后续写入直接放行
         self._update_pending()
 
-    def set_status(self, message: str) -> None:
-        self._status_is_working = bool(message and message != READY_LABEL)
-        self.query_one("#status", Static).update(self._status_text())
-
-    def clear_status(self) -> None:
-        self._status_is_working = False
-        self.refresh_status()
-
     def set_context_usage(self, items: list[ContextUsageItem]) -> None:
         self._display_content("context-usage", context_usage_renderable(items), bool(items))
 
@@ -689,10 +848,20 @@ class RedLotusTui(App[None]):
         self.query_one("#status", Static).update(self._status_text())
         controller = self.system._cli_controller
         input_box = self.query_one("#input", AgentInput)
-        input_box.disabled = controller.is_transitioning
-        self.query_one("#session-load", Button).disabled = (
-            controller.is_transitioning or self._active_line_handlers > 0 or self.system.has_current_turn
+        was_disabled = input_box.disabled
+        asking = self._ask_future is not None and not self._ask_future.done()
+        input_box.disabled = controller.is_transitioning or (
+            self._startup_locked and not asking
         )
+        if was_disabled and not input_box.disabled:
+            input_box.focus()
+        self.query_one("#session-load", Button).disabled = (
+            self._startup_locked
+            or controller.is_transitioning
+            or self._active_line_handlers > 0
+            or self.system.has_current_turn
+        )
+        self.query_one("#keyboard-test", Button).disabled = self._startup_locked or controller.is_transitioning
         self.query_one("#session-context", Static).update(self._session_context_text())
         if not input_box.disabled and controller.last_rejected_input and self._ask_future is None:
             if not input_box.value:
@@ -703,7 +872,6 @@ class RedLotusTui(App[None]):
         return bool(
             (self._ask_future is not None and not self._ask_future.done())
             or self._active_line_handlers > 0
-            or self._status_is_working
             or self.system.has_current_turn
             or self.system._session.queue.pending
         )
@@ -725,6 +893,11 @@ class RedLotusTui(App[None]):
                 style="bold",
             )
         text = Text.assemble(self._mode_chip(), "  ")
+        if self._startup_locked and not (
+            self._ask_future is not None and not self._ask_future.done()
+        ):
+            text.append(PREPARING_LABEL, style="dim")
+            return text
         if not self._is_working():
             self._working_frame = 0
             text.append(READY_LABEL, style="dim")
@@ -760,26 +933,64 @@ class RedLotusTui(App[None]):
                 self._model_stream_title,
                 text_style="white",
                 border_style="cyan",
-            )
+            ),
+            bool(self._model_stream_text),
         )
 
     def begin_model_stream(self, title: str) -> None:
+        self.clear_model_stream()
+        self._stream_session = (self.system.session_key, self.system._session.generation)
         self._model_stream_title = title
-        self._model_stream_text = ""
         self._refresh_model_stream()
 
-    def append_model_stream_delta(self, text: str) -> None:
-        if not text:
+    def begin_model_response(self) -> None:
+        """Separate successive model requests within the same user turn."""
+        self._model_response_count += 1
+        self._model_stream_text = ""
+        if self._model_stream_thinking:
+            self._model_stream_thinking += f"\n\n── 第 {self._model_response_count} 次响应 ──\n"
+        self._refresh_model_stream()
+
+    def append_model_stream_delta(self, text: str, kind: str = "text") -> None:
+        if not text or self._stream_session != (self.system.session_key, self.system._session.generation):
+            return
+        if kind == "thinking":
+            self._model_stream_thinking += text
+            preview = self.query_one("#thinking-preview", Collapsible)
+            preview.display = True
+            preview.collapsed = False
+            preview.title = "思考 · 接收中"
+            self.query_one("#thinking-content", Static).update(Text(self._model_stream_thinking))
+            self.query_one("#thinking-scroll", VerticalScroll).scroll_end(animate=False)
             return
         self._model_stream_text += text
         if not self._model_stream_title:
             self._model_stream_title = "模型正在回复"
         self._refresh_model_stream()
 
+    def end_model_stream(self, status: str) -> None:
+        """Keep received thinking inspectable after the current reply ends."""
+        if self._stream_session != (self.system.session_key, self.system._session.generation):
+            return
+        if status != "已完成" and self._model_stream_text:
+            self.query_one("#output", RichLog).write(user_text_panel(
+                self._model_stream_text, f"Coordinator · {status}", border_style="yellow",
+            ))
+        self._model_stream_text = ""
+        self._display_content("stream-preview", "", False)
+        preview = self.query_one("#thinking-preview", Collapsible)
+        preview.title = f"思考 · {status} · 展开查看"
+        preview.collapsed = True
+
     def clear_model_stream(self) -> None:
         self._model_stream_title = ""
         self._model_stream_text = ""
+        self._model_stream_thinking = ""
+        self._model_response_count = 0
+        self._stream_session = None
         self._display_content("stream-preview", "", False)
+        self.query_one("#thinking-preview", Collapsible).display = False
+        self.query_one("#thinking-content", Static).update("")
 
     def _cancel_pending_ask(self) -> bool:
         fut = self._ask_future
@@ -796,11 +1007,21 @@ class RedLotusTui(App[None]):
                 raise asyncio.CancelledError()
             self._record_reply = record_reply
             self._ask_future = asyncio.get_running_loop().create_future()
+            if self._panel_mode:
+                self._exit_panel()
+            if self._review_mode:
+                self._exit_review()
+            self._write_user_input(
+                question.strip(),
+                title="需要回复",
+                text_style="white",
+                border_style="yellow",
+            )
             inp = self.query_one("#input", AgentInput)
             inp.password = secret
             inp.add_class("ask")
             inp.suggester = None
-            inp.placeholder = f"🤔 {question.strip()}"
+            inp.placeholder = "🤔 请回复"
             inp.value = ""
             inp.focus()
             self.refresh_status()
@@ -826,9 +1047,15 @@ class RedLotusTui(App[None]):
     async def action_submit_urgent(self) -> None:
         """Submit Ctrl+Enter through the same input path with explicit priority."""
         inp = self.query_one("#input", AgentInput)
-        await self.on_input_submitted(Input.Submitted(inp, inp.value), urgent=True)
+        if inp.disabled or self.system._cli_controller.is_transitioning:
+            return
+        await inp.action_submit(urgent=True)
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "keyboard-test":
+            if not self._startup_locked and not self.system._cli_controller.is_transitioning:
+                asyncio.create_task(self.open_keyboard_test())
+            return
         if event.button.id != "session-load" or self.system._cli_controller.is_transitioning or self._active_line_handlers:
             return
         if self._panel_mode:
@@ -839,10 +1066,10 @@ class RedLotusTui(App[None]):
         asyncio.create_task(self._handle_line("/load"))
 
     async def on_input_submitted(self, event: Input.Submitted, *, urgent=False) -> None:
+        value = event.value.strip()
         if self.system._cli_controller.is_transitioning:
             return
-        value = event.value.strip()
-        event.input.value = ""
+        urgent = urgent or isinstance(event, AgentInput.Submitted) and event.urgent
         if (
             self._ask_future is not None
             and not self._ask_future.done()
@@ -869,7 +1096,7 @@ class RedLotusTui(App[None]):
             queued = not inner and (
                 self.system.has_current_turn or self._active_line_handlers > 0
             )
-            title = "排队" if queued else "加急" if inner else "用户"
+            title = "排队" if queued else "用户"
             self._write_user_input(
                 value,
                 title=title,

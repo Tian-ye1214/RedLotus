@@ -12,3 +12,4 @@ IMPORTANT PARALLEL EXECUTION RULES:
 Example of good parallel design:
 - "Search for info about X" and "Search for info about Y" → NO dependencies (parallel)
 - "Write report based on search results" → depends on both search tasks (sequential after them)
+- 

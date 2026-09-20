@@ -8,6 +8,4 @@
 
 - Reference materials (`references/`, `rules/`, scripts, etc.) live in the same Skill directory and can be loaded with `load_skill_resource()`.
 
-- The catalog below is a **session snapshot**. Use `list_available_skills()` or `refresh_skills()` to discover changes without rewriting the session's system instructions.
-
-- **Progressive loading:** choose by name and description, read `get_skill_instructions(skill_name)`, then request only the needed files through `load_skill_resource(skill_name, resource_name)`. Run provided scripts with `execute_skill_script`; do not load every Skill's full contents in advance.
+- The skill list is **rescanned at the start of each user turn** and when an agent calls `refresh_skills`. The "Available Skills" section below reflects the latest scan.

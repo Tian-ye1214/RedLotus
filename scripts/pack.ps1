@@ -1,5 +1,6 @@
 param(
-    [switch]$OneFile
+    [switch]$OneFile,
+    [string]$Python
 )
 
 Set-StrictMode -Version Latest
@@ -13,7 +14,19 @@ $distPath = Join-Path $runtimeRoot "dist\$mode"
 $workPath = Join-Path $runtimeRoot "build\$mode"
 $cachePath = Join-Path $runtimeRoot "pyinstaller-cache"
 $tempPath = Join-Path $runtimeRoot "tmp"
-$venvPath = Join-Path $runtimeRoot "venv"
+if (-not $Python) {
+    $projectPython = Join-Path $root ".venv\Scripts\python.exe"
+    $Python = if (Test-Path -LiteralPath $projectPython -PathType Leaf) {
+        $projectPython
+    } else {
+        (Get-Command python -ErrorAction Stop).Source
+    }
+}
+$Python = (Get-Command $Python -ErrorAction Stop).Source
+& $Python -c "import PyInstaller; print('Build interpreter:', __import__('sys').executable)"
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller is missing from the selected existing environment: $Python"
+}
 
 foreach ($path in @($distPath, $workPath, $cachePath, $tempPath)) {
     New-Item -ItemType Directory -Force -Path $path | Out-Null
@@ -27,21 +40,16 @@ $arguments = @(
 )
 $previousMode = $env:REDLOTUS_PYINSTALLER_MODE
 $previousEnvironment = @{}
-foreach ($name in @("UV_CACHE_DIR", "UV_PROJECT_ENVIRONMENT", "UV_LINK_MODE", "UV_NO_MANAGED_PYTHON", "UV_PYTHON_DOWNLOADS", "PYINSTALLER_CONFIG_DIR", "TEMP", "TMP")) {
+foreach ($name in @("PYINSTALLER_CONFIG_DIR", "TEMP", "TMP")) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
 $env:REDLOTUS_PYINSTALLER_MODE = $mode
-$env:UV_CACHE_DIR = Join-Path $runtimeRoot "uv-cache"
-$env:UV_PROJECT_ENVIRONMENT = $venvPath
-$env:UV_LINK_MODE = "copy"
-$env:UV_NO_MANAGED_PYTHON = "1"
-$env:UV_PYTHON_DOWNLOADS = "never"
 $env:PYINSTALLER_CONFIG_DIR = $cachePath
 $env:TEMP = $tempPath
 $env:TMP = $tempPath
 $buildExitCode = 0
 try {
-    uv run --extra build --extra browser pyinstaller @arguments
+    & $Python -m PyInstaller @arguments
     $buildExitCode = $LASTEXITCODE
 }
 finally {

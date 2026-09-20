@@ -66,6 +66,9 @@ redlotus = [
 [tool.setuptools.exclude-package-data]
 redlotus = [
     "config.json",
+    "**/config.json",
+    ".env",
+    "**/.env",
     "api/config.yaml",
     "prompts/LongTermMemory/*",
     "tools/skills/**/.env",

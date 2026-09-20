@@ -49,8 +49,7 @@ def code_without_literals(source: str) -> str:
 
 
 class PythonCommandCheck(ast.NodeVisitor):
-    def __init__(self, policy, inspect_command, *, restricted):
-        self.policy = policy
+    def __init__(self, inspect_command, *, restricted):
         self.inspect_command = inspect_command
         self.restricted = restricted
         self.names = {}
@@ -105,7 +104,7 @@ class PythonCommandCheck(ast.NodeVisitor):
         )
         if explicit:
             self.inspect_command(value)
-        elif self.restricted and self.policy.get("require_explicit_commands"):
+        elif self.restricted:
             raise PermissionError("Use an explicit command: the process target or arguments cannot be resolved before execution.")
 
     def visit_Import(self, node):
@@ -135,11 +134,20 @@ class PythonCommandCheck(ast.NodeVisitor):
     def visit_Call(self, node):
         self.generic_visit(node)
         name = self.resolve(node.func)
-        if self.restricted and name in self.policy["blocked_python_calls"]:
+        owner, _, method = (name or "").rpartition(".")
+        process_operation = name in {"os.kill", "os.killpg", "signal.pthread_kill"} or (
+            owner in {"psutil.Process", "subprocess.Popen", "multiprocessing.Process"}
+            and method in {"kill", "terminate"}
+        )
+        if self.restricted and process_operation:
             raise PermissionError(
                 f"Permission denied: restricted process operation {name}."
             )
-        if name in self.policy["command_wrappers"]:
+        if name in {
+            "subprocess.run", "subprocess.call", "subprocess.check_call",
+            "subprocess.check_output", "subprocess.Popen", "os.system", "os.popen",
+            "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell",
+        }:
             argument = (
                 node.args[0]
                 if node.args
@@ -152,7 +160,7 @@ class PythonCommandCheck(ast.NodeVisitor):
                     None,
                 )
             )
-            if name in self.policy.get("argv_command_wrappers", []):
+            if name == "asyncio.create_subprocess_exec":
                 argument = ast.List(elts=node.args)
             command = self.literal(argument)
             for item in node.keywords:
@@ -214,7 +222,10 @@ class JavaScriptCommandCheck(PythonCommandCheck):
             source,
         )
         tokens = [token for token in tokens if not token.startswith(("//", "/*"))]
-        wrappers = self.policy.get("javascript_command_wrappers", {})
+        wrappers = {
+            "exec": "shell", "execSync": "shell", "spawn": "argv",
+            "spawnSync": "argv", "execFile": "argv", "execFileSync": "argv", "fork": "script",
+        }
         for index, token in enumerate(tokens):
             if token == "import":
                 end = next((n for n in range(index + 1, len(tokens)) if tokens[n] == "from"), None)
@@ -260,7 +271,7 @@ class JavaScriptCommandCheck(PythonCommandCheck):
             self.command(command)
 
     def _module(self, tokens):
-        return self._value(tokens) in self.policy.get("javascript_modules", [])
+        return self._value(tokens) in {"child_process", "node:child_process"}
 
     def _qualified(self, tokens):
         if tokens[:2] == ["require", "("] and len(tokens) >= 4 and self._module(tokens[2:3]) and tokens[3] == ")":
@@ -323,9 +334,6 @@ class JavaScriptCommandCheck(PythonCommandCheck):
             return None
 
 
-def runtime_repo_root() -> Path:
-    """随包资源根；供 @file 引用等作为 cwd 之外的回退根。"""
-    return resource_root()
 
 
 def readable_roots(*, work_base: Path) -> tuple[Path, ...]:
@@ -452,16 +460,10 @@ class SkillsManager:
             f"- **{skill.name}**: {skill.description}"
             for skill in self.get_all_metadata()
         ]
-        return "\n".join(
-            [
-                "## 可用的 Agent Skills",
-                *rows,
-                "使用 get_skill_instructions(skill_name) 获取详细指令。",
-            ]
-        )
+        return "\n".join(rows)
 
     def list_available_skills(self) -> str:
-        """List available Skills, descriptions and absolute resource directories."""
+        """List available Skills by name, description and directory without loading their bodies."""
         return (
             "\n".join(
                 f"{s.name}: {s.description} ({s.path})" for s in self.get_all_metadata()
@@ -470,15 +472,23 @@ class SkillsManager:
         )
 
     def get_skill_instructions(self, skill_name: str) -> str:
-        """Read a Skill's complete instructions before using it; also lists optional resources."""
+        """Load one Skill's instructions and resource list when that Skill is needed.
+
+        Args:
+            skill_name: An exact name from list_available_skills.
+
+        Returns:
+            The Skill instructions with its identity and available resources, or an error."""
         skill = self.skills.get(skill_name)
         if skill is None:
             return f"Error: Skill '{skill_name}' not found. Available: {', '.join(self.skills)}"
         resources = self.list_skill_resources(skill_name)
-        return (
-            f"# Skill: {skill.name}\n{skill.description}\n\n{skill.instructions}\n\n资源：\n"
-            + "\n".join(resources)
-        )
+        return json.dumps({
+            "name": skill.name,
+            "description": skill.description,
+            "instructions": skill.instructions,
+            "resources": resources,
+        }, ensure_ascii=False)
 
     def list_skill_resources(self, skill_name: str) -> list[str]:
         skill = self.skills.get(skill_name)
@@ -502,29 +512,45 @@ class SkillsManager:
         return path
 
     def load_skill_resource(self, skill_name: str, resource_name: str) -> str:
-        """Read a Skill resource on demand, including guides, templates and script sources."""
+        """Read a named resource within a Skill directory without executing it.
+
+        Args:
+            skill_name: The exact registered Skill name.
+            resource_name: The resource path relative to that Skill directory.
+
+        Returns:
+            The resource text and identity, or an error for a missing or forbidden path."""
         try:
             skill = self.skills[skill_name]
             if resource_name not in skill.resources:
                 path = self._resource_path(skill_name, resource_name)
                 skill.resources[resource_name] = path.read_text(encoding="utf-8")
-            return f"# 资源: {skill_name}/{resource_name}\n\n{skill.resources[resource_name]}"
+            return json.dumps({
+                "skill": skill_name,
+                "resource": resource_name,
+                "content": skill.resources[resource_name],
+            }, ensure_ascii=False)
         except (KeyError, OSError, ValueError) as exc:
             return f"Error loading Skill resource: {exc}"
 
     def refresh_skills(self) -> str:
-        """Rescan installed and bundled Skills after adding or changing a Skill."""
+        """Refresh bundled and installed Skills, then report the available count."""
         self.refresh()
         return f"Skills 已刷新。当前共有 {len(self.skills)} 个 Skills 可用。"
 
     async def execute_skill_script(
         self, skill_name: str, script_name: str, args: str = "", timeout: float = 300
     ) -> str:
-        """Run a script inside its Skill directory without adding its source to context.
+        """Run a Skill script through the same project and process checks as command tools.
 
-        Supports Python, Bash, batch and PowerShell. Quote arguments containing spaces.
-        Python uses the configured project interpreter; timeout also reaps child processes.
-        """
+        Args:
+            skill_name: The exact registered Skill name.
+            script_name: A Python, shell, batch or PowerShell script relative to the Skill directory.
+            args: Arguments for the script; quote arguments that contain spaces.
+            timeout: Maximum execution time in seconds.
+
+        Returns:
+            The actual exit code and output, or a path, permission or execution error."""
         executors = {
             ".py": ["python"],
             ".sh": ["bash"],
@@ -552,17 +578,6 @@ class SkillsManager:
             return f"Error: Skill script timed out ({timeout} seconds)"
         except (KeyError, OSError, ValueError) as exc:
             return f"Error executing Skill script: {exc}"
-
-    @property
-    def tools(self):
-        return [
-            self.list_available_skills,
-            self.get_skill_instructions,
-            self.load_skill_resource,
-            self.refresh_skills,
-            self.execute_skill_script,
-        ]
-
 
 _notify_callback: ContextVar[Callable[[str], None] | None] = ContextVar(
     "user_notify_callback", default=None
@@ -682,20 +697,7 @@ def _run_wrapped(
 
 
 def _model_result(result: Any, policy: AgentRunPolicy | None) -> Any:
-    if policy is None or not isinstance(result, str) or len(result) <= policy.max_tool_output_chars:
-        return result
-    import uuid
-    from redlotus.core.agents import WorkspaceContext, active_workspace
-    from redlotus.core.config import atomic_write_text
-    from redlotus.core.session import current_workspace
-
-    workspace = active_workspace() or WorkspaceContext.from_path(current_workspace())
-    path = workspace.root / "WorkDatabase" / "tool_results" / f"{uuid.uuid4().hex}.txt"
-    atomic_write_text(path, result)
-    preview = policy.truncate_text(result)
-    if not tool_result_succeeded(result):
-        preview = "Error: tool reported a business failure.\n" + preview
-    return preview + f"\nFull original tool result: {path}"
+    return result
 
 
 def _wrap(fn: Callable[..., Any], policy: AgentRunPolicy | None) -> Callable[..., Any]:

@@ -16,15 +16,9 @@ from pydantic_ai.messages import (
 )
 
 
-def pydantic_messages_to_text(
-    messages: list, *, tool_args_max_chars=300, include_reference_content=True
-) -> str:
-    """Readable transcript for compaction/debugging; immutable originals remain in the journal."""
+def pydantic_messages_to_text(messages: list) -> str:
+    """Render complete textual evidence without clipping model-visible content."""
     lines = []
-    important = re.compile(
-        r"exit.code|return.code|status.code|error|failed|exception|stderr|path|artifact",
-        re.IGNORECASE,
-    )
     for message in messages:
         for part in message.parts:
             if isinstance(part, UserPromptPart):
@@ -48,10 +42,8 @@ def pydantic_messages_to_text(
                     )
                     # UserMessage keeps original user text first, then emits labelled
                     # reference parts. The full originals remain in snapshots/journals.
-                    if index > 0 and text.startswith("【引用文件 "):
+                    if index > 0 and text.startswith(("[REFERENCE FILE ", "【引用文件 ")):
                         label = "REFERENCE FILE"
-                        if not include_reference_content and "\n" in text:
-                            text = text.split("\n", 1)[0] + "（原始正文见引用快照）"
                     lines.append(f"[{label}]: {text}")
             elif isinstance(part, TextPart):
                 lines.append(f"[ASSISTANT]: {part.content}")
@@ -61,18 +53,11 @@ def pydantic_messages_to_text(
                     if isinstance(part.args, str)
                     else json.dumps(part.args, ensure_ascii=False)
                 )
-                if len(args) > tool_args_max_chars:
-                    args = args[:tool_args_max_chars] + " …(tool args truncated)"
                 lines.append(f"[TOOL_CALL:{part.tool_name}]: {args}")
             elif isinstance(part, BaseToolReturnPart):
                 text = part.model_response_str()
-                rows = text.splitlines()
-                selected = [row for row in rows if important.search(row)]
-                preview = " | ".join((selected or rows)[:6])
-                if len(preview) > 480:
-                    preview = preview[:480] + " …(tool output truncated)"
                 lines.append(
-                    f"[TOOL_RESULT:{part.tool_name}]: {len(text)} chars; {preview}"
+                    f"[TOOL_RESULT:{part.tool_name}]: {text}"
                 )
             elif isinstance(part, RetryPromptPart):
                 lines.append(f"[RETRY:{part.tool_name}]: {part.content}")

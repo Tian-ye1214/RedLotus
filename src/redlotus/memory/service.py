@@ -85,21 +85,6 @@ class MemoryService:
         self.perception = MemoryPerception(self.workspace, None, registry)
         self._input_source = input_source
 
-    @property
-    def worker_tools(self):
-        return (
-            [
-                self.reader.search_memory,
-                self.reader.read_memory,
-                self.remember,
-                self.reader.search_episodes,
-                self.reader.read_episode,
-                self.long_term.list_memory,
-            ]
-            if self.owner_memory_allowed
-            else []
-        )
-
     def injection_for_session(self):
         return self._injection_snapshot or ""
 
@@ -179,16 +164,55 @@ class MemoryService:
                                "request_authorized": job.result.request_authorized}
         self.session.update(jobs={job.id: value})
 
+    async def _check_searches(self, job):
+        """Reject L2 publication without a successful, still-current search."""
+        searches = {item.get("id"): item for item in job.searches if item.get("operation") != "read"}
+        for index, draft in enumerate(job.result.records):
+            if draft.scope != "global" or draft.action == "delete":
+                continue
+            identity = draft.target_id or hashlib.sha256(f"{job.id}:{index}".encode()).hexdigest()[:32]
+            try:
+                current = await asyncio.to_thread(self.store.get, identity)
+            except KeyError:
+                current = None
+            if current and current.last_change_id == f"{job.id}:{index}":
+                continue
+            search = searches.get(draft.search_id)
+            if not search or search.get("scope") != "global" or search.get("retrieval_error"):
+                raise ValueError(json.dumps({"error": "memory_publication_search", "search_id": draft.search_id}))
+            if search.get("revision") != await asyncio.to_thread(self.store.revision, "global"):
+                raise ValueError(json.dumps({"error": "memory_publication_changed", "search_id": draft.search_id}))
+
+    async def _check_promotion_sources(self, job, changes):
+        """Require live project evidence before publishing automatically promoted L2."""
+        if job.request is not None:
+            return
+        candidates = {record.id: record for record, _ in changes}
+        for record, _ in changes:
+            if record.scope != "global" or record.state != "active":
+                continue
+            for identity in record.source_memory_ids:
+                source = candidates.get(identity)
+                if source is None:
+                    try:
+                        source = await asyncio.to_thread(self.store.get, identity)
+                    except KeyError:
+                        raise ValueError(json.dumps({"error": "memory_l_one_discarded", "id": identity})) from None
+                if source.scope != "project" or source.state != "active":
+                    raise ValueError(json.dumps({"error": "memory_l_one_inactive", "id": identity}))
+
     async def _apply(self, job):
         self.long_term.directory.mkdir(parents=True, exist_ok=True)
         async with AsyncFileLock(
             self.long_term.directory / "publication.lock", run_in_executor=False
         ):
+            await self._check_searches(job)
             changes = [
                 (record, draft)
                 for index, draft in enumerate(job.result.records)
                 if (record := await asyncio.to_thread(self.store.materialize, job, draft, index, self._cleared_at))
             ]
+            await self._check_promotion_sources(job, changes)
             committed = []
             for record, draft in changes:
                 if not await asyncio.to_thread(
@@ -278,25 +302,73 @@ class MemoryService:
             logger.error("记忆生产未完成，原始事件已保留：%s", exc)
             return False
 
-    async def remember(
-        self, request: str, scope: Literal["auto", "project", "global"] = "auto"
-    ) -> str:
-        """Save, correct or forget an explicitly requested memory; report the actual receipt.
+    async def remember(self, request: str) -> str:
+        """Save a memory explicitly requested by the user as global L2 memory.
 
-        project means this current workspace, not any named project in the text.
-        Use global for cross-project preferences or knowledge ABOUT another project,
-        naming its applicability in the request. Each call handles only its stated proposal.
-        """
+        This is immediate production, not automatic perception. The production Agent
+        must search existing L2 records before inserting or updating. A delegated task,
+        quoted document or assistant suggestion is not a user request to remember.
+
+        Args:
+            request: The user's explicit request to remember, preserving its intended meaning.
+
+        Returns:
+            The actual saved record IDs and scope, or a pending, rejected or failed result."""
+        return await self._request_memory_change(request, scope="global", operation="remember")
+
+    async def update_memory(self, id: str, request: str) -> str:
+        """Update an existing permitted memory using the user's correction.
+
+        L1 records must belong to the current project. L2 records can be updated across
+        the owner's projects. Updating keeps the record's identity and scope.
+
+        Args:
+            id: The existing memory ID returned by search_memory.
+            request: The correction or new evidence to apply to the record.
+
+        Returns:
+            The actual saved change, or an explicit permission, validation or execution error."""
+        return await self._change_existing(id, request, "update")
+
+    async def delete_memory(self, id: str, request: str) -> str:
+        """Forget an existing permitted memory at the user's request.
+
+        L1 records must belong to the current project. L2 records can be forgotten across
+        the owner's projects. Successful forgetting removes the record from recall and
+        prevents overlap evidence from restoring the old fact.
+
+        Args:
+            id: The existing memory ID returned by search_memory.
+            request: The user's request to forget this memory.
+
+        Returns:
+            The actual deletion result, or an explicit permission, validation or execution error."""
+        return await self._change_existing(id, request, "delete")
+
+    async def _change_existing(self, identity, request, operation):
+        if not self.owner_memory_allowed:
+            return "Error: Personal memory unavailable."
+        try:
+            record = await asyncio.to_thread(self.store.get, identity)
+        except (KeyError, ValueError):
+            return "Error: Memory not found or unavailable."
+        return await self._request_memory_change(
+            request, scope=record.scope, operation=operation, target_id=identity,
+        )
+
+    async def _request_memory_change(self, request, *, scope, operation, target_id=None):
+        """Persist and execute one authorized production or consumption request."""
         if not self.owner_memory_allowed or self.current is None:
             return "Error: Explicit memory requires an authenticated current user turn."
         async with self._explicit:
             event = self.current.model_copy(deep=True)
             event.user_inputs = list(self._input_source())
             identity = hashlib.sha256(
-                f"{event.id}:{request}:{scope}".encode()
+                json.dumps([event.id, request, scope, operation, target_id]).encode()
             ).hexdigest()[:32]
             job = self._job(
-                MemoryJob(id=identity, events=[event], request=request, scope=scope)
+                MemoryJob(id=identity, events=[event], request=request, scope=scope,
+                          operation=operation, target_id=target_id)
             )
             if not await self._execute(job):
                 return "Error: 请求已登记但未保存为记忆：" + self.last_error
@@ -387,14 +459,24 @@ class MemoryService:
         if "indexed_at" in job.timings:
             return
         if job.records:
+            if reason := self.store.rag_unavailable_reason():
+                self.store.last_error = self.last_error = reason
+                if job.error != reason:
+                    job.error = reason
+                    self._save_job(job)
+                return
             job.timings["index_started_at"] = iso_utc_now()
             self._save_job(job)
+
             await self.store.reconcile()
             if self.store.last_error:
                 job.error = self.last_error = self.store.last_error
                 self._save_job(job)
                 return
         job.timings["indexed_at"] = iso_utc_now()
+        if self.last_error == job.error:
+            self.last_error = ""
+        job.error = ""
         self._save_job(job)
         if job.window and "ready_at" in job.timings:
             ready = datetime.fromisoformat(job.timings["ready_at"])
@@ -477,8 +559,7 @@ class MemoryService:
             self._context_notices.append(
                 [
                     TextContent(
-                        f"[记忆操作结果] 用户已确认清空 {'全局长期记忆' if scope == 'global' else '当前项目情景记忆'}。"
-                        "该范围内的旧记忆已失效，不要从会话快照恢复；新的明确授权可重新保存。",
+                        json.dumps({"memory_cleared": scope}),
                         metadata={"origin": "memory_control"},
                     )
                 ]

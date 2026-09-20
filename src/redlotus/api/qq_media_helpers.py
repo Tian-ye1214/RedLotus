@@ -1,5 +1,7 @@
 """QQ 媒体解析与下载（供 QQ.py 使用，减小主文件体积）。"""
 
+from __future__ import annotations
+
 import asyncio
 import os
 import re
@@ -8,14 +10,16 @@ import base64
 import ipaddress
 import mimetypes
 import socket
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import httpx
-from ncatbot.core import BaseMessageEvent, GroupMessageEvent
-from pydantic_ai import BinaryContent
+from pydantic_ai import BinaryContent, ImageUrl
 
 from redlotus.core import config as logger
 from redlotus.core.gateway import ModelInputPolicy
+
+if TYPE_CHECKING:
+    from ncatbot.core import BaseMessageEvent
 
 
 def norm_url(url: str) -> str:
@@ -113,24 +117,31 @@ def download_to_binary(url: str, filename: str = "") -> BinaryContent | None:
                     if parsed.port is None
                     else f"{parsed.host}:{parsed.port}"
                 )
-                resp = client.get(
+                with client.stream(
+                    "GET",
                     parsed.copy_with(host=ip),
                     headers={"Host": host_header},
                     extensions={"sni_hostname": parsed.host},
-                )
-                location = resp.headers.get("location")
-                if resp.is_redirect and location:
-                    url = str(parsed.join(location))
-                    continue
-                resp.raise_for_status()
-                hc = resp.headers.get("content-type", "").split(";")[0].strip()
-                raw = resp.content
-                ModelInputPolicy.for_role().check([len(raw)])
-                return BinaryContent(
-                    data=raw,
-                    media_type=pick_ct(url, hc, raw, filename=filename),
-                    identifier=filename or None,
-                )
+                ) as resp:
+                    location = resp.headers.get("location")
+                    if resp.is_redirect and location:
+                        url = str(parsed.join(location))
+                        continue
+                    resp.raise_for_status()
+                    policy = ModelInputPolicy.for_role()
+                    if length := resp.headers.get("content-length"):
+                        policy.check([int(length)])
+                    chunks, size = [], 0
+                    for chunk in resp.iter_bytes():
+                        size += len(chunk)
+                        policy.check([size])
+                        chunks.append(chunk)
+                    raw = b"".join(chunks)
+                    return BinaryContent(
+                        data=raw,
+                        media_type=pick_ct(url, resp.headers.get("content-type", ""), raw, filename=filename),
+                        identifier=filename or None,
+                    )
         logger.warning(f"[QQ] 重定向次数过多 {url[:80]}")
         return None
     except Exception as e:
@@ -176,12 +187,15 @@ def extract_image_video(event: BaseMessageEvent) -> list[Any]:
             continue
         u = norm_url(seg_data.get("url") or fv)
         if u.startswith("http"):
-            urls.append(u)
+            urls.append((seg_type, u))
     if not urls:
         raw = getattr(event, "raw_message", "") or ""
-        for m in re.finditer(r"\[CQ:(?:image|video),[^\]]*url=([^\],]+)", raw):
-            urls.append(norm_url(m.group(1)))
-    for u in urls:
+        for m in re.finditer(r"\[CQ:(image|video),[^\]]*url=([^\],]+)", raw):
+            urls.append((m.group(1), norm_url(m.group(2))))
+    for kind, u in urls:
+        if kind == "image":
+            attachments.append(ImageUrl(u))
+            continue
         bc = download_to_binary(u)
         if bc:
             attachments.append(bc)
@@ -191,6 +205,8 @@ def extract_image_video(event: BaseMessageEvent) -> list[Any]:
 async def file_id_to_binary(
     bot_api, event: BaseMessageEvent, file_id: str, filename: str, allow: frozenset[str]
 ) -> BinaryContent | None:
+    from ncatbot.core import GroupMessageEvent
+
     ext = os.path.splitext(filename or "")[1].lower()
     if not file_id or ext not in allow:
         return None

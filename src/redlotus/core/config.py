@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import os
+import shutil
 import errno
 import json
 import time
@@ -24,7 +25,6 @@ from urllib.parse import urlsplit
 from copy import deepcopy
 from io import StringIO
 from dotenv.parser import parse_stream
-from pydantic_ai.usage import UsageLimits
 
 
 APP_NAME = "RedLotus"
@@ -331,12 +331,6 @@ def _active_cache_projects(sessions: Path, project_id: str) -> set[str] | None:
     return active
 
 
-def _execution_storage_root(template, runtime: Path) -> Path | None:
-    if not template:
-        return None
-    value = str(template).replace("{runtime}", str(runtime)).replace("{project_id}", "")
-    path = Path(value).expanduser()
-    return (path if path.is_absolute() else runtime / path).resolve()
 
 
 def _delete_owned_cache(root: Path, target: Path) -> int | None:
@@ -418,11 +412,11 @@ def retry_after_storage_cleanup(
                     return
     if not cache_enabled:
         raise error
-    runtime = runtime_dir(workspace)
-    execution = settings().get("execution") or {}
-    cache_root = _execution_storage_root(execution.get("cache_dir"), runtime)
-    environments = _execution_storage_root(execution.get("environment_dir"), runtime)
-    if cache_root is None or not _same_storage_volume(cache_root, failed):
+    from redlotus.tools.execution import execution_cache_dir
+
+    cache_root = execution_cache_dir(workspace)
+    environments = (Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve())
+    if not _same_storage_volume(cache_root, failed):
         raise error
     current_project = workspace.project_id
     active = _active_cache_projects(sessions, workspace.project_id)
@@ -434,9 +428,10 @@ def retry_after_storage_cleanup(
         if not _safe_storage_child(cache_root, cache) or not cache.is_dir():
             continue
         try:
-            in_environment_tree = environments is not None and (
-                cache.resolve().is_relative_to(environments)
-                or environments.is_relative_to(cache.resolve())
+            in_environment_tree = any(
+                cache.resolve().is_relative_to(environment)
+                or environment.is_relative_to(cache.resolve())
+                for environment in environments
             )
         except OSError:
             continue
@@ -549,9 +544,6 @@ def safe_name(
     return cleaned[:max_len] or fallback
 
 
-def safe_segment(s: str, max_len: int = 80) -> str:
-    s = (s or "").strip().replace("\n", " ")
-    return safe_name(s, extra="_-.", max_len=max_len, fallback="default")
 
 
 def iso_utc_now() -> str:
@@ -736,8 +728,8 @@ def warning(msg: object, *args: Any, exc_info: bool = False) -> None:
     _emit("WARNING", msg, args, exc_info=exc_info)
 
 
-def error(msg: object, *args: Any, exc_info: bool = False) -> None:
-    _emit("ERROR", msg, args, exc_info=exc_info)
+def error(msg: object, *args: Any, exc_info: bool = False, file_only: bool = False) -> None:
+    _emit("ERROR", msg, args, exc_info=exc_info, file_only=file_only)
 
 
 def info_file_only(msg: object, *args: Any) -> None:
@@ -885,11 +877,45 @@ def _connection_field(key: str) -> bool:
     return lowered in {"api_key", "base_url", "siliconflow_base", "siliconflow_key"} or lowered.endswith(("_api_key", "_base_url"))
 
 
+def _model_selection_field(path: tuple[str, ...]) -> bool:
+    return bool(path) and (
+        path[0] == "RAG_models" or
+        path[0] in {"models", "model_presets"} and path[-1] == "name"
+    )
+
+
+def _selected_model_name_path(
+    role: str,
+    cfg: dict[str, Any],
+    schema: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Locate the field that owns a selected role's model name."""
+    selected = (cfg.get("models") or {}).get(role)
+    if selected is None and schema is not None:
+        selected = (schema.get("models") or {}).get(role)
+    preset = selected if isinstance(selected, str) else selected.get("preset")
+    presets = (cfg.get("model_presets") or {}).copy()
+    if schema is not None:
+        presets = {**(schema.get("model_presets") or {}), **presets}
+    if isinstance(preset, str) and preset.strip() and preset in presets:
+        return "model_presets", preset, "name"
+    return "models", role, "name"
+
+
+def _model_roles(schema: dict[str, Any], values: dict[str, Any]) -> list[str]:
+    """List roles declared by the shipped schema and any configured extensions."""
+    return list(
+        dict.fromkeys(
+            [*(schema.get("models") or {}), *(values.get("models") or {})]
+        )
+    )
+
+
 def _validate_config(value, source: Path, path=()) -> None:
     """校验结构和服务字段；不提供任何模型或策略默认值。"""
     objects = {"models", "gateways", "model_presets", "RAG_models", "context", "storage",
-               "execution", "bot", "lifecycle", "memory_perception", "agent_run_policy",
-               "short_term_memory", "long_term_memory", "model_gateway", "model_metadata",
+               "bot", "lifecycle", "memory_perception", "agent_run_policy",
+               "short_term_memory", "long_term_memory", "model_metadata",
                "rag_service", "input_limits", "task_title", "conversation_log"}
     key = path[-1] if path else ""
     expected = None
@@ -908,8 +934,14 @@ def _validate_config(value, source: Path, path=()) -> None:
         expected = (int, float)
     elif path and path[0] in {"models", "model_presets"} and key in {"max_tokens", "temperature", "top_p"}:
         expected = int if key == "max_tokens" else (int, float)
+    elif path == ("MODEL_HTTP_TIMEOUT",):
+        expected = (int, float)
     if expected and (value is not None or expected is dict) and (not isinstance(value, expected) or isinstance(value, bool) and expected != bool):
         raise ConfigError(f"配置 {source}: 字段 {'.'.join(path) or '<root>'} 类型错误")
+    if expected is list and isinstance(value, list):
+        for index, item in enumerate(value):
+            if not isinstance(item, str):
+                raise ConfigError(f"配置 {source}: 字段 {'.'.join(path)}.{index} 类型错误")
     if isinstance(value, dict):
         for name, child in value.items():
             _validate_config(child, source, (*path, name))
@@ -956,6 +988,10 @@ def _merge_config(target, incoming, origins, source, path=()):
         field = (*path, key)
         if _connection_field(key) and (value is None or isinstance(value, str) and not value.strip()):
             continue
+        if _model_selection_field(field) and key in target and (
+            value is None or isinstance(value, str) and not value.strip()
+        ):
+            continue
         if isinstance(value, dict):
             if not isinstance(target.get(key), dict):
                 target[key] = {}
@@ -966,11 +1002,10 @@ def _merge_config(target, incoming, origins, source, path=()):
 
 
 @contextmanager
-def _config_locks(*, writing=False):
-    """统一锁顺序，配置读写都覆盖相同的三层来源。"""
+def _config_locks():
+    """Acquire all configuration writer locks in a stable order."""
     paths = set(path for path in config_sources() if path.exists())
-    if writing:
-        paths.add(config_file())
+    paths.add(config_file())
     with ExitStack() as locks:
         for path in sorted(paths):
             locks.enter_context(file_lock(path))
@@ -982,20 +1017,18 @@ def _config_version():
 
 
 def settings() -> dict[str, Any]:
-    """缓存命中直接深拷贝；来源变化才在锁内重新读取和校验。"""
+    """从各配置来源的一次完整字节快照解析，并返回独立副本。"""
     global _CONFIG
+    version = _config_version()
     cached = _CONFIG
-    if cached is not None and _config_version() == cached[0]:
-        return deepcopy(cached[1])
-    with _config_locks():
-        version = _config_version()
-        if _CONFIG is None or version != _CONFIG[0]:
-            value, origins = {}, {}
-            for index in reversed(range(len(version))):
-                path, raw = version[index]
-                _merge_config(value, _parse_config(path, raw, dotenv=index == 1), origins, index)
-            _CONFIG = version, ConfigValues(value, origins=origins)
-        return deepcopy(_CONFIG[1])
+    if cached is None or version != cached[0]:
+        value, origins = {}, {}
+        for index in reversed(range(len(version))):
+            path, raw = version[index]
+            _merge_config(value, _parse_config(path, raw, dotenv=index == 1), origins, index)
+        cached = version, ConfigValues(value, origins=origins)
+        _CONFIG = cached
+    return deepcopy(cached[1])
 
 
 def load_config() -> dict[str, Any]:
@@ -1007,6 +1040,208 @@ def load_config() -> dict[str, Any]:
 
 def reload_config() -> dict[str, Any]:
     return load_config()
+
+
+def initialize_user_configuration() -> Path:
+    """Validate user-selected sources without copying or creating configuration files."""
+    path = config_file()
+    values = load_config()
+    if not values:
+        raise ConfigError(f"缺少配置 models；请填写 {path}。检查来源: {config_source_summary()}")
+    return path
+
+
+async def ask_configuration(question: str, *, secret=False):
+    """Read a startup answer with the same hidden-key contract as the TUI dialog."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyBindings
+
+    bindings = KeyBindings()
+
+    @bindings.add("escape", eager=True)
+    def cancel(event):
+        event.app.exit(result=None)
+
+    return await PromptSession(key_bindings=bindings).prompt_async(question, is_password=secret)
+
+
+def configuration_prompt_available() -> bool:
+    """Return whether the default first-use dialog can safely open a terminal prompt."""
+    return bool(
+        getattr(sys.stdin, "isatty", lambda: False)()
+        and getattr(sys.stdout, "isatty", lambda: False)()
+    )
+
+
+class ConfigurationSetup:
+    """Collect explicit configuration edits and commit them as a single atomic change."""
+
+    def __init__(self, ask=None, emit=print):
+        self.values = settings()
+        self.changes = {}
+        self.ask, self.emit = ask or ask_configuration, emit
+
+    def value(self, path):
+        node = self.values
+        for key in path:
+            if not isinstance(node, dict) or key not in node:
+                return None
+            node = node[key]
+        return node
+
+    @staticmethod
+    def assign(values, path, value):
+        node = values
+        for key in path[:-1]:
+            node = node.setdefault(key, {})
+        node[path[-1]] = deepcopy(value)
+
+    def connection_paths(self, role="coordinator"):
+        """Use the selected role's credential reference, not an unrelated global API key."""
+        _, parameters = get_model_and_params(role, cfg=self.values)
+        gateway = parameters.get("gateway")
+        if not gateway:
+            return [("BASE_URL",), ("API_KEY",)]
+        selected = self.values["gateways"][gateway]
+        # Edit an explicit gateway key when present; otherwise retain its named reference.
+        key = (selected["api_key_env"],) if selected.get("api_key_env") and not selected.get("api_key") else ("gateways", gateway, "api_key")
+        return [("gateways", gateway, "base_url"), key]
+
+    async def fill(self, path):
+        """Validate one field, retaining previous input until the whole dialog succeeds."""
+        key = ".".join(path)
+        current = self.value(path)
+        secret = "key" in path[-1].lower() or "token" in path[-1].lower()
+        shown = ("已填写" if current else "空") if secret else str(current if current is not None else "空")
+        hint = "回车保留"
+        if _model_selection_field(path) and path[0] == "models":
+            hint += "；输入 =角色名 可明确复用其模型"
+        while True:
+            answer = await self.ask(f"{key}（当前 {shown}；{hint}；Esc 取消）：", secret=secret)
+            if answer is None or answer == "\x1b":
+                return False
+            text = answer.strip()
+            if not text and current not in (None, ""):
+                return True
+            try:
+                if not text:
+                    raise ValueError("不能为空")
+                value = get_model_and_params(text[1:], cfg=self.values)[0] if text.startswith("=") and path[0] == "models" else text
+                if "url" in path[-1].lower() or path[-1] == "SILICONFLOW_BASE":
+                    parsed = urlsplit(value)
+                    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                        raise ValueError("请输入完整的 http/https 服务地址")
+                candidate = deepcopy(self.values)
+                self.assign(candidate, path, value)
+                _validate_config(candidate, config_file())
+            except (ValueError, KeyError, TypeError):
+                self.emit(f"{key} 无效：请按字段类型填写；模型复用需指定已配置的角色。")
+                continue
+            self.values = candidate
+            self.changes[path] = value
+            return True
+
+    def commit(self):
+        """Only changed fields are applied to the latest locked configuration."""
+        if self.changes:
+            def apply(values):
+                for path, value in self.changes.items():
+                    self.assign(values, path, value)
+            update_config(apply)
+
+
+def python_tool_startup_notice(cfg: dict[str, Any]) -> str | None:
+    """Explain an optional frozen-build Python requirement without blocking chat."""
+    if not _frozen():
+        return None
+    if any(shutil.which(name) for name in ("python", "python3", "py")):
+        return None
+    return (
+        "未发现外部 Python：纯聊天仍可使用；Python/pip 工具暂不可用。"
+        "请将现有 Python 加入 PATH 后重启。"
+    )
+
+
+def rag_configuration_paths():
+    """Connection and model fields exposed by the existing RAG configuration dialog."""
+    return [("SILICONFLOW_BASE",), ("SILICONFLOW_KEY",), ("RAG_models", "embedding"), ("RAG_models", "reranker")]
+
+
+async def prepare_startup_configuration(*, ask=None, emit=print) -> bool:
+    """Complete first-use configuration before constructing Agents or starting clients."""
+    initialize_user_configuration()
+    setup = ConfigurationSetup(ask, emit)
+    schema = setup.values
+    try:
+        missing_model_names = []
+        roles = _model_roles(schema, setup.values)
+        if "coordinator" not in roles:
+            raise ConfigError(f"缺少配置 models.coordinator；检查来源: {config_source_summary()}")
+        roles.sort(key=lambda role: role != "coordinator")
+        for role in roles:
+            try:
+                get_model_and_params(role, cfg=setup.values)
+            except ConfigError as exc:
+                path = _selected_model_name_path(role, setup.values, schema)
+                missing_role = str(exc).startswith(
+                    f"缺少配置 models.{role}；"
+                ) or str(exc).startswith("缺少配置 models；")
+                if ".".join(path) not in str(exc) and not missing_role:
+                    raise
+                missing_model_names.append(path)
+        interactive = ask is not None or configuration_prompt_available()
+        if not interactive:
+            missing = list(missing_model_names)
+            if not missing:
+                paths = dict.fromkeys(path for role in roles for path in setup.connection_paths(role))
+                missing.extend(path for path in paths if not str(setup.value(path) or "").strip())
+            if missing:
+                fields = "、".join(".".join(path) for path in missing)
+                raise ConfigError(f"非交互启动缺少必填配置 {fields}；请编辑 {config_file()} 后重试")
+            missing_rag = [path for path in rag_configuration_paths() if not str(setup.value(path) or "").strip()]
+            if missing_rag:
+                emit("RAG 尚未配置；可先聊天，使用 /api embedding 补齐向量检索配置。")
+            if notice := python_tool_startup_notice(setup.values):
+                emit(notice)
+            return True
+        emit(f"配置修改目标: {config_file()}\n读取来源: {config_source_summary()}")
+        for path in dict.fromkeys(missing_model_names):
+            if not await setup.fill(path):
+                return False
+        paths = dict.fromkeys(path for role in roles for path in setup.connection_paths(role))
+        for path in paths:
+            if not str(setup.value(path) or "").strip() and not await setup.fill(path):
+                return False
+        missing_rag = [path for path in rag_configuration_paths() if not str(setup.value(path) or "").strip()]
+        if missing_rag:
+            choice = await setup.ask("现在配置 RAG 向量检索吗？y 配置 / n 稍后（回车稍后；Esc 取消）：")
+            if choice is None or choice == "\x1b":
+                return False
+            if choice.strip().lower() in {"y", "yes", "是"}:
+                for path in missing_rag:
+                    if not await setup.fill(path):
+                        return False
+        setup.commit()
+        if notice := python_tool_startup_notice(setup.values):
+            emit(notice)
+        return True
+    except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
+        emit("配置已取消，未保存本次填写内容。")
+        return False
+
+
+async def configure_api(*, embedding=False, ask=None, emit=print) -> bool:
+    """Edit service fields atomically for both plain CLI and TUI callers."""
+    setup = ConfigurationSetup(ask, emit)
+    paths = rag_configuration_paths() if embedding else setup.connection_paths()
+    try:
+        for path in paths:
+            if not await setup.fill(path):
+                return False
+        setup.commit()
+        return True
+    except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
+        return False
 
 
 def credential_value(gateway_name: str, cfg: dict) -> str:
@@ -1066,20 +1301,26 @@ def _persist_changes(target, before, after):
 
 def update_config(change) -> None:
     """锁内读取最新有效值，只保存本次编辑产生的差异。"""
-    with _config_locks(writing=True):
-        path = config_file()
-        raw = _parse_config(path, path.read_bytes() if path.is_file() else None)
-        before = settings()
-        after = deepcopy(before)
-        change(after)
-        _persist_changes(raw, before, after)
-        _validate_config(raw, path)
-        atomic_write_json(path, raw)
+    path = config_file()
+    try:
+        with _config_locks():
+            path = config_file()
+            raw = _parse_config(path, path.read_bytes() if path.is_file() else None)
+            before = settings()
+            after = deepcopy(before)
+            change(after)
+            _persist_changes(raw, before, after)
+            _validate_config(raw, path)
+            atomic_write_json(path, raw)
+    except OSError as exc:
+        raise ConfigError(f"无法写入配置 {path}: {exc}") from None
     reload_config()
 
 
 def get_agent_usage_limits() -> "_UsageLimits":
     """单次 Agent 运行对模型请求次数上限"""
+    from pydantic_ai.usage import UsageLimits
+
     cfg = settings()
     raw = cfg["request_limit"]
     if raw is None or str(raw).strip().lower() in ("none", "unlimited", "null", ""):
@@ -1129,7 +1370,13 @@ def get_model_and_params(role: str, *, cfg=None) -> tuple[str, dict[str, Any]]:
     raw = deepcopy(cfg["models"][role])
     if isinstance(raw, str):
         raw = {"preset": raw}
-    if preset := raw.pop("preset", None):
+    preset = raw.pop("preset", None)
+    if preset is not None and str(preset).strip():
+        if not isinstance(preset, str) or preset not in cfg.get("model_presets", {}):
+            raise ConfigError(
+                f"配置 models.{role}.preset 引用了不存在的 model_presets.{preset}；"
+                f"检查来源: {config_source_summary()}"
+            )
         base = deepcopy(cfg["model_presets"][preset])
         origins = getattr(cfg, "origins", {})
         selection = origins.get(("models", role, "preset"), 0)
@@ -1137,11 +1384,20 @@ def get_model_and_params(role: str, *, cfg=None) -> tuple[str, dict[str, Any]]:
                if min((rank for path, rank in origins.items()
                        if path[:3] == ("models", role, key)), default=0) <= selection}
         raw = {**base.pop("settings", {}), **base, **raw.pop("settings", {}), **raw}
+    raw = {**raw.pop("settings", {}), **raw}
+    gateway = raw.get("gateway")
+    if gateway is not None and str(gateway).strip():
+        if not isinstance(gateway, str) or gateway not in cfg.get("gateways", {}):
+            raise ConfigError(
+                f"配置 models.{role}.gateway 引用了不存在的 gateways.{gateway}；"
+                f"检查来源: {config_source_summary()}"
+            )
+        raw["gateway"] = gateway
     name = raw.pop("name", None)
     if not isinstance(name, str) or not name.strip():
-        raise ConfigError(f"缺少有效配置 models.{role}.name；检查来源: {config_source_summary()}")
+        field = ".".join(_selected_model_name_path(role, cfg))
+        raise ConfigError(f"缺少有效配置 {field}；检查来源: {config_source_summary()}")
     name = name.strip()
-    raw = {**raw.pop("settings", {}), **raw}
     return name, raw
 
 
@@ -1158,26 +1414,6 @@ def set_model_name(role: str, model_name: str) -> None:
     update_config(change)
 
 
-def set_api(
-    base_url: str | None = None,
-    api_key: str | None = None,
-    *,
-    embedding_url: str | None = None,
-    embedding_key: str | None = None,
-) -> None:
-    values = {
-        "BASE_URL": base_url,
-        "API_KEY": api_key,
-        "SILICONFLOW_BASE": embedding_url,
-        "SILICONFLOW_KEY": embedding_key,
-    }
-    if all(v is None for v in values.values()):
-        return
-    update_config(
-        lambda cfg: cfg.update(
-            {k: v.strip() for k, v in values.items() if v is not None}
-        )
-    )
 
 
 def get_agent_roles(*, cfg=None) -> tuple[str, ...]:
@@ -1185,27 +1421,30 @@ def get_agent_roles(*, cfg=None) -> tuple[str, ...]:
 
 
 def get_context_profile_roles() -> tuple[str, ...]:
-    roles = get_agent_roles()
-    if "default_context_tokens" in settings()["context"]:
-        return roles
-    return tuple(role for role in roles if role in settings()["context"]) or roles
+    cfg = settings()
+    return tuple(
+        role for role in get_agent_roles(cfg=cfg)
+        if "auto_compress_ratio" in get_context_config(role, cfg=cfg)
+    )
 
 
 def get_context_config(role: str, *, cfg=None) -> dict[str, Any]:
     cfg = settings() if cfg is None else cfg
-    raw = cfg.get("context", {})
-    roles = get_agent_roles(cfg=cfg)
-    if role not in roles:
-        raise ValueError(f"Unknown Agent role: {role}")
-    shared = {key: value for key, value in raw.items()
-              if key not in {*roles, "defaults", "compression"}}
-    groups = [("context", "defaults"), ("context",), ("context", role)]
-    values = (raw.get("defaults", {}), shared, raw.get(role, {}))
-    origins = getattr(cfg, "origins", {})
-    entries = [(-origins.get((*prefix, key), 0), specificity, key, value)
-               for specificity, (prefix, group) in enumerate(zip(groups, values))
-               for key, value in group.items()]
-    return {key: deepcopy(value) for _, _, key, value in sorted(entries, key=lambda entry: entry[:2])}
+    _, parameters = get_model_and_params(role, cfg=cfg)
+    fields = ("max_context_windows", "auto_compress_ratio", "compress_head_turns", "compress_tail_turns")
+    result = {key: deepcopy(parameters[key]) for key in fields if key in parameters}
+    for key, value in result.items():
+        if key == "max_context_windows" and value is None:
+            continue
+        valid = (
+            isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1
+            if key == "auto_compress_ratio"
+            else isinstance(value, int) and not isinstance(value, bool)
+            and (value > 0 if key == "max_context_windows" else value >= 0)
+        )
+        if not valid:
+            raise ConfigError(f"无效配置 models.{role}.{key}；检查来源: {config_source_summary()}")
+    return result
 
 
 class ExitDeadline:
@@ -1255,10 +1494,12 @@ async def run_cli(system=None):
 
 def main() -> None:
     """CLI entrypoint used by root ``main.py``."""
-    from redlotus.core.system import AgentSystem
-
     try:
         load_config()
+        if not asyncio.run(prepare_startup_configuration()):
+            return
+        from redlotus.core.system import AgentSystem
+
         deadline = ExitDeadline(settings()["lifecycle"]["shutdown_grace_seconds"])
         try:
             system = AgentSystem(exit_deadline=deadline)

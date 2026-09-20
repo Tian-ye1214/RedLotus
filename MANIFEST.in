@@ -1,5 +1,6 @@
 include README.md
-
+global-exclude config.json
+global-exclude .env
 recursive-include src/redlotus/prompts *.md
 prune src/redlotus/prompts/LongTermMemory
 
@@ -7,7 +8,6 @@ graft src/redlotus/tools/skills
 
 include src/redlotus/api/config.yaml.example
 
-exclude src/redlotus/config.json
 global-exclude *.py[cod]
 global-exclude __pycache__
 global-exclude *.log

@@ -27,7 +27,7 @@ from redlotus.core import config as logger
 from redlotus.prompts.prompt import load_prompt
 from dataclasses import dataclass, field
 from decimal import Decimal
-from redlotus.core.session import SessionFile
+from redlotus.core.session import SessionFile, _response_id
 
 
 def _part_kind(part) -> str:
@@ -86,7 +86,8 @@ def repair_interrupted_tool_calls(messages: list) -> list:
             str(getattr(part, "tool_name", "")),
             {
                 "status": "unknown",
-                "message": "Original tool execution outcome is unknown; no result was persisted.",
+                "result_recorded": False,
+                "replayed": False,
             },
             tool_call_id=key,
             outcome="failed",
@@ -95,6 +96,18 @@ def repair_interrupted_tool_calls(messages: list) -> list:
         for key, part in pending.items()
     ]
     return [*messages, ModelRequest(parts=returns, metadata=metadata)]
+
+
+def _context_summary_metadata(message):
+    """Return checkpoint metadata from either current or persisted SDK message shape."""
+    candidates = [getattr(message, "metadata", None) or {}]
+    for part in getattr(message, "parts", ()):
+        if isinstance(getattr(part, "content", None), list):
+            candidates.extend(getattr(item, "metadata", None) or {} for item in part.content)
+    return next(
+        (metadata for metadata in candidates if metadata.get("origin") == "context_summary"),
+        None,
+    )
 
 
 class ChatHistory:
@@ -125,16 +138,9 @@ class ChatHistory:
         self._compress_summary_state = None
         self._revision += 1
         for message in reversed(self._messages):
-            candidates = [getattr(message, "metadata", None) or {}]
-            for part in message.parts:
-                if _part_kind(part) == "user-prompt" and isinstance(part.content, list):
-                    candidates.extend(
-                        getattr(item, "metadata", None) or {} for item in part.content
-                    )
-            for metadata in candidates:
-                if metadata.get("origin") == "context_summary":
-                    self._compress_summary_state = metadata["summary"]
-                    return
+            if metadata := _context_summary_metadata(message):
+                self._compress_summary_state = metadata["summary"]
+                return
 
     @property
     def compress_summary_state(self) -> str | None:
@@ -171,18 +177,9 @@ class ChatHistory:
 
 
 
-_COMPRESS_PREFIX = "[CONTEXT_COMPRESSION_SUMMARY]"
-_COMPRESS_MARKER = "<<COMPRESS_SUMMARY>>"
-_COMPRESS_REQUIRED_HEADINGS = (
-    "## 原始目标与当前目标",
-    "## 已完成节点",
-    "## 待完成节点",
-    "## 工具调用与关键结果",
-    "## 当前状态",
-    "## 未解决问题与阻塞",
-    "## 用户约束与已做决策",
-    "## 恢复后下一步",
-)
+def compression_summary_headings() -> list[str]:
+    """Validate the same section names the compressor actually receives."""
+    return re.findall(r"(?m)^## .+$", load_prompt("context_compress_structured_system.md"))
 
 
 class CompressionValidationError(RuntimeError):
@@ -242,10 +239,13 @@ def _ensure_openrouter_maps() -> None:
                 _OPENROUTER_META_MAP.setdefault(name.rsplit("/", 1)[-1], row)
         except (OSError, ValueError, httpx.HTTPError) as exc:
             _OPENROUTER_META_MAP = {}
-            logger.warning("模型元数据不可用，使用配置中的上下文容量：%s", exc)
+            logger.warning("模型元数据不可用；未配置容量的角色将报告缺项：%s", exc)
 
 
 def _lookup_openrouter_meta(name: str) -> dict | None:
+    from pydantic_ai.models import parse_model_id
+
+    _, name = parse_model_id(name)
     _ensure_openrouter_maps()
     rows = _OPENROUTER_META_MAP or {}
     return rows.get(name.lower()) or rows.get(name.lower().rsplit("/", 1)[-1])
@@ -269,62 +269,52 @@ def get_effective_max_context(
     role,
     context: dict | None = None,
 ) -> int:
-    """有效上下文上限：config 覆盖 > 缓存 > 多源查找 > default_context_tokens。"""
+    """Resolve the selected role's explicit capacity or its model metadata."""
     r: str = role if role is not None else get_context_profile_roles()[0]
     ctx = get_context_config(r) if context is None else context
-    # Auxiliary roles may define a model without their own context profile. Only the
-    # fallback budget is shared; model metadata and explicit role limits still win.
-    fallback = ctx.get("default_context_tokens")
-    if fallback is None:
-        fallback = get_context_config("coordinator")["default_context_tokens"]
-    fallback = int(fallback)
+    raw_max = ctx.get("max_context_windows")
+    if raw_max is not None:
+        if isinstance(raw_max, int) and not isinstance(raw_max, bool) and raw_max > 0:
+            return raw_max
+        raise logger.ConfigError(f"无效配置 models.{r}.max_context_windows；应为正整数或 null。")
+
     mid = model_name if model_name is not None else get_model_and_params(r)[0]
-
-    raw_max = ctx.get("max_context_tokens")
-    if isinstance(raw_max, int) and raw_max > 0:
-        return raw_max
-
     looked = lookup_model_context(mid)
     if looked:
         return looked
-
-    return fallback
+    raise logger.ConfigError(
+        f"无法获取模型 {mid} 的上下文容量；请配置 models.{r}.max_context_windows。"
+    )
 
 
 def _build_compress_user_body(summary_md: str) -> str:
-    body = summary_md.strip()
-    return (
-        f"{_COMPRESS_PREFIX}\n"
-        "以下内容为此前对话的压缩摘要（Markdown）。请结合后续消息继续推理。\n"
-        f"{_COMPRESS_MARKER}\n"
-        f"{body}"
-    )
+    return summary_md.strip()
 
 
 def _lint_compression_summary(summary_md: str) -> str:
     body = (summary_md or "").strip()
-    errors: list[str] = []
+    errors: list[dict] = []
     if not body:
-        errors.append("压缩摘要为空")
+        errors.append({"error": "compression_empty"})
     if "```" in body:
-        errors.append("压缩摘要不能包含 Markdown code fence")
+        errors.append({"error": "compression_fence"})
     if body.startswith(("{", "[")):
-        errors.append("压缩摘要必须是 Markdown，不得输出 JSON")
+        errors.append({"error": "compression_json"})
 
     pieces = re.split(r"(?m)^[ \t]*(## [^\n]+?)[ \t]*$", body)
     sections = dict(zip(pieces[1::2], pieces[2::2]))
     headings = list(sections)
-    required = list(_COMPRESS_REQUIRED_HEADINGS)
+    required = compression_summary_headings()
     missing = [h for h in required if h not in headings]
     if missing:
-        errors.append(f"压缩摘要缺少必需标题: missing={missing!r} actual={headings!r}")
+        errors.append({"error": "compression_headings", "missing": missing, "actual": headings})
     else:
         for heading in required:
             if not sections[heading].strip(" \t\r\n-*#>"):
-                errors.append(f"{heading} 缺少正文；摘要可能被截断")
+                errors.append({"error": "compression_section_empty", "heading": heading})
 
     if errors:
-        raise CompressionValidationError("; ".join(errors))
+        raise CompressionValidationError(json.dumps(errors, ensure_ascii=False))
     return body
 
 
@@ -359,9 +349,9 @@ def _compression_bounds(messages, context, *, retain_tail=True):
     ]
     starts.append(len(messages))
     head_end = (
-        starts[min(int(context["head_turns"]), len(starts) - 1)] if starts[:-1] else 0
+        starts[min(int(context["compress_head_turns"]), len(starts) - 1)] if starts[:-1] else 0
     )
-    tail_start = starts[max(0, len(starts) - 1 - int(context["tail_turns"]))]
+    tail_start = starts[max(0, len(starts) - 1 - int(context["compress_tail_turns"]))]
     boundaries = _closed_boundaries(messages)
     head_end = max(index for index in boundaries if index <= head_end)
     tail_start = next(
@@ -402,30 +392,36 @@ def _compression_candidate(
     prev_summary = summary_state
     from redlotus.prompts.message_text import pydantic_messages_to_text
 
-    excerpt = pydantic_messages_to_text(
-        messages[head_end:tail_start],
-        include_reference_content=False,
-        tool_args_max_chars=int(
-            settings()["context"]["compression"]["middle_tool_args_max_chars"]
-        ),
-    )
+    middle_messages = messages[head_end:tail_start]
+    if prev_summary:
+        # The prior checkpoint is supplied separately below; keep real user text even
+        # if it happens to equal that checkpoint.
+        middle_messages = [
+            message
+            for message in middle_messages
+            if _context_summary_metadata(message) is None
+        ]
+    excerpt = pydantic_messages_to_text(middle_messages)
 
     system_prompt = load_prompt("context_compress_structured_system.md")
-    user_parts: list[str] = []
+    user_parts = {"transcript": excerpt}
     if prev_summary:
-        user_parts.append(
-            "## 上轮压缩摘要（必须合并更新，不能丢失仍有效信息）\n\n" + prev_summary
-        )
+        user_parts["previous_summary"] = prev_summary
     if task_state and task_state.strip():
-        user_parts.append("## 当前结构化任务状态（权威）\n\n" + task_state.strip())
-    user_parts.append("## 本轮待压缩中间段\n\n" + (excerpt or "unknown"))
-    user_content = "\n\n".join(user_parts)
+        user_parts["task_state"] = task_state.strip()
+    user_content = json.dumps(user_parts, ensure_ascii=False)
 
     summary_md = _call_compressor_llm(
         system_prompt=system_prompt, user_content=user_content
     )
     summary_md = _lint_compression_summary(summary_md)
     new_body = _build_compress_user_body(summary_md)
+    retained = messages[:head_end] + messages[tail_start:]
+    metadata = {
+        "origin": "context_summary", "summary": summary_md,
+        "prior_usage_responses": [_response_id(message) for message in retained if isinstance(message, ModelResponse)],
+    }
+    from redlotus.prompts.prompt import session_prompt_from_history
 
     summary_msg = ModelRequest(
         parts=[
@@ -433,12 +429,13 @@ def _compression_candidate(
                 content=[
                     TextContent(
                         new_body,
-                        metadata={"origin": "context_summary", "summary": summary_md},
+                        metadata=metadata,
                     )
                 ]
             )
         ],
-        metadata={"origin": "context_summary", "summary": summary_md},
+        metadata=metadata,
+        instructions=session_prompt_from_history(messages),
     )
     new_messages = messages[:head_end] + [summary_msg] + messages[tail_start:]
     logger.info("上下文压缩完成: role=%s messages=%d→%d", role, len(messages), len(new_messages))
@@ -447,29 +444,6 @@ def _compression_candidate(
     return candidate
 
 
-def compress_history(
-    history: ChatHistory,
-    *,
-    role: str,
-    force: bool,
-    task_state: str | None = None,
-    retain_tail: bool = True,
-    context: dict | None = None,
-) -> bool:
-    """Synchronously build and apply a context-compression candidate."""
-    candidate = _compression_candidate(
-        list(history.messages),
-        history.compress_summary_state,
-        role=role,
-        force=force,
-        task_state=task_state,
-        retain_tail=retain_tail,
-        context=context,
-    )
-    if candidate is None:
-        return False
-    history.set_messages(candidate.messages)
-    return True
 
 
 async def get_effective_max_contexts_by_role_async(*, roles=None) -> dict[str, int]:
@@ -576,109 +550,31 @@ def _estimate_text_tokens(text):
     return sum(1 if ord(char) > 127 or char.isdigit() else 0.3 for char in text)
 
 
-def estimate_context_tokens(
-    messages: list, *, tools=(), include_instructions=True
-) -> int:
-    # Include full tool outputs: the display transcript deliberately elides them.
-    from pydantic_ai import TextContent
-
-    tokens = 0.0
-    for message in messages:
-        for part in getattr(message, "parts", ()):
-            value = getattr(part, "content", getattr(part, "args", ""))
-            if isinstance(value, (list, tuple)):
-                texts = [
-                    item
-                    if isinstance(item, str)
-                    else item.content
-                    if isinstance(item, TextContent)
-                    else "[media]"
-                    for item in value
-                ]
-                tokens += sum(
-                    1024 for item in value if not isinstance(item, (str, TextContent))
-                )
-                value = "\n".join(texts)
-            elif not isinstance(value, str):
-                value = str(value)
-            tokens += _estimate_text_tokens(value) + 8
-    if include_instructions:
-        instructions = next(
-            (
-                m.instructions
-                for m in reversed(messages)
-                if getattr(m, "instructions", None)
-            ),
-            "",
-        )
-        tokens += _estimate_text_tokens(instructions)
-    if tools:
-        schema = [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters_json_schema,
-            }
-            for tool in tools
-        ]
-        tokens += _estimate_text_tokens(json.dumps(schema, ensure_ascii=False))
-    return int(tokens + 0.999)
 
 
-async def prepare_model_request(run, node, *, role: str, task_state: str = "") -> None:
-    """Check capacity before every request, including requests within one tool chain."""
-    compacted = await compact_request_messages(
-        [*run.ctx.state.message_history, node.request], role=role, task_state=task_state
-    )
-    run.ctx.state.message_history[:] = compacted[:-1]
-    node.request = compacted[-1]
 
 
 async def compact_request_messages(
     combined, *, role: str, task_state: str = "", target=None, tools=()
 ) -> list:
     """Build the bounded model view; original trace persistence belongs to the runner."""
-    messages, request = combined[:-1], combined[-1]
+    request = combined[-1]
     context = target.context if target else get_context_config(role)
     limit = await get_effective_max_context_async(
         model_name=target.name if target else None, role=role, context=context
     )
     threshold = limit * float(context["auto_compress_ratio"])
-    parameters = target.settings if target else get_model_and_params(role)[1]
-    input_budget = limit - int(parameters.get("max_tokens") or 0)
-    if input_budget <= 0:
-        raise CompressionValidationError(
-            "Configured output budget leaves no input capacity; check context and max_tokens in config.json."
-        )
-    # Last model usage excludes its newly generated tools and the pending tool responses.
-    recent_tokens = estimate_context_tokens(combined, tools=tools)
-    for index in range(len(messages) - 1, -1, -1):
-        if (
-            isinstance(messages[index], ModelResponse)
-            and messages[index].usage.input_tokens
-        ):
-            recent_tokens = max(
-                recent_tokens,
-                messages[index].usage.input_tokens
-                + estimate_context_tokens(combined[index:], include_instructions=False),
-            )
-            break
-    if recent_tokens < threshold and recent_tokens < input_budget:
+    recent_tokens = latest_usage_input_tokens(combined)
+    if recent_tokens is None or recent_tokens < threshold:
         return combined
     history = ChatHistory()
     history.set_messages(combined)
-    bounds = _compression_bounds(combined, context)
-    retained = [*combined[: bounds[0]], *combined[bounds[1] :]] if bounds else combined
-    retain_tail = estimate_context_tokens(retained, tools=tools) < min(
-        threshold, input_budget
-    )
     changed = await compress_history_async(
         history,
         role=role,
         force=True,
         task_state=task_state,
-        retain_tail=retain_tail,
-        context={**context, "max_context_tokens": limit},
+        context={**context, "max_context_windows": limit},
     )
     if not changed:
         raise CompressionValidationError(
@@ -687,16 +583,6 @@ async def compact_request_messages(
     compacted = history.messages
     if request.instructions is not None:
         compacted[-1].instructions = request.instructions
-    if not retain_tail:
-        # All calls in this batch have completed; their summary can replace the entire batch.
-        latest_inputs = [
-            part for part in request.parts if isinstance(part, UserPromptPart)
-        ]
-        compacted[-1].parts.extend(latest_inputs)
-    if estimate_context_tokens(compacted, tools=tools) >= input_budget:
-        raise CompressionValidationError(
-            "The current input exceeds the context window; use a smaller input."
-        )
     return compacted
 
 
@@ -885,12 +771,14 @@ def session_model_message_files(
 
 
 def latest_usage_input_tokens(messages: Iterable[Any]) -> int | None:
-    for message in reversed(list(messages)):
-        if isinstance(message, ModelResponse):
-            usage = message.usage
-            if usage.has_values():
-                return usage.input_tokens
-    return None
+    recent = list(reversed(list(messages)))
+    response = next((message for message in recent if isinstance(message, ModelResponse)), None)
+    if response is None:
+        return None
+    checkpoint = next((info for message in recent if (info := _context_summary_metadata(message))), {})
+    if _response_id(response) in checkpoint.get("prior_usage_responses", []):
+        return None
+    return response.usage.input_tokens or None
 
 
 def summarize_messages(

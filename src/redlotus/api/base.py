@@ -76,9 +76,7 @@ class BotBase:
     session_prefix: str
 
     def _new_session(self):
-        return ChatSession(
-            TurnQueue(maxsize=int(settings()["bot"]["session_queue_maxsize"]))
-        )
+        return ChatSession(TurnQueue())
 
     def _session(self, session_id):
         if session_id not in self._sessions:
@@ -169,7 +167,11 @@ class BotBase:
         finally:
             state.touched = time.monotonic()
         if self._sessions.get(identity) is state:
-            await self._safe_send(turn.send_reply, result)
+            try:
+                await self._safe_send(turn.send_reply, result)
+            except Exception as exc:
+                logger.error("[%s] 回复发送未确认，未自动重发: %s", self.platform_tag, exc)
+                raise
 
     def _split_reply(self, text):
         chunks = []
@@ -188,11 +190,12 @@ class BotBase:
         return [*chunks, text] if text else chunks
 
     async def _safe_send(self, send_reply, text):
+        """Send each chunk once; a missing acknowledgement is not failed delivery."""
         for chunk in self._split_reply(text):
             try:
                 await asyncio.wait_for(send_reply(chunk), self.SEND_REPLY_TIMEOUT_S)
-            except TimeoutError:
-                await asyncio.wait_for(send_reply(chunk), self.SEND_REPLY_TIMEOUT_S)
+            except TimeoutError as exc:
+                raise TimeoutError("发送确认超时，送达状态未知；未自动重发。") from exc
 
     def guess_download_mime(self, *, filename="", media_type_key=""):
         return mimetypes.guess_type(filename)[0] or self._MIME_MAP.get(
@@ -202,11 +205,14 @@ class BotBase:
     def _notify(self, text):
         identity, state, turn = self._agent_ctx.get()
 
-        def send():
+        async def send():
             if self._sessions.get(identity) is state:
-                asyncio.create_task(self._safe_send(turn.send_reply, text))
+                try:
+                    await self._safe_send(turn.send_reply, text)
+                except Exception as exc:
+                    logger.error("[%s] 通知发送失败: %s", self.platform_tag, exc)
 
-        turn.loop.call_soon_threadsafe(send)
+        turn.loop.call_soon_threadsafe(lambda: asyncio.create_task(send()))
 
     async def _run_turn(self, identity, state, turn):
         agent = self._agent_for_session(identity)

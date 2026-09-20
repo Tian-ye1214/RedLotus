@@ -98,25 +98,16 @@ _CURRENT_AGENT_ID: ContextVar[str | None] = ContextVar("agent_id", default=None)
 @dataclass(frozen=True)
 class AgentRunPolicy:
     max_concurrent_threads_per_session: int
-    max_tool_output_chars: int
     max_command_timeout_seconds: int
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any]) -> "AgentRunPolicy":
-        return cls(**deepcopy(cfg["agent_run_policy"]))
+        values = deepcopy(cfg["agent_run_policy"])
+        values.pop("max_tool_output_chars", None)
+        return cls(**values)
 
     def clamp_command_timeout(self, timeout: int) -> int:
         return max(1, min(int(timeout), self.max_command_timeout_seconds))
-
-    def truncate_text(self, text: str) -> str:
-        if len(text) <= self.max_tool_output_chars:
-            return text
-        omitted = len(text) - self.max_tool_output_chars
-        return (
-            text[: self.max_tool_output_chars]
-            + f"\n\n[tool output truncated: omitted {omitted} characters]"
-        )
-
 
 def current_turn_id() -> str | None:
     return _CURRENT_TURN_ID.get()
@@ -715,14 +706,15 @@ class SubagentFactory:
         return handles
 
 
+Outcome = Literal["success", "failed", "cancelled", "needs_input", "unverified"]
+
+
 class SubagentResult(BaseModel):
     """Validated child output; absence of evidence must never imply success."""
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    status: Literal["success", "failed", "cancelled", "needs_input"] = Field(
-        description="Outcome of the whole delegated goal. If a required step failed and remains unresolved, use failed; preserve successful substeps in summary.",
-    )
+    status: Outcome
     summary: str = Field(min_length=1)
     artifacts: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)

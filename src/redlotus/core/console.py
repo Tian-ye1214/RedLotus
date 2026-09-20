@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from redlotus.tools.interaction import iter_reference_spans, quote_reference_path, user_message_from_cli_input, load_file_refs
 from redlotus.core.session import current_workspace
-from redlotus.core.cli_commands import WorkspaceSnapshot, list_workspace_snapshots, read_saved_model_messages_file
+from redlotus.core.cli_commands import WorkspaceSnapshot, list_workspace_snapshots
 from redlotus.core.config import (
     settings,
     get_agent_roles,
@@ -21,7 +21,6 @@ from redlotus.core.config import (
     user_data_dir,
     project_data_dir,
     session_data_dir,
-    safe_name,
 )
 from pathlib import Path
 from prompt_toolkit.completion import Completer, Completion
@@ -553,36 +552,16 @@ class AgentCliController:
         if chosen is None or not chosen.is_loadable:
             print_warning("所选会话无法加载，请选择其他会话或新建会话。")
             return None
-        messages = meta = restored_messages = None
+        restored_messages = None
         try:
-            async def prepare():
-                nonlocal messages, meta
-                messages, meta = await asyncio.to_thread(
-                    read_saved_model_messages_file, chosen.path, workspace=self.system.workspace
-                )
-                return generation == self.system._session.generation
-
             async def restore():
                 nonlocal restored_messages
-                repaired = await self.system.bind_loaded_snapshot(
-                    chosen.agent, chosen.path, meta
-                )
-                state.history.reset()
-                (
-                    state.history
-                    if chosen.agent == "coordinator"
-                    else self.system._manager_history
-                ).set_messages(repaired if repaired is not None else messages)
-                restored_messages = repaired if repaired is not None else messages
-                state.is_first_input = False
-                if task_name := meta.get("task_name"):
-                    self.system._toolkit.set_task_directory(task_name)
-                logger.setup_task_logger(
-                    safe_name(chosen.topic, max_len=50, fallback="loaded")
+                restored_messages = await self.system.bind_loaded_snapshot(
+                    chosen.path, state=state, title=chosen.title
                 )
 
             if not await self.reset_session(
-                state.history, prepare=prepare, restore=restore
+                state.history, restore=restore
             ):
                 return None
             if self._snapshot_loaded_callback is not None:
@@ -590,7 +569,7 @@ class AgentCliController:
                     self._snapshot_loaded_callback(chosen, restored_messages)
                 except Exception as exc:
                     print_warning(f"已恢复会话，但无法显示历史对话: {exc}")
-            print_success(f"已加载 {chosen.agent} 对话（{len(messages)} 条模型消息）。")
+            print_success(f"已加载 {chosen.agent} 对话（{len(restored_messages)} 条模型消息）。")
             return True
         except (OSError, ValueError) as exc:
             print_warning(f"加载失败: {exc}")
@@ -608,21 +587,21 @@ class AgentCliController:
         restore: Callable[[], Awaitable[None]] | None = None,
     ) -> bool:
         """Reset or switch a conversation and always reopen the input admission gate."""
-        self.last_rejected_input = None
         self._ready.clear()
         self._transition += 1
         try:
             if prepare is not None and not await prepare():
                 return False
-            if workspace is None:
-                await self.system.reset_session()
-            else:
-                await self.system.switch_workspace(workspace)
-            if restore is None:
-                history.reset()
-            else:
+            if restore is not None:
                 await restore()
+            else:
+                if workspace is None:
+                    await self.system.reset_session()
+                else:
+                    await self.system.switch_workspace(workspace)
+                history.reset()
             clear_context_usage()
+            self.last_rejected_input = None
         except Exception as exc:
             print_warning(f"会话切换失败，已保留原会话: {exc}")
             raise
@@ -813,7 +792,6 @@ class AgentCliController:
                     admission=admission,
                     references=references,
                 )
-                print_success("加急输入已登记，将按提交顺序在下一次请求中处理。")
                 return "continue"
             logger.debug(
                 "input admitted id=%s sequence=%s urgent=False",
@@ -831,9 +809,17 @@ class AgentCliController:
                 ),
                 data=raw_input,
             )
-            future.add_done_callback(
-                lambda done: references.cancel() if done.cancelled() else None
-            )
+            def input_finished(done):
+                try:
+                    done.result()
+                except asyncio.CancelledError:
+                    references.cancel()
+                except Exception as error:
+                    references.cancel()
+                    if not wait_for_turn:
+                        self.system._handle_turn_error(error)
+
+            future.add_done_callback(input_finished)
         if wait_for_turn:
             await future
         return "continue"
