@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/assets/icon.svg" alt="RedLotus icon" width="112" height="112">
-</p>
-
 <h1 align="center">RedLotus</h1>
 
 <p align="center">
@@ -25,10 +21,6 @@ RedLotus is an AI agent that runs in your terminal. It chooses how to handle eac
 python -m pip install --upgrade redlotus
 redlotus
 ```
-
-<p align="center">
-  <img src="docs/assets/terminal.png" alt="RedLotus terminal task example" width="760">
-</p>
 
 ## Features
 
@@ -102,29 +94,24 @@ pip install "redlotus[all]"      # All optional dependencies
 Install Chromium before using browser automation:
 
 ```bash
-playwright install chromium
+python -m playwright install chromium
 ```
+
+Install browser components with the same Python environment that runs RedLotus. An installation in another environment does not verify this entry point.
 
 ## Initial configuration
 
 After pip installation, run `redlotus`. Global configuration lives at `~/.redlotus/config.json`. Optional developer overrides use this field-by-field order: local `src/redlotus/config.json`, local `.env`, then global JSON. The source launcher searches from the checkout root, pip from the current directory, and PyInstaller from the executable's directory. `/config` shows the sources and write target. No parent-directory search or AppData configuration is used.
 
-Nested `.env` fields use JSON names separated by `__`, such as `models__worker__max_tokens=393216`. Numbers, booleans, arrays and objects use JSON values. Host environment variables never override business settings. Missing required fields produce an error; no bundled configuration is silently copied or merged. Configuration editing writes only the changes to an existing local JSON, otherwise to the global JSON. Credentials are never included in packages.
+Nested `.env` fields use JSON names separated by `__`, such as `models__worker__max_tokens=393216`. Numbers, booleans, arrays and objects use JSON values. Host environment variables never override business settings. Missing required fields must produce an error; no bundled configuration is silently copied or merged. Configuration editing writes only the changes to an existing local JSON, otherwise to the global JSON. Credentials are never included in packages.
 
 For isolated tests, `REDLOTUS_CONFIG_FILE`, `REDLOTUS_DOTENV_FILE`, and `REDLOTUS_CONFIG_DIR` explicitly select the three sources. `REDLOTUS_DATA_DIR` isolates global state. Each opened project stores sessions, perception progress, logs, and its user-maintained `AGENT.md` in `.redlotus`; artifacts, dependencies, caches, and immutable reference snapshots belong in `WorkDatabase`. Configuration and all LanceDB memory databases remain in `~/.redlotus`, with project-scoped access. The legacy `%LOCALAPPDATA%/RedLotus` directory is not read, migrated, or recreated.
 
-For a new installation, provide a complete configuration at `~/.redlotus/config.json`; the maintained [source configuration](src/redlotus/config.json) shows the available fields. Set its storage paths for your machine. The following connection fields are only a fragment, not a complete configuration:
+Runtime policies belong in configuration, not interactive forms. A missing or `null` `models.<role>.max_context_windows` uses OpenRouter metadata; a positive integer overrides that capacity. Empty or partial configuration enters model, connection and credential setup. Only confirmed edits are saved; cancellation leaves configuration unchanged. Before constructing Agents, startup lists missing runtime fields together and identifies invalid types with their source. Fill these manually using the [complete field reference: types, units, required roles and optional features](docs/design.md#configuration-reference), then restart. Two connection fields alone are insufficient. The complete first-use flow remains a real acceptance gate.
 
-```json
-{
-  "BASE_URL": "https://your-api.example.com/v1",
-  "API_KEY": "your-api-key"
-}
-```
+Gateways support Pydantic AI's OpenAI Chat, OpenAI Responses, Anthropic Messages and Google adapters. Manager, Worker, Coordinator, Compressor and Title models can be configured independently or select named presets. Memory perception uses the configured `memory_perception.model_role`, independently of context compression. Vector retrieval and reranking use `SILICONFLOW_BASE`, `SILICONFLOW_KEY`, `RAG_models` and `rag_service`.
 
-Gateways support Pydantic AI's OpenAI Chat, OpenAI Responses, Anthropic Messages and Google adapters. Manager, Worker, Coordinator and Compressor models can be configured independently or select named presets. Memory perception uses the role selected by `memory_perception.model_role` (Worker by default), independently of context compression. Vector retrieval and reranking use `SILICONFLOW_BASE`, `SILICONFLOW_KEY`, `RAG_models` and `rag_service`.
-
-Named credential references such as `api_key_env` resolve fields in the same three-layer configuration, including the local `.env`; they do not read the host environment or a global `.env`. Direct keys and references follow the same source priority. Do not commit credentials. See [configuration and gateway examples](docs/gateway-installation.md).
+Named credential references such as `api_key_env` resolve fields in the same three-layer configuration, including the local `.env`; they do not read the host environment or a global `.env`. Direct keys and references follow the same source priority. Do not commit credentials. See [configuration and gateway examples](docs/design.md#模型配置与上下文).
 
 ## Terminal usage
 
@@ -148,7 +135,7 @@ Common shortcuts:
 | `Ctrl+Q` | Exit |
 | `@path` | Reference documents and images, with Tab completion; up to 20 files. Video validation is deferred. |
 
-Urgent messages keep normal brightness and an explicit label. The `/urgent` text command has been removed. Both LF and extended Ctrl+Enter encodings are accepted. Terminals that encode Ctrl+Enter exactly like Enter need a terminal-side mapping; see [keyboard behavior and verification](docs/keyboard-input.md).
+Urgent messages use ordinary user-message styling. The `/urgent` text command is not supported. Ctrl+Enter requires a distinct terminal event. If PyCharm encodes it identically to Enter, the application cannot recover the difference; use the existing footer send action. Shift+Tab has a separate encoding and does not establish Ctrl+Enter support. The production keyboard detector has been removed; probes belong only in testing. See [keyboard behavior and verification](docs/design.md#请求执行).
 
 References can be adjacent or separated by punctuation, for example `@review.md,@image.png`. Tab completes the current reference and automatically quotes paths containing spaces or delimiters; `@"path"`, `@'path'`, and `@{path}` also work. Files are deduplicated in first-appearance order. More than 20 distinct files produces an error instead of a partial upload.
 
@@ -169,7 +156,6 @@ References can be adjacent or separated by punctuation, for example `@review.md,
 | `/compress` | Compress Manager and Coordinator context |
 | `/status` · `/trace` · `/tasks` | Inspect lifecycle, invocation traces, and task status |
 | `/stop` · `/cancel` | Stop the current turn or cancel an invocation |
-| `/urgent <text>` | Add a genuine user update to the active tool/model loop; ordinary messages remain FIFO |
 
 </details>
 
@@ -195,14 +181,14 @@ New skills are discovered automatically on subsequent user turns.
 
 ## Files and data
 
-- Session traces, reference snapshots and perception jobs are stored under the global user data directory, with project-specific data partitioned by project ID. Compression changes the model view while retaining the original trace.
+- Session traces and perception progress live in the project's `.redlotus`; reference snapshots live in `WorkDatabase/references`. Compression changes the model view while retaining the original trace for recovery and perception.
 - Project episodes and global records use the configured LanceDB directory under the user's `.redlotus`, with scope/project isolation, vector recall, reranking, and text fallback. Sessions and logs remain in each project's `.redlotus`; references, artifacts, dependencies, and caches stay in its `WorkDatabase`.
 - `MEMORY.md` contains the core profile, environment, constraints and general experience without a fixed character cap. Its complete contents and the system prompt are snapshotted for the session; memory writes do not rewrite that prefix. New confirmed information is consumed through tool results and retrieval, and a new session loads a fresh snapshot.
 - File and command tools use the current project. Generated artifacts go to `WorkDatabase/`. `/cd` cancels the old session before switching context.
 
 Enter queues a separate FIFO turn. Ctrl+Enter adds an urgent supplement to the active turn, together with the completed tool batch at the next request boundary. Child Agents use dedicated threads, event loops, and clients within the configured session limit. Perception processes each set of 20 new user turns in the current session, with three earlier turns for continuity. Opening, loading, or exiting a session does not create a short perception window. Explicit remember requests are handled immediately; failed production remains pending.
 
-Model parameters, retrieval settings and runtime limits are declared in JSON and read as independent copies. See [architecture and migration](docs/refactor.md) for window-based production and the retained RAG parameters.
+Model parameters, retrieval settings and runtime limits are declared in JSON and read as independent copies. See [architecture and migration](docs/design.md) for window-based production and the retained RAG parameters.
 
 ## QQ and WeChat bots
 
@@ -215,13 +201,13 @@ pip install "redlotus[bots] @ git+https://github.com/Tian-ye1214/RedLotus.git"
 Start either integration:
 
 ```bash
-python -m redlotus.API.QQ
-python -m redlotus.API.WeChat
+python -m redlotus.api.QQ
+python -m redlotus.api.WeChat
 ```
 
 QQ integration requires [NapCat](https://github.com/NapNeko/NapCatQQ) with a configured OneBot WebSocket endpoint, bot QQ number, and WebUI token. The WeChat integration prompts for QR-code login at startup.
 
-Personal bot access must be bound in `bot.owner_channels.qq` (private QQ IDs) or `bot.owner_channels.wechat` (wxids). Unbound channels have text-only conversations and no access to personal memory or execution tools. `/stop`, `/clear`, and `/urgent` use the same turn semantics as the terminal. See the [binding example](docs/refactor.md#工作区渠道与迁移).
+Personal bot access must be bound in `bot.owner_channels.qq` (private QQ IDs) or `bot.owner_channels.wechat` (wxids). Unbound channels have text-only conversations and no access to personal memory or execution tools. Events are ordered before attachment downloads; any failed attachment rejects the complete request, and clearing invalidates old events. Tool questions currently accept text answers only: media answers are explicitly rejected while the question remains pending. Real-account testing remains required. See the [fixes and acceptance boundaries](docs/design.md#本次一致性修复).
 
 ## Development
 
@@ -231,7 +217,6 @@ cd RedLotus
 
 pip install -e ".[dev]"
 python main.py
-pytest -q
 ```
 
 Build the Python package:
@@ -247,4 +232,10 @@ pip install ".[build]"
 pyinstaller build.spec
 ```
 
-The main package lives in `src/redlotus/`, organized into `core`, `tools`, `api`, `prompts`, and `memory`. The `redlotus` command maps to `redlotus.core.config:main`.
+The source separates runtime configuration, orchestration, models, storage, tools, terminal and channel responsibilities. The command maps to `redlotus.terminal.console:main`; the source entry remains `main.py`. The target is at most five Python files per module and 500 effective lines per file, with physical counts also reported. Simplicity, reuse and the necessity of added lines are required at both development and acceptance review. All listed packages are authorized for this development pass; new scope still requires approval. See the [development rules](docs/development.md#开发与验收审批).
+
+## Validation status
+
+Every functional test, bug-fix retest and release acceptance run must use real service APIs through the product's public entry points, following installation and first-use configuration as a new user would. Verify actual task results, artifacts and recovery. Test each new pip release and each PyInstaller format being delivered separately; simulating user actions must not replace real model responses. See the [real-API testing requirements](docs/development.md#真实验收习惯).
+
+This development branch includes targeted real-API checks and isolated auxiliary regressions for the new fixes; results from the withdrawn implementation do not count. Three-platform CI covers auxiliary regression, installation and builds only. The 360 real-model turns, automatic compression, per-environment cache rate, real QQ/WeChat accounts and cross-platform core flows remain release gates. Scenarios lacking execution conditions remain unverified. Local wheel installation is separate from publishing and validating a new PyPI release. See [current evidence and remaining acceptance](docs/design.md#本次验收边界).

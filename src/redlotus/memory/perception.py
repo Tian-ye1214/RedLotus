@@ -1,33 +1,41 @@
+"""Memory perception responsibilities."""
+
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-from redlotus.memory.records import (
-    ObservedTurn,
-    WindowManifest,
-    PerceptionResult,
-    CREDENTIAL_PATTERN,
-    MemoryRecord,
-)
-from redlotus.prompts.prompt import window_prompt_content, load_prompt, with_runtime_context
-
 import asyncio
-import json
 import hashlib
+import json
 import time
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict
 from typing import Literal
 
+from pydantic import BaseModel, Field
 from pydantic_ai import ImageUrl, ModelRetry, ToolReturn, capture_run_messages
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.toolsets import FunctionToolset
 
-from redlotus.core.config import get_agent_usage_limits, settings, iso_utc_now
-from redlotus.core.gateway import create_agent, create_model, ModelTarget
-from redlotus.tools.references import ReferenceFile, ReferenceStore
-from redlotus.core.agents import WorkspaceContext, AgentRegistry, SubagentFactory, SubagentSpec
+from redlotus.documents.readers import ReferenceFile
+from redlotus.documents.references import ReferenceStore
+from redlotus.memory.records import (
+    CREDENTIAL_PATTERN,
+    MemoryRecord,
+    ObservedTurn,
+    PerceptionResult,
+    WindowManifest,
+)
 from redlotus.memory.store import MemoryStore
+from redlotus.models.gateway import create_agent
+from redlotus.models.providers import ModelTarget, create_model
+from redlotus.prompts.prompt import (
+    load_prompt,
+    window_prompt_content,
+    with_runtime_context,
+)
+from redlotus.runtime.config import get_agent_usage_limits, settings
+from redlotus.runtime.context import SubagentSpec, WorkspaceContext
+from redlotus.runtime.files import iso_utc_now
 
 
 class PerceptionTiming(AbstractCapability):
@@ -58,8 +66,8 @@ class MemoryPerception:
     def __init__(
         self,
         workspace: WorkspaceContext,
-        factory: SubagentFactory,
-        registry: AgentRegistry,
+        factory,
+        registry,
     ):
         self.workspace, self.factory, self.registry = (
             workspace,
@@ -120,7 +128,8 @@ class MemoryPerception:
             async def search(query, scope):
                 revision = await asyncio.to_thread(store.revision, scope)
                 rows = await store.search(query, scope)
-                retrieval_error = store.retrieval_error
+                retrieval_error = rows.retrieval_error
+                retrieval_complete = rows.retrieval_complete
                 changed = revision != await asyncio.to_thread(store.revision, scope)
                 existing.update((row.id, row) for row in rows)
                 receipt = dict(
@@ -128,6 +137,7 @@ class MemoryPerception:
                         scope=scope,
                         revision=revision,
                         ids=[row.id for row in rows],
+                        retrieval_complete=retrieval_complete,
                         retrieval_error=retrieval_error or ("Memory changed during search." if changed else ""),
                 )
                 receipt["id"] = hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest()[:32]
@@ -137,6 +147,7 @@ class MemoryPerception:
                 return dict(
                     search_id=receipt["id"],
                     records=[row.model_dump(mode="json") for row in rows],
+                    retrieval_complete=receipt["retrieval_complete"],
                     retrieval_error=receipt["retrieval_error"],
                 )
 
@@ -246,7 +257,12 @@ class MemoryPerception:
                         raise ModelRetry(json.dumps({"error": "memory_read_target", "id": draft.target_id, "required_tool": "search_memory"}))
                     if draft.scope == "global" and draft.action != "delete":
                         receipt = next((query for query in searches if query["id"] == draft.search_id), None)
-                        if not receipt or receipt["scope"] != "global" or receipt["retrieval_error"]:
+                        if (
+                            not receipt
+                            or receipt["scope"] != "global"
+                            or draft.action == "create"
+                            and (not receipt["retrieval_complete"] or receipt["retrieval_error"])
+                        ):
                             raise ModelRetry(json.dumps({"error": "memory_l_two_search", "required_tool": "search_memory", "scope": "global"}))
                         if draft.action == "create" and draft.subject.strip() and any(
                             row.scope == "global" and row.state == "active"
@@ -366,6 +382,7 @@ class MemoryJob(BaseModel):
     sources: dict = Field(default_factory=dict)
     reference_ids: list[str] = Field(default_factory=list)
     bases: dict[str, MemoryRecord] = Field(default_factory=dict)
+    base_versions: dict[str, int] = Field(default_factory=dict)
     model_snapshot: dict = Field(default_factory=dict)
     perception_config: dict = Field(default_factory=dict)
     prompt_snapshot: str = ""
@@ -379,6 +396,22 @@ class MemoryJob(BaseModel):
     error: str = ""
     failures: list[dict] = Field(default_factory=list)
     blocked_recipe: str = ""
+
+    def stored_projection(self, store):
+        """Return current job-owned IDs and a formal-truth projection plan."""
+        current = [store.get(identity) for identity in self.records]
+        records = [row.id for row in current
+                   if row.last_change_id.startswith(self.id + ":")]
+        drafts = {
+            draft.target_id or hashlib.sha256(f"{self.id}:{index}".encode()).hexdigest()[:32]: draft
+            for index, draft in enumerate(self.result.records)
+        }
+        plans = [
+            (record, self.bases.get(record.id), drafts[record.id].core_old_text)
+            if record.id in records else (record, None, "")
+            for record in store.all("global", active_only=False)
+        ]
+        return records, plans
 
 
 def target_for_job(job, targets):
@@ -484,6 +517,11 @@ async def produce_job(service, job):
             messages, role="perception", invocation=job.id
         ),
     )
+    job.base_versions = {
+        draft.target_id or hashlib.sha256(f"{job.id}:{index}".encode()).hexdigest()[:32]:
+        job.bases[draft.target_id].version if draft.target_id in job.bases else 0
+        for index, draft in enumerate(result.records)
+    }
     if job.request is not None and not result.request_authorized:
         job.result, job.done = result, True
         service._save_job(job)

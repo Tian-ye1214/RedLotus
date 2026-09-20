@@ -1,27 +1,33 @@
-"""RAG embedding, native LanceDB and project-scoped recall."""
+"""Memory retrieval responsibilities."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import os
-from pathlib import Path
-from redlotus.core import config as logger, config as app_config
-from redlotus.core.config import (
-    user_data_dir,
-    get_env,
-    settings,
-    get_client,
-    openai_base_url,
-)
-from typing import Any
-import httpx
-from datetime import timedelta
+import re
 from copy import deepcopy
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+
+import httpx
 import lancedb
 import pyarrow as pa
 from filelock import AsyncFileLock
 from lancedb.index import IvfPq
-import json
+from pydantic_ai import ToolReturn
+
+import redlotus.runtime.config as _runtime_config
+import redlotus.runtime.files as _runtime_files
+import redlotus.runtime.resources as _runtime_resources
+from redlotus.documents.references import ReferenceStore
+from redlotus.runtime.config import get_env, settings
+from redlotus.runtime.files import user_data_dir
+from redlotus.runtime.resources import get_client, openai_base_url
+
+MEMORY_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 def resolve_lancedb_dir(configured_path: str, *, table_name: str = "") -> str:
@@ -35,36 +41,10 @@ def resolve_lancedb_dir(configured_path: str, *, table_name: str = "") -> str:
     return str(p)
 
 
-def missing_rag_settings(
-    *,
-    use_rerank: bool = False,
-    configuration: dict | None = None,
-    api_missing: tuple[str, ...] | None = None,
-) -> tuple[str, ...]:
-    """Return incomplete optional-RAG fields without exposing their values."""
-    configuration = settings() if configuration is None else configuration
-    models = configuration.get("RAG_models", {})
-    models = models if isinstance(models, dict) else {}
-    missing = list(
-        api_missing
-        if api_missing is not None
-        else (
-            name
-            for name in ("SILICONFLOW_BASE", "SILICONFLOW_KEY")
-            if not str(configuration.get(name, "") or "").strip()
-        )
-    )
-    required = [("RAG_models.embedding", models.get("embedding", ""))]
-    if use_rerank:
-        required.append(("RAG_models.reranker", models.get("reranker", "")))
-    missing.extend(name for name, value in required if not str(value or "").strip())
-    return tuple(dict.fromkeys(missing))
-
-
 def _require_rag_model(role: str) -> str:
     name = settings()["RAG_models"][role].strip()
     if not name:
-        raise app_config.ConfigError(f"缺少配置 RAG_models.{role}；检查来源: {app_config.config_source_summary()}")
+        raise _runtime_config.ConfigError(f"缺少配置 RAG_models.{role}；检查来源: {_runtime_files.config_source_summary()}")
     return name
 
 
@@ -80,9 +60,9 @@ def _get_shared_client() -> httpx.AsyncClient:
 
 
 def _require_rag_api() -> None:
-    missing = app_config.missing_rag_api_keys()
+    missing = _runtime_config.missing_rag_api_keys()
     if missing:
-        raise app_config.ConfigError("缺少配置 " + ", ".join(missing) + "；检查来源: " + app_config.config_source_summary())
+        raise _runtime_config.ConfigError("缺少配置 " + ", ".join(missing) + "；检查来源: " + _runtime_files.config_source_summary())
 
 
 async def _rag_api_post(endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -108,7 +88,7 @@ async def embed_texts(
     _require_rag_api()
     if isinstance(texts, str):
         texts = [texts]
-    logger.debug("RAG embed: batch_size=%d", len(texts))
+    _runtime_resources.debug("RAG embed: batch_size=%d", len(texts))
     model = model or _require_rag_model("embedding")
     batch_size = int(settings()["rag_service"]["embedding_batch_size"])
     vectors: list[list[float]] = []
@@ -133,7 +113,7 @@ async def rerank_documents(
     _require_rag_api()
     if not documents:
         return []
-    logger.debug("RAG rerank: n_docs=%d, top_n=%s", len(documents), top_n)
+    _runtime_resources.debug("RAG rerank: n_docs=%d, top_n=%s", len(documents), top_n)
     model = _require_rag_model("reranker")
     body: dict[str, Any] = {
         "model": model,
@@ -256,7 +236,7 @@ class EmbedDataBase:
         table = await self._table()
         if table is not None:
             await table.delete(where)
-            logger.debug(
+            _runtime_resources.debug(
                 "RAG DB: delete_where table=%s where=%s", self.table_name, where
             )
 
@@ -389,7 +369,7 @@ class RAG:
         except Exception as exc:
             # Exact vector search remains available without an acceleration index.
             self.last_error = f"Index acceleration unavailable: {exc}"
-            logger.warning(self.last_error)
+            _runtime_resources.warning(self.last_error)
         return count
 
     async def prepare_records(self, records: list[dict]) -> list[dict]:
@@ -489,7 +469,7 @@ class RAG:
                 ]
             except Exception as exc:
                 self.last_error = f"Rerank unavailable; using vector ranking: {exc}"
-                logger.warning(self.last_error)
+                _runtime_resources.warning(self.last_error)
         # Chunk hits reference one complete episode; return it only once.
         unique = {}
         for row in candidates:
@@ -515,3 +495,104 @@ class RAG:
 
     async def close(self) -> None:
         await self._db.close()
+
+
+class MemoryReader:
+    """Read-only memory tools and owner authorization, shared by CLI and Agents."""
+
+    def __init__(self, store, long_term, references, owner_memory_allowed):
+        self.store, self.long_term, self.references = store, long_term, references
+        self.owner_memory_allowed = owner_memory_allowed
+
+    def _search_result(self, name, status, rows=None, **extra):
+        rows = status if rows is None else rows
+        return json.dumps({
+            **extra,
+            "retrieval_complete": status.retrieval_complete,
+            "retrieval_error": status.retrieval_error,
+            name: [row.model_dump(mode="json") for row in rows],
+        }, ensure_ascii=False)
+
+    async def search_memory(self, query: str = "", scope: str | None = None,
+                            id: str | None = None, include_references: bool = False):
+        """Search permitted memories or retrieve one complete record by ID.
+
+        Project scope contains L1 memories of the current project. Global scope contains
+        L2 memories available across the owner's projects. Personal memories are not
+        available to unauthenticated channels.
+
+        Args:
+            query: The complete semantic search query; unused when id is supplied.
+            scope: project for L1, global for L2, or omitted to search both permitted scopes.
+            id: A known record ID to retrieve instead of performing a search.
+            include_references: Include original referenced content when retrieving by ID.
+
+        Returns:
+            Matching records or the requested full record, with retrieval errors reported explicitly."""
+        if not self.owner_memory_allowed:
+            return "Error: Personal memory unavailable."
+        if scope not in (None, "project", "global"):
+            return "Error: scope must be project (L1) or global (L2)."
+        if id is not None:
+            return await self.read_memory(id, include_references=include_references, scope=scope)
+        return self._search_result("memories", await self.store.search(query, scope))
+
+    async def read_memory(self, id: str, include_references: bool = False, *, scope=None):
+        """Read a permitted complete memory; optionally include original referenced media."""
+        if not self.owner_memory_allowed:
+            return "Error: Personal memory unavailable."
+        if not MEMORY_ID_PATTERN.fullmatch(id):
+            return "Error: Invalid memory id."
+        try:
+            record = self.store.get(id)
+        except KeyError:
+            return "Error: Memory not found or unavailable."
+        if scope is not None and record.scope != scope:
+            return "Error: Memory not found in the selected scope."
+        if record.state != "active":
+            return json.dumps(dict(id=record.id, state=record.state))
+        if not include_references:
+            return record.model_dump_json()
+        content, errors = [], []
+        for key in record.reference_ids:
+            try:
+                source = record.reference_sources.get(key)
+                store = (ReferenceStore(self.references.workspace, root=Path(source).parent.parent)
+                         if source else self.references)
+                reference = await store.parse(await asyncio.to_thread(store.load, key))
+                content.extend(await asyncio.to_thread(reference.to_prompt))
+            except (OSError, ValueError) as exc:
+                errors.append(dict(id=key, error=str(exc)))
+        value = {**record.model_dump(mode="json"), "reference_errors": errors}
+        return ToolReturn(return_value=json.dumps(value, ensure_ascii=False), content=content)
+
+    async def search_episodes(self, query: str) -> str:
+        """Search task episodes belonging only to the current project."""
+        if not self.owner_memory_allowed:
+            return "Error: Personal memory unavailable."
+        result = await self.store.search(query, "project")
+        rows = [row for row in result if row.kind == "episode"]
+        return self._search_result(
+            "episodes", result, rows,
+            project_id=self.store.workspace.project_id,
+        )
+
+    async def read_episode(self, id: str) -> str:
+        """Read one current-project episode with its original evidence sources."""
+        if not self.owner_memory_allowed:
+            return "Error: Personal memory unavailable."
+        if not MEMORY_ID_PATTERN.fullmatch(id):
+            return "Error: Invalid episode id."
+        try:
+            row = self.store.get(id)
+        except KeyError:
+            row = None
+        if not row or row.scope != "project" or row.kind != "episode" or row.state != "active":
+            return "Error: Episode not found in this project."
+        return row.model_dump_json()
+
+    async def long_term_snapshot(self):
+        if not self.owner_memory_allowed:
+            return {}
+        return {**await self.long_term.snapshot(),
+                "global_records": await self.store.snapshot("global")}

@@ -1,37 +1,32 @@
-"""Common file, command, web, document and media tool implementations."""
+"""Tools base tools responsibilities."""
 
 from __future__ import annotations
 
 import asyncio
-import requests
-import time
 import inspect
+import mimetypes
+import platform as _platform
 import re
+import shlex
 import subprocess
 import threading
-import mimetypes
-import shlex
-import platform as _platform
-from redlotus.core import config as logger
-from redlotus.core.config import (
-    get_env,
-    get_agent_run_policy,
-    runtime_dir,
-    user_skills_dir,
-)
+import time
 from pathlib import Path
+
+import requests
 from ddgs import DDGS
 from pydantic_ai import BinaryContent, ToolReturn
+
+import redlotus.runtime.resources as _runtime_resources
+from redlotus.documents.references import ReferenceStore
+from redlotus.documents.review import PendingReviewStore, compute_line_diff, diff_stats, format_diff_text
+from redlotus.execution.commands import describe_execution_environment
+from redlotus.execution.process import run_subprocess
+from redlotus.runtime.config import get_agent_run_policy, get_env
+from redlotus.runtime.context import EventEmitter, WorkspaceContext, bind_to_loop, current_workspace
+from redlotus.runtime.files import runtime_dir, user_skills_dir
+from redlotus.tools.browser import PlaywrightBrowserSession
 from redlotus.tools.registry import SkillsManager, resolve_readable_path
-from redlotus.core.agents import (
-    WorkspaceContext,
-    bind_to_loop,
-)
-from redlotus.core.session import current_workspace
-from redlotus.tools.execution import describe_execution_environment, run_subprocess
-from redlotus.tools.references import PlaywrightBrowserSession, ReferenceStore
-from redlotus.core.presentation import show_file_diff
-from redlotus.tools.interaction import PendingReviewStore
 
 
 async def generate_image_from_flux(prompt: str, width: int = 1024, height: int = 1024, max_wait_time: int = 300):
@@ -59,7 +54,7 @@ async def generate_image_from_flux(prompt: str, width: int = 1024, height: int =
         return "Error: BFL_API_KEY environment variable is not set. Please set it before using image generation."
 
     try:
-        logger.info(f"正在提交图像生成请求: {prompt[:50]}...")
+        _runtime_resources.info(f"正在提交图像生成请求: {prompt[:50]}...")
         response = await asyncio.to_thread(
             requests.post,
             bfl_base_url,
@@ -84,8 +79,8 @@ async def generate_image_from_flux(prompt: str, width: int = 1024, height: int =
         if not polling_url:
             return f"Error: No polling_url received from API. Response: {response_data}"
 
-        logger.info(f"请求已提交，Request ID: {request_id}")
-        logger.info("正在等待图像生成完成...")
+        _runtime_resources.info(f"请求已提交，Request ID: {request_id}")
+        _runtime_resources.info("正在等待图像生成完成...")
 
         start_time = time.time()
         poll_count = 0
@@ -97,7 +92,7 @@ async def generate_image_from_flux(prompt: str, width: int = 1024, height: int =
 
             poll_count += 1
             if poll_count % 10 == 0:
-                logger.info(f"仍在等待中... (已等待 {elapsed_time:.1f} 秒)")
+                _runtime_resources.info(f"仍在等待中... (已等待 {elapsed_time:.1f} 秒)")
 
             result_response = await asyncio.to_thread(
                 requests.get,
@@ -116,8 +111,8 @@ async def generate_image_from_flux(prompt: str, width: int = 1024, height: int =
             if status == "Ready":
                 image_url = result.get("result", {}).get("sample")
                 if image_url:
-                    logger.info("图像生成成功！")
-                    logger.info(f"图像URL: {image_url}")
+                    _runtime_resources.info("图像生成成功！")
+                    _runtime_resources.info(f"图像URL: {image_url}")
                     img_response = await asyncio.to_thread(requests.get, image_url, timeout=30)
                     img_response.raise_for_status()
                     image_bytes = img_response.content
@@ -129,16 +124,16 @@ async def generate_image_from_flux(prompt: str, width: int = 1024, height: int =
 
             elif status == "Failed":
                 error_msg = result.get("error", "Unknown error")
-                logger.error(f"图像生成失败: {error_msg}")
+                _runtime_resources.error(f"图像生成失败: {error_msg}")
                 return f"Error: Image generation failed - {error_msg}"
 
             await asyncio.sleep(0.5)
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"API请求错误: {e}")
+        _runtime_resources.error(f"API请求错误: {e}")
         return f"Error: API request failed - {e}"
     except Exception as e:
-        logger.error(f"图像生成异常: {e}")
+        _runtime_resources.error(f"图像生成异常: {e}")
         return f"Error: Image generation exception - {type(e).__name__}: {e}"
 
 
@@ -148,7 +143,9 @@ class BasicToolkit:
         skills_manager: SkillsManager,
         *,
         workspace: WorkspaceContext | None = None,
+        events=None,
     ):
+        self.events = events or EventEmitter()
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
         if skills_manager is not None:
             skills_manager.workspace = self.workspace
@@ -208,6 +205,7 @@ class BasicToolkit:
         child = BasicToolkit(
             SkillsManager(workspace=self.workspace),
             workspace=self.workspace,
+            events=self.events,
         )
         child._file_lock = self._file_lock
         child._review_store = self._review_store
@@ -235,14 +233,14 @@ class BasicToolkit:
 
         task_dir = self._WORK_DATABASE_ROOT / safe_name
         self._artifact_dir = task_dir
-        logger.info(f"📁 任务工作目录已设置: {task_dir}")
+        _runtime_resources.info(f"📁 任务工作目录已设置: {task_dir}")
 
         return task_dir
 
     def reset_task_directory(self):
         self._base_dir = self.workspace.root
         self._artifact_dir = self._WORK_DATABASE_ROOT
-        logger.info(f"📁 工作目录已重置为: {self._base_dir}")
+        _runtime_resources.info(f"📁 工作目录已重置为: {self._base_dir}")
 
     def _resolve_path_candidate(self, name: str) -> Path:
         return resolve_readable_path(name, work_base=self._base_dir)
@@ -311,13 +309,13 @@ class BasicToolkit:
                 result = await asyncio.to_thread(self._ask_user_handler, question)
             return result if result is not None else "(User did not reply)"
 
-        logger.info("=" * 50)
-        logger.info("🤔 Agent 需要您的帮助")
-        logger.info("=" * 50)
-        logger.info(f"问题: {question}")
+        _runtime_resources.info("=" * 50)
+        _runtime_resources.info("🤔 Agent 需要您的帮助")
+        _runtime_resources.info("=" * 50)
+        _runtime_resources.info(f"问题: {question}")
 
         user_response = (await asyncio.to_thread(input, "📝 您的回复: ")).strip()
-        logger.info(f"用户回答: {user_response}")
+        _runtime_resources.info(f"用户回答: {user_response}")
 
         return user_response
 
@@ -333,7 +331,7 @@ class BasicToolkit:
         Returns:
             The registered reference identity, parsed text and original media, or an error.
         """
-        from redlotus.core.gateway import ModelInputPolicy
+        from redlotus.models.providers import ModelInputPolicy
 
         try:
             reference = await self._references.import_file(
@@ -399,7 +397,11 @@ class BasicToolkit:
         try:
             path = self._safe_path(name)
             old, content = self._review_store.write(path, name, update)
-            added, deleted, modified = show_file_diff(old, content, path=name)
+            lines = compute_line_diff(old, content)
+            added, deleted, modified = stats = diff_stats(lines)
+            if any(stats):
+                self.events.emit("show_file_diff", lines, path=name, stats=stats)
+                _runtime_resources.info_file_only("[diff] %s\n%s", name, format_diff_text(lines, path=name, stats=stats))
             return f"Saved '{name}' ({len(content)} characters; +{added} -{deleted} ~{modified})"
         except (OSError, ValueError) as exc:
             return f"Error updating '{name}': {exc}"
@@ -484,7 +486,7 @@ class BasicToolkit:
                 )
 
             if not results:
-                logger.warning("⚠️ 没有找到相关搜索结果")
+                _runtime_resources.warning("⚠️ 没有找到相关搜索结果")
                 return "No relevant search results found."
 
             output = []
@@ -497,7 +499,7 @@ class BasicToolkit:
             result_text = "\n".join(output)
             return result_text
         except Exception as e:
-            logger.error(f"❌ 搜索出错: {e}")
+            _runtime_resources.error(f"❌ 搜索出错: {e}")
             return f"Error during search: {e}"
 
     async def run_command(self, command: str, timeout: int = 60) -> str:

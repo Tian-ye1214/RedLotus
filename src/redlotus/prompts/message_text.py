@@ -1,7 +1,8 @@
+"""Prompts message text responsibilities."""
+
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from pydantic_ai.messages import (
@@ -11,6 +12,7 @@ from pydantic_ai.messages import (
     RetryPromptPart,
     TextContent,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     UserPromptPart,
 )
@@ -45,8 +47,9 @@ def pydantic_messages_to_text(messages: list) -> str:
                     if index > 0 and text.startswith(("[REFERENCE FILE ", "【引用文件 ")):
                         label = "REFERENCE FILE"
                     lines.append(f"[{label}]: {text}")
-            elif isinstance(part, TextPart):
-                lines.append(f"[ASSISTANT]: {part.content}")
+            elif isinstance(part, (TextPart, ThinkingPart)) and part.content:
+                label = "ASSISTANT THINKING" if isinstance(part, ThinkingPart) else "ASSISTANT"
+                lines.append(f"[{label}]: {part.content}")
             elif isinstance(part, ToolCallPart):
                 args = (
                     part.args

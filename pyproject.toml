@@ -51,7 +51,7 @@ all = [
 ]
 
 [project.scripts]
-redlotus = "redlotus.core.config:main"
+redlotus = "redlotus.terminal.console:main"
 
 [tool.setuptools]
 include-package-data = false
@@ -60,6 +60,7 @@ include-package-data = false
 redlotus = [
     "prompts/*.md",
     "tools/skills/**/*",
+    "tools/skills/**/.clawhub/*.json",
     "api/config.yaml.example",
 ]
 

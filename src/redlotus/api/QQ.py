@@ -1,20 +1,23 @@
+"""Api QQ responsibilities."""
+
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ncatbot.core import BaseMessageEvent, MetaEvent
 
 import inspect
 import os
 import re
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from redlotus.core import config as logger
-from redlotus.core.config import get_env, user_config_dir
-from redlotus.tools.interaction import UserMessage
 from redlotus.api.base import BotBase
 from redlotus.api.qq_media_helpers import extract_media
-
-if TYPE_CHECKING:
-    from ncatbot.core import BaseMessageEvent, MetaEvent
+from redlotus.documents.interaction import UserMessage
+from redlotus.runtime.config import get_env
+from redlotus.runtime.files import user_config_dir
 
 
 class QQBot(BotBase):
@@ -105,15 +108,20 @@ class QQBot(BotBase):
             return
         session_id = self._session_id(event)
         user_text = self.clean_text(raw_text)
-        attachments = await self._extract_attachments(event)
-        await self.dispatch_user_message(
-            session_id,
-            UserMessage(
+        async def prepare():
+            attachments = await self._extract_attachments(event)
+            return UserMessage(
                 text=user_text,
                 attachments=attachments,
                 original_text=self.clean_text(raw_text),
-            ),
+            )
+
+        await self.dispatch_event(
+            session_id,
+            user_text,
+            prepare,
             partial(self._reply_event, event),
+            retry_context=event,
         )
 
     def _register_handlers(self) -> None:
