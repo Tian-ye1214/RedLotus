@@ -17,6 +17,7 @@ from typing import Any
 
 from redlotus.core.gateway import AgentRunner, create_agent, create_function_toolset
 from redlotus.runtime import logging as logger
+from redlotus.runtime.config import settings
 from redlotus.runtime.resources import workspace_context
 from redlotus.sessions.context import (
     TRACE_STORE,
@@ -45,18 +46,6 @@ class AgentInvocationState(Enum):
     CANCELLED = "cancelled"
 
 
-
-
-def _invocation_history_limit() -> int:
-    from redlotus.runtime.config import settings
-
-    lc = settings().get("lifecycle")
-    if not isinstance(lc, dict):
-        raise KeyError("config.json 缺少 lifecycle 配置块")
-    n = lc.get("invocation_history_per_session")
-    if not isinstance(n, int) or n < 1:
-        raise ValueError("lifecycle.invocation_history_per_session 须为正整数")
-    return n
 
 
 @dataclass
@@ -230,7 +219,7 @@ class AgentRegistry:
             _invocation_stack.reset(token)
             self._invocations.pop(invocation.invocation_id, None)
             self._history.setdefault(
-                agent.session_key, deque(maxlen=_invocation_history_limit())
+                agent.session_key, deque(maxlen=settings()["lifecycle"]["invocation_history_per_session"])
             ).append(invocation)
             if agent.current_invocation_id == invocation.invocation_id:
                 agent.state, agent.current_invocation_id = AgentInstanceState.IDLE, None
@@ -355,8 +344,6 @@ class SubagentFactory:
 
     def __init__(self, max_concurrent: int | None = None) -> None:
         if max_concurrent is None:
-            from redlotus.runtime.config import settings
-
             max_concurrent = settings()["agent_run_policy"]["max_concurrent_threads_per_session"]
         if max_concurrent < 1:
             raise ValueError("Session thread limit must be positive")

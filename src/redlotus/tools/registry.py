@@ -21,7 +21,6 @@ from typing import Any, Callable
 import yaml
 
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import AgentRunPolicy
 from redlotus.runtime.resources import (
     skills_dir,
     user_skills_dir,
@@ -550,7 +549,7 @@ class SkillsManager:
         return f"Skills 已刷新。当前共有 {len(self.skills)} 个 Skills 可用。"
 
     async def execute_skill_script(
-        self, skill_name: str, script_name: str, args: str = "", timeout: float = 300
+        self, skill_name: str, script_name: str, args: str = "", timeout: float | None = None
     ) -> str:
         """Run a Skill script through the same project and process checks as command tools.
 
@@ -558,7 +557,7 @@ class SkillsManager:
             skill_name: The exact registered Skill name.
             script_name: A Python, shell, batch or PowerShell script relative to the Skill directory.
             args: Arguments for the script; quote arguments that contain spaces.
-            timeout: Maximum execution time in seconds.
+            timeout: Optional seconds, capped by the configured command limit; omitted uses that limit.
 
         Returns:
             The actual exit code and output, or a path, permission or execution error."""
@@ -585,8 +584,8 @@ class SkillsManager:
                 workspace=self.workspace,
             )
             return result.to_text()
-        except subprocess.TimeoutExpired:
-            return f"Error: Skill script timed out ({timeout} seconds)"
+        except subprocess.TimeoutExpired as exc:
+            return f"Error: Skill script timed out ({exc.timeout} seconds)"
         except (KeyError, OSError, ValueError) as exc:
             return f"Error executing Skill script: {exc}"
 
@@ -630,14 +629,12 @@ def set_user_notify_callback(fn: Callable[[str], None] | None) -> None:
     _notify_callback.set(fn)
 
 
-def wrap_tools_for_user_notify(
-    tools: list[Any], *, policy: AgentRunPolicy | None = None
-) -> list[Any]:
+def wrap_tools_for_user_notify(tools: list[Any]) -> list[Any]:
     """工厂：给每个可调用工具套壳——调用时发 🔧 通知 + 记一条 TRACE 事件。"""
     if not tools:
         return tools
     return [
-        _wrap(t, policy) if callable(t) and not inspect.isclass(t) else t for t in tools
+        _wrap(t) if callable(t) and not inspect.isclass(t) else t for t in tools
     ]
 
 
@@ -691,7 +688,6 @@ def _record(
 
 def _run_wrapped(
     fn: Callable[..., Any],
-    policy: AgentRunPolicy | None,
     name: str,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
@@ -704,14 +700,10 @@ def _run_wrapped(
         _record(name, t0, False, error=e)
         raise
     _record(name, t0, tool_result_succeeded(result), result=result)
-    return _model_result(result, policy)
-
-
-def _model_result(result: Any, policy: AgentRunPolicy | None) -> Any:
     return result
 
 
-def _wrap(fn: Callable[..., Any], policy: AgentRunPolicy | None) -> Callable[..., Any]:
+def _wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
     """给单个工具套壳：调用前发通知，调用后记事件；区分协程与普通函数。"""
     if getattr(fn, "_notify_tool_wrapped", False):
         return fn
@@ -729,12 +721,12 @@ def _wrap(fn: Callable[..., Any], policy: AgentRunPolicy | None) -> Callable[...
                 _record(name, t0, False, error=e)
                 raise
             _record(name, t0, tool_result_succeeded(result), result=result)
-            return _model_result(result, policy)
+            return result
     else:
 
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return _run_wrapped(fn, policy, name, args, kwargs)
+            return _run_wrapped(fn, name, args, kwargs)
 
     wrapper._notify_tool_wrapped = True  # type: ignore[attr-defined]
     return wrapper

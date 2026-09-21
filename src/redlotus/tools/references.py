@@ -162,7 +162,7 @@ class OfficeConverter:
                 str(working),
             ]
             result = await run_subprocess(
-                args, shell=False, cwd=str(profile_root), timeout=120
+                args, shell=False, cwd=str(profile_root)
             )
             output = profile_root / (source.stem + "." + target_format.split(":")[0])
             if result.returncode != 0 or not output.is_file():
@@ -570,8 +570,8 @@ class ReferenceStore:
         if urlsplit(url).scheme not in ("https", "http"):
             raise ValueError("Remote references require HTTP(S)")
         client = get_client(
-            "reference_download",
-            lambda: httpx.AsyncClient(timeout=60, follow_redirects=True),
+            f"reference_download:{policy.reference_download_timeout_seconds}",
+            lambda: httpx.AsyncClient(timeout=policy.reference_download_timeout_seconds, follow_redirects=True),
         )
         async with client.stream("GET", url) as response:
             response.raise_for_status()

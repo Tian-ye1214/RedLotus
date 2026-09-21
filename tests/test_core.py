@@ -259,7 +259,7 @@ async def test_response_accounting_survives_validation_retry_and_cancellation(tm
 
     model = FunctionModel(respond)
     target = SimpleNamespace(name="fixture", protocol="fixture", context={},
-                             limits={"max_files": 1, "max_file_bytes": 1000})
+                             limits={"max_files": 1, "max_file_bytes": 1000, "reference_download_timeout_seconds": 2})
     agent = Agent(model, capabilities=[RequestPolicy("compressor", target, model, usage_category="auxiliary")])
 
     @agent.output_validator
@@ -296,7 +296,7 @@ async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp
         return messages
     monkeypatch.setattr(history, "compact_request_messages", compact)
     target = SimpleNamespace(name="shared-worker-model", protocol="fixture", context={"auto_compress_ratio": .9},
-                             limits={"max_files": 1, "max_file_bytes": 1000})
+                             limits={"max_files": 1, "max_file_bytes": 1000, "reference_download_timeout_seconds": 2})
     policy = RequestPolicy(role, target, SimpleNamespace(settings={}), usage_category=category)
     request = SimpleNamespace(messages=[ModelRequest([])], model_request_parameters=SimpleNamespace(
         function_tools=[], output_tools=[], instruction_parts=[]))
@@ -682,7 +682,7 @@ async def test_native_sdk_restoration_does_not_duplicate_deferred_catalog():
         return ModelResponse([TextPart("fixture")])
 
     model = FunctionModel(respond)
-    target = SimpleNamespace(name="fixture", protocol="fixture", context={}, limits={"max_files": 1, "max_file_bytes": 1000})
+    target = SimpleNamespace(name="fixture", protocol="fixture", context={}, limits={"max_files": 1, "max_file_bytes": 1000, "reference_download_timeout_seconds": 2})
 
     def agent(instructions):
         return Agent(model, instructions=instructions, capabilities=[

@@ -89,6 +89,7 @@ class InputLimitError(ValueError):
 class ModelInputPolicy:
     max_files: int
     max_file_bytes: int
+    reference_download_timeout_seconds: float
     max_request_bytes: int | None = None
 
     @classmethod
@@ -100,6 +101,7 @@ class ModelInputPolicy:
         return cls(
             max_files=int(values["max_files"]),
             max_file_bytes=int(values["max_file_bytes"]),
+            reference_download_timeout_seconds=values["reference_download_timeout_seconds"],
             max_request_bytes=values.get("max_request_bytes"),
         )
 

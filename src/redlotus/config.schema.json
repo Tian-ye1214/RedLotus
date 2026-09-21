@@ -249,7 +249,12 @@
       "description": "全局和身份输入限制",
       "properties": {
         "defaults": {
-          "$ref": "#/$defs/input_limits"
+          "$ref": "#/$defs/input_limits",
+          "required": [
+            "max_files",
+            "max_file_bytes",
+            "reference_download_timeout_seconds"
+          ]
         }
       },
       "required": [
@@ -276,12 +281,18 @@
           "type": "integer",
           "description": "每窗引用前窗的重叠回合数",
           "minimum": 0
+        },
+        "quiescence_wait_timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "清空记忆前等待当前生产空闲的秒数；超时只取消清空，不取消生产"
         }
       },
       "required": [
         "model_role",
         "window_turns",
-        "overlap_turns"
+        "overlap_turns",
+        "quiescence_wait_timeout_seconds"
       ]
     },
     "short_term_memory": {
@@ -513,6 +524,26 @@
         "session_gc_interval_seconds",
         "question_timeout_seconds"
       ]
+    },
+    "browser": {
+      "type": "object",
+      "description": "浏览器操作等待策略",
+      "properties": {
+        "action_timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "浏览器读取、点击、填写和选择器等待的默认秒数"
+        },
+        "navigation_timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "浏览器页面导航的默认等待秒数"
+        }
+      },
+      "required": [
+        "action_timeout_seconds",
+        "navigation_timeout_seconds"
+      ]
     }
   },
   "required": [
@@ -527,7 +558,8 @@
     "short_term_memory",
     "long_term_memory",
     "model_metadata",
-    "rag_service"
+    "rag_service",
+    "browser"
   ],
   "$defs": {
     "model": {
@@ -538,7 +570,10 @@
       "description": "模型对象或已命名的预设",
       "properties": {
         "name": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "SDK 的 服务:模型 标识；输入 =已配置角色 复用模型名，连接与策略保持当前角色配置"
         },
         "preset": {
@@ -648,6 +683,11 @@
           ],
           "description": "编码后请求最大字节数，null 表示未声明",
           "minimum": 1
+        },
+        "reference_download_timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "远程引用下载的 HTTP 超时秒数，可由网关和角色覆盖"
         }
       },
       "required": [

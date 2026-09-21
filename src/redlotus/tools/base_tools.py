@@ -21,7 +21,7 @@ from ddgs import DDGS
 from pydantic_ai import BinaryContent, ToolReturn
 
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import get_agent_run_policy, get_env
+from redlotus.runtime.config import get_env
 from redlotus.runtime.resources import (
     WorkspaceContext,
     atomic_write_text,
@@ -504,7 +504,7 @@ class BasicToolkit:
             logger.error(f"❌ 搜索出错: {e}")
             return f"Error during search: {e}"
 
-    async def run_command(self, command: str, timeout: int = 60) -> str:
+    async def run_command(self, command: str, timeout: int | None = None) -> str:
         """
         Execute a Shell/terminal command.
         Python uses the interpreter running this application, or an external PATH
@@ -518,7 +518,7 @@ class BasicToolkit:
 
         Args:
             command: Command to execute
-            timeout: Timeout in seconds, defaults to 60
+            timeout: Optional seconds, capped by the configured command limit; omitted uses that limit.
         """
         is_safe, reason = self._is_command_safe(command)
         if not is_safe:
@@ -540,8 +540,6 @@ class BasicToolkit:
 
         try:
             async with self._command_lock:
-                policy = get_agent_run_policy()
-                timeout = policy.clamp_command_timeout(timeout)
                 use_shell = any(
                     c in command for c in ["|", ">", "<", "&&", "||", ";", "*", "?"]
                 )
@@ -563,8 +561,8 @@ class BasicToolkit:
                     workspace=self.workspace,
                 )
                 return result.to_text()
-        except subprocess.TimeoutExpired:
-            return f"Error: Command execution timed out ({timeout} seconds)"
+        except subprocess.TimeoutExpired as exc:
+            return f"Error: Command execution timed out ({exc.timeout} seconds)"
         except Exception as e:
             return f"Error executing command: {e}"
 

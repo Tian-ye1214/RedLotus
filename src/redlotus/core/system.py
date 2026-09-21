@@ -20,7 +20,7 @@ from redlotus.core.history import (
 from redlotus.core.tasks import TaskManager, TaskStatus, run_goal_loop
 from redlotus.memory.service import MemoryService
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import get_agent_usage_limits
+from redlotus.runtime.config import get_agent_usage_limits, settings
 from redlotus.runtime.resources import (
     WorkspaceContext,
     current_workspace,
@@ -344,7 +344,8 @@ class AgentSystem:
             self._handle_turn_error(exc)
 
 
-    async def wait_for_memory_quiescent(self, timeout: float = 15.0) -> bool:
+    async def wait_for_memory_quiescent(self, timeout: float | None = None) -> bool:
+        timeout = settings()["memory_perception"]["quiescence_wait_timeout_seconds"] if timeout is None else timeout
         async def drain():
             if self._current_turn:
                 await asyncio.gather(self._current_turn["task"], return_exceptions=True)

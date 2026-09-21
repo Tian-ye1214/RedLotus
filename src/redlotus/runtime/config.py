@@ -28,8 +28,8 @@ class AgentRunPolicy:
     def from_config(cls, cfg: dict[str, Any]) -> "AgentRunPolicy":
         return cls(**{key: cfg["agent_run_policy"][key] for key in cls.__dataclass_fields__})
 
-    def clamp_command_timeout(self, timeout: int) -> int:
-        return max(1, min(int(timeout), self.max_command_timeout_seconds))
+    def clamp_command_timeout(self, timeout: float | None) -> float:
+        return self.max_command_timeout_seconds if timeout is None else max(1, min(timeout, self.max_command_timeout_seconds))
 
 def _frozen() -> bool:
     return bool(getattr(sys, "frozen", False))

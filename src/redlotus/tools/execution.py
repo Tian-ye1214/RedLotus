@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
 
-from redlotus.runtime.config import get_env
+from redlotus.runtime.config import get_agent_run_policy, get_env, settings
 
 _SEPARATORS = {";", "&", "&&", "|", "||", "\n"}
 _PYTHON_NAMES = {"python", "python.exe", "python3", "python3.exe"}
@@ -107,8 +107,6 @@ def existing_python() -> Path:
         if found and not _same_path(found, Path(sys.executable)):
             return Path(found).resolve()
     if launcher := shutil.which("py"):
-        from redlotus.runtime.config import get_agent_run_policy
-
         result = subprocess.run(
             [launcher, "-3", "-c", "import sys; print(sys.executable)"],
             capture_output=True,
@@ -611,10 +609,11 @@ async def run_subprocess(
     shell: bool,
     cwd: str,
     env: dict | None = None,
-    timeout: float,
+    timeout: float | None = None,
     workspace=None,
 ) -> CommandResult:
     """Run a command with its launch evidence, reclaiming owned processes on cancellation."""
+    timeout = get_agent_run_policy().clamp_command_timeout(timeout)
     await asyncio.to_thread(validate_agent_command, args, cwd=cwd)
     python_required = any(
         _program_name(values[0]) in _PYTHON_NAMES | _PY_LAUNCHER_NAMES | _PIP_NAMES
@@ -709,6 +708,9 @@ def page_action(operation):
         async with self._lock:
             try:
                 await self._start()
+                policy = settings()["browser"]
+                self._page.set_default_timeout(policy["action_timeout_seconds"] * 1000)
+                self._page.set_default_navigation_timeout(policy["navigation_timeout_seconds"] * 1000)
                 return await operation(self, *args, **kwargs)
             except (ImportError, RuntimeError) as exc:
                 return f"Error: Browser unavailable: {exc}"
@@ -744,7 +746,6 @@ class PlaywrightBrowserSession:
             self._page = await self._browser.new_page(
                 viewport={"width": 1280, "height": 720}, locale="zh-CN"
             )
-            self._page.set_default_timeout(30_000)
         except BaseException:
             await self._close()
             raise
@@ -774,7 +775,7 @@ class PlaywrightBrowserSession:
 
         Returns:
             The resulting page URL and title, or a browser error."""
-        await self._page.goto(url, wait_until=wait_until, timeout=60_000)
+        await self._page.goto(url, wait_until=wait_until)
         return f"OK\nURL: {self._page.url}\nTitle: {await self._page.title()}"
 
     @page_action
@@ -839,13 +840,13 @@ class PlaywrightBrowserSession:
 
     @page_action
     async def browser_wait_for_selector(
-        self, selector: str, timeout_ms: int = 30_000
+        self, selector: str, timeout_ms: int | None = None
     ) -> str:
         """Wait for a matching element to become visible in the current page.
 
         Args:
             selector: A Playwright selector for the intended element.
-            timeout_ms: Maximum wait time in milliseconds.
+            timeout_ms: Optional milliseconds; omitted uses the configured browser action timeout.
 
         Returns:
             The visible selector, or a browser error."""

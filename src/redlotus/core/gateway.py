@@ -29,7 +29,7 @@ from pydantic_ai.messages import (
 
 from redlotus.prompts.prompt import load_prompt, with_runtime_context
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import get_agent_run_policy, get_agent_usage_limits
+from redlotus.runtime.config import get_agent_usage_limits
 from redlotus.runtime.network import (
     InputLimitError,
     ModelInputPolicy,
@@ -262,9 +262,7 @@ def create_function_toolset(
 ) -> FunctionToolset:
     from redlotus.tools import registry as tool_telemetry
 
-    wrapped_tools = tool_telemetry.wrap_tools_for_user_notify(
-        list(tools), policy=get_agent_run_policy()
-    )
+    wrapped_tools = tool_telemetry.wrap_tools_for_user_notify(list(tools))
     return FunctionToolset(
         wrapped_tools,
         id=toolset_id,

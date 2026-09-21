@@ -5,6 +5,30 @@ from types import SimpleNamespace
 import pytest
 
 
+async def test_memory_control_wait_uses_config_without_cancelling_production(tmp_path):
+    import asyncio
+    import json
+    from concurrent.futures import Future
+
+    from redlotus.core.system import AgentSystem
+    from redlotus.memory.service import MemoryService
+
+    (tmp_path / "config.json").write_text(json.dumps({
+        "memory_perception": {"quiescence_wait_timeout_seconds": .01},
+    }), encoding="utf-8")
+    pending = Future()
+    memory, system = object.__new__(MemoryService), object.__new__(AgentSystem)
+    memory._background = SimpleNamespace(_future=pending)
+    system._current_turn, system._memory = None, memory
+    try:
+        async with asyncio.timeout(.2):
+            assert not await system.wait_for_memory_quiescent()
+        assert not pending.cancelled()
+    finally:
+        pending.set_result(None)
+        await asyncio.sleep(0)
+
+
 async def test_non_owner_turns_count_without_reading_or_producing_personal_memory(tmp_path):
     import json
 
@@ -167,9 +191,23 @@ async def test_projection_failure_receipt_reports_formal_commit(publication, mon
     p.service._input_source = lambda: ["Remember my tea preference"]
     monkeypatch.setattr(p.service, "_job", lambda job: p.job)
     monkeypatch.setattr(os, "replace", failed_projection)
-    receipt = await p.service.remember("Remember my tea preference")
+    receipt = await p.service.remember("Remember my tea preference", scope="global")
     assert "正式记忆已保存" in receipt and "投影尚未完成" in receipt
     assert "未保存为记忆" not in receipt and p.formal["A"].version == 1
+
+
+async def test_project_only_manual_memory_never_starts_global_production(publication):
+    import json
+
+    from pydantic_ai import Tool
+
+    p = publication
+    result = json.loads(await p.service.remember("Remember this only in the current project", scope="project"))
+    assert result["status"] == "rejected" and not result["records"]
+    assert not p.writes and not p.formal and not p.model_calls
+    assert p.memory.read() == p.original and not p.service.session.pending_jobs()
+    schema = Tool(p.service.remember).function_schema.json_schema
+    assert {"request", "scope"} <= set(schema["required"])
 
 
 @pytest.mark.parametrize("state", ["active", "deleted"])
