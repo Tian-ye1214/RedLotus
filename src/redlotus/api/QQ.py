@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from functools import partial
@@ -130,7 +131,7 @@ class QQBot(BotBase):
         try:
             self._bot_client.run_frontend(**kwargs)
         finally:
-            self.release_all_resources()
+            asyncio.run(self.release_all_resources_async())
 
 
 if __name__ == "__main__":

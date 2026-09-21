@@ -349,9 +349,6 @@ class BotBase:
         await asyncio.gather(*(self._close_session(state) for state in sessions))
         await close_all_clients()
 
-    def release_all_resources(self):
-        asyncio.run(self.release_all_resources_async())
-
     def clean_text(self, raw):
         return re.sub(r"\s+", " ", (raw or "").strip())
 
