@@ -602,7 +602,7 @@ async def child_executor(tmp_path, monkeypatch):
     from redlotus.tools import worker_tools as module
 
     (tmp_path / "config.json").write_text(
-        '{"lifecycle":{"invocation_history_per_session":8},"storage":{"project_dir":".redlotus"}}', encoding="utf-8",
+        '{"lifecycle":{"invocation_history_per_session":8,"trace_history_turns":10},"storage":{"project_dir":".redlotus"}}', encoding="utf-8",
     )
     factory, registry = SubagentFactory(max_concurrent=1), AgentRegistry()
     captured = {}

@@ -166,12 +166,18 @@
           "type": "number",
           "description": "进程树终止和继承管道回收各阶段的最长等待秒数，整体退出仍受 shutdown_grace_seconds 约束",
           "exclusiveMinimum": 0
+        },
+        "trace_history_turns": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "进程内工具轨迹最多保留的回合数，不替代正式会话记录"
         }
       },
       "required": [
         "invocation_history_per_session",
         "shutdown_grace_seconds",
-        "process_termination_timeout_seconds"
+        "process_termination_timeout_seconds",
+        "trace_history_turns"
       ]
     },
     "storage": {
@@ -260,6 +266,11 @@
       "type": "object",
       "description": "全局和身份输入限制",
       "properties": {
+        "max_redirects": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "远程引用和渠道附件最多跟随的 HTTP 重定向次数；0 表示不跟随"
+        },
         "parse_concurrency": {
           "type": "integer",
           "minimum": 1,
@@ -276,7 +287,8 @@
       },
       "required": [
         "defaults",
-        "parse_concurrency"
+        "parse_concurrency",
+        "max_redirects"
       ],
       "additionalProperties": {
         "$ref": "#/$defs/input_limits"
@@ -543,6 +555,29 @@
         "question_timeout_seconds"
       ]
     },
+    "image_generation": {
+      "type": "object",
+      "description": "图像服务传输、轮询和缺省工具参数",
+      "properties": {
+        "width": {"type": "integer", "minimum": 1, "description": "工具未指定时的图像宽度，须符合当前服务模型要求"},
+        "height": {"type": "integer", "minimum": 1, "description": "工具未指定时的图像高度，须符合当前服务模型要求"},
+        "max_wait_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "图像提交、轮询及下载合计的最长等待秒数"},
+        "http_timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "图像服务单次 HTTP 操作的超时秒数"},
+        "poll_interval_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "图像任务未完成时的轮询间隔秒数"},
+        "progress_every_polls": {"type": "integer", "minimum": 1, "description": "每经过多少次轮询显示一次等待进度"}
+      },
+      "required": ["width", "height", "max_wait_seconds", "http_timeout_seconds", "poll_interval_seconds", "progress_every_polls"]
+    },
+    "ui": {
+      "type": "object",
+      "description": "终端展示策略；不裁剪正式会话或审查记录",
+      "properties": {
+        "status_refresh_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "运行状态刷新的间隔秒数"},
+        "panel_refresh_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "用量面板刷新的间隔秒数"},
+        "max_diff_lines": {"type": "integer", "minimum": 1, "description": "彩色 diff 预览最多显示的行数；截断时显示剩余数量"}
+      },
+      "required": ["status_refresh_seconds", "panel_refresh_seconds", "max_diff_lines"]
+    },
     "BROWSER_HEADLESS": {
       "type": ["boolean", "string", "integer"],
       "minimum": 0,
@@ -600,7 +635,9 @@
     "model_metadata",
     "rag_service",
     "browser",
-    "BROWSER_HEADLESS"
+    "BROWSER_HEADLESS",
+    "ui",
+    "image_generation"
   ],
   "$defs": {
     "model": {

@@ -21,6 +21,7 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from redlotus.runtime import logging as logger
+from redlotus.runtime.config import settings
 from redlotus.sessions.context import current_short_agent_id
 from redlotus.ui.cli_commands import WorkspaceSnapshot
 from redlotus.ui.presentation import (
@@ -142,7 +143,7 @@ class RedLotusTui(App[None]):
         self.system.set_ask_user_handler(self._make_ask_user_bridge())
         if self._run_mode == TuiRunMode.REVIEW:
             self.system.toolkit.review_store.activate(self._on_reviews_changed)
-        self.set_interval(0.5, self.refresh_status)
+        self.set_interval(settings()["ui"]["status_refresh_seconds"], self.refresh_status)
         await self._prepare_cli_session()
         controller = self.controller
         controller._active_session_state = self.state
@@ -405,7 +406,7 @@ class RedLotusTui(App[None]):
     def _ensure_panel_timer(self) -> None:
         if self._panel_timer is not None:
             return
-        self._panel_timer = self.set_interval(3.0, self._schedule_panel_refresh)
+        self._panel_timer = self.set_interval(settings()["ui"]["panel_refresh_seconds"], self._schedule_panel_refresh)
 
     def _stop_panel_timer(self) -> None:
         timer = self._panel_timer

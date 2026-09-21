@@ -208,13 +208,14 @@ def test_application_structure_keeps_approved_module_and_effective_line_limits()
     assert len(counts) <= 8 and max(counts.values()) <= 5, dict(counts)
 
 
-async def test_toolset_telemetry_preserves_results_without_execution_policy(monkeypatch):
+async def test_toolset_telemetry_preserves_results_without_execution_policy(tmp_path, monkeypatch):
     from pydantic_ai import ToolReturn
 
     from redlotus.core.gateway import create_function_toolset
     from redlotus.sessions.context import TRACE_STORE, turn_context
     from redlotus.tools import registry
 
+    (tmp_path / "config.json").write_text('{"lifecycle":{"trace_history_turns":10}}')
     result = ToolReturn(return_value="original")
     notices = []
     monkeypatch.setattr(registry.logger, "debug", notices.append)
@@ -239,6 +240,21 @@ async def test_toolset_telemetry_preserves_results_without_execution_policy(monk
     assert [(e["tool_name"], e["success"]) for e in events] == [
         ("sync_tool", True), ("async_tool", True), ("failed_tool", False),
     ]
+
+
+def test_trace_retention_reads_configuration_only_when_recording(tmp_path):
+    import json
+
+    from redlotus.sessions.context import TurnTraceStore
+
+    for limit in (2, 1):
+        trace = TurnTraceStore()  # Import and construction must work before initial setup.
+        (tmp_path / "config.json").write_text(json.dumps({"lifecycle": {"trace_history_turns": limit}}))
+        for number in range(3):
+            trace.record(str(number), "fixture")
+        assert not trace.events_for_turn("0")
+        assert bool(trace.events_for_turn("1")) == (limit == 2)
+        assert trace.events_for_turn("2")[0]["kind"] == "fixture"
 
 
 @pytest.mark.parametrize("requested", [None, 300])
@@ -429,21 +445,135 @@ async def test_reference_download_updates_its_http_timeout_and_keeps_contents(tm
     from redlotus.runtime.resources import WorkspaceContext
     from redlotus.tools.references import ReferenceStore
 
-    (tmp_path / "config.json").write_text(json.dumps({"storage": {"references_dir": "references"}}), encoding="utf-8")
     observed = []
 
     def respond(request):
         observed.append(request.extensions["timeout"]["read"])
+        if request.url.path == "/input.txt":
+            return httpx.Response(302, headers={"location": "/final.txt"})
         return httpx.Response(200, text="unchanged contents")
 
     monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(respond)))
-    store = ReferenceStore(WorkspaceContext.from_path(tmp_path))
     try:
-        for timeout in (2, 7):
+        for timeout, redirects in ((2, 0), (2, 1), (7, 1)):
+            (tmp_path / "config.json").write_text(json.dumps({
+                "storage": {"references_dir": "references"}, "input_limits": {"max_redirects": redirects},
+            }), encoding="utf-8")
+            store = ReferenceStore(WorkspaceContext.from_path(tmp_path))
             policy = ModelInputPolicy(max_files=1, max_file_bytes=1000, reference_download_timeout_seconds=timeout)
-            reference = await store.import_url("https://example.invalid/input.txt", policy=policy)
-            assert reference.parts[0].text == "unchanged contents"
-        assert observed == [2, 7]
+            if not redirects:
+                with pytest.raises(httpx.TooManyRedirects):
+                    await store.import_url("https://example.invalid/input.txt", policy=policy)
+            else:
+                reference = await store.import_url("https://example.invalid/input.txt", policy=policy)
+                assert reference.parts[0].text == "unchanged contents"
+        assert observed == [2, 2, 2, 7, 7]
+    finally:
+        await close_all_clients()
+
+
+@pytest.mark.parametrize("overrides", [{}, {"width": 128, "height": 96, "max_wait_time": 5}])
+async def test_image_generation_shares_configured_http_and_preserves_explicit_arguments(tmp_path, monkeypatch, overrides):
+    import asyncio
+    import json
+    from functools import partial
+
+    import httpx
+    import requests
+    from redlotus.runtime import logging as logger
+    from redlotus.runtime.network import close_all_clients
+    from redlotus.tools.base_tools import generate_image_from_flux
+
+    monkeypatch.setattr(logger, "_configured_dir", tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({
+        "BFL_BASE_URL": "https://fixture.invalid/generate", "BFL_API_KEY": "synthetic-test-key", "input_limits": {"max_redirects": 1},
+        "image_generation": {"width": 64, "height": 32, "max_wait_seconds": 2, "http_timeout_seconds": 3,
+                             "poll_interval_seconds": .01, "progress_every_polls": 1},
+    }))
+    observed, sleeps, polls = [], [], []
+
+    def respond(request):
+        observed.append(request)
+        if request.method == "POST":
+            return httpx.Response(200, json={"id": "fixture", "polling_url": "https://fixture.invalid/poll"})
+        if request.url.path == "/poll":
+            polls.append(True)
+            return httpx.Response(200, json={"status": "Pending"} if len(polls) == 1 else {
+                "status": "Ready", "result": {"sample": "https://fixture.invalid/image"}})
+        if request.url.path == "/image":
+            return httpx.Response(302, headers={"location": "https://cdn.invalid/final-image"})
+        return httpx.Response(200, content=b"complete image", headers={"content-type": "image/png"})
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=transport))
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    with httpx.Client(transport=transport) as legacy:
+        monkeypatch.setattr(requests, "post", legacy.post)
+        monkeypatch.setattr(requests, "get", legacy.get)
+        try:
+            result = await generate_image_from_flux("isolated fixture", **overrides)
+            assert result[:2] == (b"complete image", "image/png")
+            assert json.loads(observed[0].content) == {"prompt": "isolated fixture", "width": overrides.get("width", 64), "height": overrides.get("height", 32)}
+            assert all(request.extensions["timeout"]["read"] == 3 for request in observed)
+            assert sleeps == [.01]
+            assert "x-key" not in observed[-1].headers
+        finally:
+            await close_all_clients()
+
+
+@pytest.mark.parametrize("phase", ["submission", "poll", "download", "cancel"])
+async def test_image_deadline_includes_submission_and_cancels_async_io(tmp_path, monkeypatch, phase):
+    import asyncio
+    import json
+    import time
+    from functools import partial
+
+    import httpx
+    import requests
+    from redlotus.runtime import logging as logger
+    from redlotus.runtime.network import close_all_clients
+    from redlotus.tools.base_tools import generate_image_from_flux
+
+    monkeypatch.setattr(logger, "_configured_dir", tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({
+        "BFL_BASE_URL": "https://fixture.invalid/generate", "BFL_API_KEY": "synthetic-test-key", "input_limits": {"max_redirects": 1},
+        "image_generation": {"width": 64, "height": 32, "max_wait_seconds": .02, "http_timeout_seconds": 1,
+                             "poll_interval_seconds": .01, "progress_every_polls": 1},
+    }))
+    stopped = []
+    started = asyncio.Event()
+
+    async def delayed(request):
+        if request.method == "POST" and phase not in {"submission", "cancel"}:
+            return httpx.Response(200, json={"id": "fixture", "polling_url": "https://fixture.invalid/poll"})
+        if request.url.path == "/poll" and phase == "download":
+            return httpx.Response(200, json={"status": "Ready", "result": {"sample": "https://fixture.invalid/image"}})
+        started.set()
+        try:
+            await asyncio.sleep(1)
+        finally:
+            stopped.append(True)
+
+    def legacy_post(*args, **kwargs):
+        time.sleep(.04)
+        return httpx.Response(200, json={}, request=httpx.Request("POST", args[0]))
+
+    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(delayed)))
+    monkeypatch.setattr(requests, "post", legacy_post)
+    try:
+        task = asyncio.create_task(generate_image_from_flux("isolated fixture"))
+        if phase == "cancel":
+            await asyncio.wait_for(started.wait(), .5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            result = await asyncio.wait_for(task, .5)
+            assert "timed out after 0.02 seconds" in result
+        assert stopped == [True]
     finally:
         await close_all_clients()
 

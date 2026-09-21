@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.messages import ModelRequest, ToolReturnPart
 
+from redlotus.runtime.config import settings
 from redlotus.runtime.resources import WorkspaceContext, bind_context
 
 
@@ -182,11 +183,12 @@ agent_context = partial(bind_context, _CURRENT_AGENT_ID)
 
 
 class TurnTraceStore:
-    def __init__(self, max_turns: int = 200) -> None:
+    def __init__(self, max_turns: int | None = None) -> None:
         self._events: dict[str, list[dict[str, Any]]] = {}
         self._max_turns = max_turns
 
     def record(self, turn_id: str | None, kind: str, **fields: Any) -> None:
+        self._max_turns = settings()["lifecycle"]["trace_history_turns"] if self._max_turns is None else self._max_turns
         key = turn_id or "unbound"
         event = {
             "at": time.time(),

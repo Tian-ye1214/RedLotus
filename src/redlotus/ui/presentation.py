@@ -10,6 +10,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -31,6 +32,7 @@ from redlotus.core.history import (
     summarize_messages,
 )
 from redlotus.runtime import logging as logger
+from redlotus.runtime.config import settings
 from redlotus.runtime.resources import conversations_root
 from redlotus.sessions.control import UserMessage
 
@@ -100,7 +102,7 @@ class DiffKind(StrEnum):
 
 @dataclass(frozen=True)
 class DiffStyle:
-    max_lines: int = 300
+    max_lines: int | None = None
     colors: dict[DiffKind, str] = field(
         default_factory=lambda: {
             DiffKind.ADD: "green",
@@ -198,12 +200,13 @@ def render_diff(
     add, dele, mod = stats
     width = _gutter_width(lines)
     body = Text()
-    for idx, ln in enumerate(lines[: style.max_lines]):
+    max_lines = settings()["ui"]["max_diff_lines"] if style.max_lines is None else style.max_lines
+    for idx, ln in enumerate(lines[:max_lines]):
         if idx:
             body.append("\n")
         body.append(_line_text(ln, width, style.signs), style=style.colors[ln.kind])
-    if len(lines) > style.max_lines:
-        body.append(f"\n… 还有 {len(lines) - style.max_lines} 行（已截断）", style=style.colors[DiffKind.GAP])
+    if len(lines) > max_lines:
+        body.append(f"\n… 还有 {len(lines) - max_lines} 行（已截断）", style=style.colors[DiffKind.GAP])
     title = Text.assemble(
         (f"{path}  ", "bold"),
         (f"+{add} ", style.colors[DiffKind.ADD]),
@@ -345,8 +348,6 @@ def model_stream_visible_text(text) -> str:
 def print_message(message, *, prefix="", style=""):
     emit_renderable(Text(prefix + message, style=style))
 
-
-from functools import partial
 
 print_error = partial(print_message, prefix="Error: ", style="bold red")
 print_warning = partial(print_message, prefix="Warning: ", style="yellow")

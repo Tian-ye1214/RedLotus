@@ -63,6 +63,54 @@ def test_textual_sink_preserves_ansi_and_dispatches_on_ui_thread():
     assert rendered == ["正文", "任务"] and updates == ["cleared"]
 
 
+def test_diff_preview_reads_config_without_truncating_the_plain_record(tmp_path):
+    import json
+
+    from redlotus.ui.presentation import DiffKind, DiffLine, DiffStyle, format_diff_text, render_diff
+
+    lines = [DiffLine(DiffKind.ADD, None, index, f"line-{index}") for index in range(1, 5)]
+    for limit in (1, 3):
+        (tmp_path / "config.json").write_text(json.dumps({"ui": {"max_diff_lines": limit}}))
+        panel = render_diff(lines, path="fixture", stats=(4, 0, 0))
+        assert f"line-{limit}" in panel.renderable.plain and f"line-{limit+1}" not in panel.renderable.plain
+        assert f"还有 {4-limit} 行" in panel.renderable.plain
+        assert "line-4" in format_diff_text(lines, path="fixture", stats=(4, 0, 0))
+    explicit = render_diff(lines, path="fixture", stats=(4, 0, 0), style=DiffStyle(max_lines=2))
+    assert "line-2" in explicit.renderable.plain and "line-3" not in explicit.renderable.plain
+
+
+async def test_real_textual_timers_obey_refresh_configuration(tmp_path, monkeypatch):
+    from redlotus.ui import presentation
+    from redlotus.ui.tui import RedLotusTui
+
+    (tmp_path / "config.json").write_text('{"ui":{"status_refresh_seconds":0.02,"panel_refresh_seconds":0.03}}')
+    ticks = {"status": 0, "panel": 0}
+
+    def tick(key):
+        ticks[key] += 1
+
+    async def ready(self):
+        pass
+
+    monkeypatch.setattr(RedLotusTui, "_prepare_cli_session", ready)
+    monkeypatch.setattr(RedLotusTui, "_schedule_workspace_enter", lambda self: None)
+    monkeypatch.setattr(RedLotusTui, "refresh_status", lambda self: tick("status"))
+    monkeypatch.setattr(RedLotusTui, "_schedule_panel_refresh", lambda self: tick("panel"))
+    monkeypatch.setattr(presentation, "_sink", presentation._sink)
+    system = SimpleNamespace(workspace=SimpleNamespace(root=tmp_path), session_key=None,
+                             set_ask_user_handler=lambda callback: None,
+                             toolkit=SimpleNamespace(review_store=SimpleNamespace(activate=lambda callback: None)))
+    controller = SimpleNamespace(system=system, new_session_state=lambda: None,
+                                 set_snapshot_picker=lambda callback: None,
+                                 set_snapshot_loaded_callback=lambda callback: None)
+    async with RedLotusTui(controller).run_test() as pilot:
+        pilot.app._ensure_panel_timer()
+        before = dict(ticks)
+        await pilot.pause(.15)
+        assert ticks["status"] > before["status"] and ticks["panel"] > before["panel"]
+        pilot.app._stop_panel_timer()
+
+
 async def test_release_ui_has_no_keyboard_diagnostics(tmp_path, monkeypatch):
     from redlotus.ui.tui import RedLotusTui
 
@@ -329,11 +377,14 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
 
 
 @pytest.mark.parametrize("timeout", [2, 7])
-def test_qq_second_download_failure_is_not_a_partial_image_request(monkeypatch, timeout):
+def test_qq_second_download_failure_is_not_a_partial_image_request(tmp_path, monkeypatch, timeout):
+    from functools import partial
+
     import httpx
 
     from redlotus.api import qq_media_helpers as media
 
+    (tmp_path / "config.json").write_text('{"input_limits":{"max_redirects":1}}')
     original, timeouts = httpx.Client, []
 
     def respond(request):
@@ -341,8 +392,7 @@ def test_qq_second_download_failure_is_not_a_partial_image_request(monkeypatch, 
         return httpx.Response(404 if request.url.path.endswith("missing.png") else 200,
                               content=b"fixture", headers={"content-type": "image/png"})
 
-    client = lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
-    monkeypatch.setattr(media.httpx, "Client", client)
+    monkeypatch.setattr(media.httpx, "Client", partial(original, transport=httpx.MockTransport(respond)))
     monkeypatch.setattr(media, "_resolve_public_addr", lambda host: "203.0.113.10")
     monkeypatch.setattr(media.ModelInputPolicy, "for_role", lambda: SimpleNamespace(
         check=lambda sizes: None, reference_download_timeout_seconds=timeout))
@@ -351,6 +401,38 @@ def test_qq_second_download_failure_is_not_a_partial_image_request(monkeypatch, 
     with pytest.raises(ValueError, match="image\\[2\\]"):
         media.extract_image_video(event)
     assert timeouts == [timeout, timeout]
+
+
+@pytest.mark.parametrize("limit,public", [(0, True), (1, True), (1, False)])
+def test_qq_redirect_policy_keeps_each_destination_check(tmp_path, monkeypatch, limit, public):
+    import json
+    import httpx
+
+    from redlotus.api import qq_media_helpers as media
+
+    (tmp_path / "config.json").write_text(json.dumps({"input_limits": {"max_redirects": limit}}))
+    resolved, requested = [], []
+
+    def address(host):
+        resolved.append(host)
+        return "203.0.113.10" if public or host == "first.invalid" else None
+
+    def respond(request):
+        requested.append(request.headers["Host"])
+        return (httpx.Response(302, headers={"location": "https://second.invalid/file.txt"})
+                if request.headers["Host"] == "first.invalid" else httpx.Response(200, content=b"complete"))
+
+    original = httpx.Client
+    monkeypatch.setattr(media.httpx, "Client", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
+    monkeypatch.setattr(media, "_resolve_public_addr", address)
+    monkeypatch.setattr(media.ModelInputPolicy, "for_role", lambda: SimpleNamespace(check=lambda sizes: None, reference_download_timeout_seconds=2))
+    if limit and public:
+        assert media.download_to_binary("https://first.invalid/file.txt", "file.txt").data == b"complete"
+    else:
+        with pytest.raises(ValueError, match="重定向" if not limit else "公网地址"):
+            media.download_to_binary("https://first.invalid/file.txt", "file.txt")
+    assert resolved == (["first.invalid", "second.invalid"] if limit else ["first.invalid"])
+    assert requested == (["first.invalid", "second.invalid"] if limit and public else ["first.invalid"])
 
 
 @pytest.mark.parametrize("initial", [{}, {"BASE_URL": "https://example.invalid/v1", "API_KEY": "fixture-only"}])
@@ -388,11 +470,11 @@ def startup_values():
         "BASE_URL": "https://example.invalid/v1", "API_KEY": "not-a-real-key",
         "MODEL_HTTP_TIMEOUT": 30, "request_limit": None,
         "agent_run_policy": {"max_concurrent_threads_per_session": 2, "max_command_timeout_seconds": 15, "max_task_retries": 2},
-        "lifecycle": {"invocation_history_per_session": 10, "shutdown_grace_seconds": 2, "process_termination_timeout_seconds": 1},
+        "lifecycle": {"invocation_history_per_session": 10, "shutdown_grace_seconds": 2, "process_termination_timeout_seconds": 1, "trace_history_turns": 20},
         "storage": {"file_lock_timeout_seconds": 0, "project_dir": "data", "sessions_dir": "data/sessions", "project_logs_dir": "data/logs",
                     "references_dir": "data/references", "runtime_dir": "data/runtime", "state_dir": "",
                     "cleanup": {"enabled": False, "execution_cache": False, "session_retention_days": 7, "log_retention_days": 7, "session_log_max_bytes": 4096}},
-        "input_limits": {"parse_concurrency": 2, "defaults": {"max_files": 2, "max_file_bytes": 1024, "reference_download_timeout_seconds": 2}},
+        "input_limits": {"parse_concurrency": 2, "max_redirects": 1, "defaults": {"max_files": 2, "max_file_bytes": 1024, "reference_download_timeout_seconds": 2}},
         "memory_perception": {"model_role": "worker", "window_turns": 20, "overlap_turns": 3, "quiescence_wait_timeout_seconds": 2},
         "short_term_memory": {"db_path": "memory", "table_name": "fixture", "turn_token_limit": 200,
                               "turn_chunk_overlap_tokens": 20, "vector_search_limit": 5, "final_top_k": 2,
@@ -401,6 +483,9 @@ def startup_values():
                                         "rows_per_partition": 4, "dimensions_per_sub_vector": 4}},
         "long_term_memory": {"table_name": "fixture_profile"},
         "BROWSER_HEADLESS": True,
+        "ui": {"status_refresh_seconds": .5, "panel_refresh_seconds": 3, "max_diff_lines": 300},
+        "image_generation": {"width": 512, "height": 512, "max_wait_seconds": 60, "http_timeout_seconds": 5,
+                             "poll_interval_seconds": .5, "progress_every_polls": 10},
         "browser": {"viewport": {"width": 900, "height": 700}, "locale": "en-US", "action_timeout_seconds": 2, "navigation_timeout_seconds": 7},
         "model_metadata": {"url": "https://openrouter.ai/api/v1/models", "timeout": 10,
                            "supported_thinking_efforts": ["low", "high"]},

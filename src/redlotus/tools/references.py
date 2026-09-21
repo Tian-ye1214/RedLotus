@@ -19,7 +19,7 @@ from filelock import AsyncFileLock
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import BinaryContent
 
-from redlotus.runtime.config import get_env
+from redlotus.runtime.config import get_env, settings
 from redlotus.runtime.network import ModelInputPolicy
 from redlotus.runtime.resources import (
     WorkspaceContext,
@@ -569,9 +569,10 @@ class ReferenceStore:
 
         if urlsplit(url).scheme not in ("https", "http"):
             raise ValueError("Remote references require HTTP(S)")
+        redirects = settings()["input_limits"]["max_redirects"]
         client = get_client(
-            f"reference_download:{policy.reference_download_timeout_seconds}",
-            lambda: httpx.AsyncClient(timeout=policy.reference_download_timeout_seconds, follow_redirects=True),
+            f"reference_download:{policy.reference_download_timeout_seconds}:{redirects}",
+            lambda: httpx.AsyncClient(timeout=policy.reference_download_timeout_seconds, max_redirects=redirects, follow_redirects=True),
         )
         async with client.stream("GET", url) as response:
             response.raise_for_status()

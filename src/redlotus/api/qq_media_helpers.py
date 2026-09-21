@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from pydantic_ai import BinaryContent
 
+from redlotus.runtime.config import settings
 from redlotus.runtime.network import ModelInputPolicy
 
 if TYPE_CHECKING:
@@ -54,9 +55,6 @@ def pick_ct(url: str, header_ct: str, raw: bytes, filename: str = "") -> str:
     return mime_magic(raw) or "application/octet-stream"
 
 
-_MAX_REDIRECTS = 5
-
-
 def _resolve_public_addr(host: str) -> str | None:
     """解析主机名并校验：仅当所有解析结果都是公网地址时，返回首个已校验 IP（否则 None）。
 
@@ -93,7 +91,7 @@ def download_to_binary(url: str, filename: str = "") -> BinaryContent:
     try:
         policy = ModelInputPolicy.for_role()
         with httpx.Client(timeout=policy.reference_download_timeout_seconds, follow_redirects=False) as client:
-            for _ in range(_MAX_REDIRECTS + 1):
+            for _ in range(settings()["input_limits"]["max_redirects"] + 1):
                 parsed = httpx.URL(url)
                 if parsed.scheme not in ("http", "https") or not parsed.host:
                     raise ValueError("附件地址必须是完整的 http/https URL")
