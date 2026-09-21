@@ -11,11 +11,6 @@ from playwright.sync_api import sync_playwright
 project = os.path.dirname(os.path.abspath(SPEC))
 source_root = Path(project, "src", "redlotus")
 bundle_mode = os.environ.get("REDLOTUS_PYINSTALLER_MODE", "onedir")
-# PyInstaller resolves a relative runtime_tmpdir from the application's launch
-# directory, so a one-file run keeps its transient _MEI directory in the
-# selected project's WorkDatabase instead of the system temporary directory.
-onefile_runtime_dir = str(Path("WorkDatabase") / "runtime" / "pyinstaller")
-
 # Playwright's frozen transport uses its package-local browser installation.
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
 with sync_playwright() as playwright:
@@ -84,7 +79,8 @@ if bundle_mode == "onefile":
         upx=False,
         console=True,
         disable_windowed_traceback=False,
-        runtime_tmpdir=onefile_runtime_dir,
+        # Relative to the selected project; avoid needless Windows path depth.
+        runtime_tmpdir="WorkDatabase",
     )
 else:
     exe = EXE(
