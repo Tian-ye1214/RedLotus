@@ -1,5 +1,7 @@
 """Storage/context fault checks; live model acceptance is recorded separately."""
 
+import asyncio
+
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolSearchCallPart
 from pydantic_ai.usage import RequestUsage
@@ -58,3 +60,40 @@ def test_provider_missing_usage_is_still_unknown():
     ]
     assert latest_usage_input_tokens(messages) is None
     assert summarize_messages(messages, price_resolver=lambda model: None).totals.missing_usage_responses == 1
+
+
+async def test_cancelled_child_checkpoint_releases_thread_capacity(tmp_path, monkeypatch):
+    from redlotus.core import system as system_module
+    from redlotus.core.agents import SubagentFactory, SubagentSpec, WorkspaceContext, bind_to_loop
+
+    system = object.__new__(system_module.AgentSystem)
+    system.workspace = WorkspaceContext.from_path(tmp_path)
+    system._session_file = None
+    system._storage_retry = asyncio.Event()
+    system._storage_paused = False
+    monkeypatch.setattr(system_module, "print_warning", lambda text: None)
+    owner_loop = asyncio.get_running_loop()
+    persist = bind_to_loop(system._durable_write, owner_loop)
+    started = asyncio.Event()
+    factory = SubagentFactory(max_concurrent=1)
+
+    def broken_disk():
+        raise OSError("injected disk failure")
+
+    async def child():
+        owner_loop.call_soon_threadsafe(started.set)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await persist(broken_disk, cancelling=bool(asyncio.current_task().cancelling()))
+
+    running = asyncio.create_task(factory.run(
+        SubagentSpec("session", "turn", system.workspace), child,
+    ))
+    await asyncio.wait_for(started.wait(), 2)
+    await asyncio.wait_for(factory.cancel_turn("turn"), 2)
+    outcome, = await asyncio.gather(running, return_exceptions=True)
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert not factory.handles and not factory._slots
+    assert system._storage_paused
+    await factory.close()

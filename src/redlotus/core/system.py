@@ -229,7 +229,7 @@ class AgentSystem:
         """A new ordinary input permits a paused disk transaction to retry."""
         self._storage_retry.set()
 
-    async def _durable_write(self, operation):
+    async def _durable_write(self, operation, *, cancelling=False):
         """Pause failed I/O without repeating model or tool execution."""
         with workspace_context(self.workspace):
             storage = self._session_file
@@ -245,9 +245,9 @@ class AgentSystem:
                     return result
                 except OSError as exc:
                     self._storage_paused = True
-                    print_warning(f"保存失败，任务已暂停，输入已保留: {exc}。恢复存储后提交普通输入重试。")
-                    if asyncio.current_task().cancelling():
+                    if cancelling or asyncio.current_task().cancelling():
                         raise asyncio.CancelledError() from exc
+                    print_warning(f"保存失败，任务已暂停，输入已保留: {exc}。恢复存储后提交普通输入重试。")
                     await self._storage_retry.wait()
 
     async def cancel_compression(self):

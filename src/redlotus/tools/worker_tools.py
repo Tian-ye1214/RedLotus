@@ -179,10 +179,13 @@ class WorkerOrchestrator:
                 async def save_node(run):
                     local_history.set_messages(list(run.all_messages()))
                     if session_file:
-                        await persist(lambda: session_file.role_file(role).save_context(
-                            local_history.messages, turn_id=turn_id,
-                            agent_id=agent_id, invocation=invocation,
-                        ))
+                        await persist(
+                            lambda: session_file.role_file(role).save_context(
+                                local_history.messages, turn_id=turn_id,
+                                agent_id=agent_id, invocation=invocation,
+                            ),
+                            cancelling=bool(asyncio.current_task().cancelling()),
+                        )
 
                 result = await AgentRunner().run(
                     agent=agent,
