@@ -4,7 +4,11 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
+
+from redlotus.api import base
+from redlotus.runtime.config import config_value, get_agent_usage_limits, get_model_and_params, missing_startup_fields, settings
 
 
 def test_output_actions_follow_the_selected_sink(monkeypatch):
@@ -120,7 +124,6 @@ async def test_real_textual_timers_obey_refresh_configuration(tmp_path, monkeypa
 def test_stream_preview_obeys_configured_line_and_character_limits(tmp_path, lines, chars, expected):
 
     from redlotus.ui.presentation import model_stream_visible_text
-    from redlotus.runtime.config import settings
 
     (tmp_path / "config.json").write_text(json.dumps({"ui": {"stream_preview_max_lines": lines, "stream_preview_max_chars": chars}}))
     assert model_stream_visible_text("line-1\nline-2\nline-3", settings()["ui"]) == expected
@@ -211,6 +214,41 @@ async def test_release_ui_has_no_keyboard_diagnostics(tmp_path, monkeypatch):
         assert pilot.app.query("#input") and pilot.app.query("#session-load")
 
 
+@pytest.mark.parametrize("interval,expected", [(0.25, False), (5, True)])
+def test_legacy_interrupt_repeat_window_comes_from_config(tmp_path, monkeypatch, interval, expected):
+    from redlotus.ui import widgets
+
+    (tmp_path / "config.json").write_text(json.dumps({"ui": {"interrupt_repeat_seconds": interval}}))
+    times = iter((100, 101))
+    monkeypatch.setattr(widgets.time, "monotonic", lambda: next(times))
+    repl = widgets.InteractiveRepl()
+    assert not repl._on_keyboard_interrupt()
+    assert repl._on_keyboard_interrupt() == expected
+
+
+@pytest.mark.parametrize("term", ["dumb", "xterm-256color"])
+async def test_prompt_interrupt_keeps_the_event_loop_and_next_input(monkeypatch, term):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from redlotus.ui import widgets
+
+    monkeypatch.setattr(widgets.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(widgets.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setenv("TERM", term)
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        repl = widgets.InteractiveRepl()
+        pipe.send_text("discarded\x03next\n")
+        assert await repl.read_line(stop_event=asyncio.Event()) == "next"
+        pipe.send_text("\x03")
+        with pytest.raises(InterruptedError):
+            await repl.read_line(stop_event=asyncio.Event())
+        pipe.send_text("next\n")
+        assert await repl.read_line(stop_event=asyncio.Event()) == "next"
+        pipe.send_text("\x03")
+        assert (await widgets.legacy_pick_snapshot([], repl.read_line)).action is widgets.SnapshotAction.CANCEL
+
+
 async def test_composer_consumes_each_enter_once_and_preserves_urgency():
     from textual.app import App, ComposeResult
 
@@ -235,7 +273,6 @@ async def test_composer_consumes_each_enter_once_and_preserves_urgency():
 def channel_probe(tmp_path, monkeypatch):
     from contextlib import nullcontext
 
-    from redlotus.api import base
     from redlotus.api.WeChat import WeChatAgentBot
     from redlotus.core import system
     from redlotus.runtime.resources import WorkspaceContext
@@ -413,7 +450,6 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
 
     from pydantic_ai import BinaryContent
 
-    from redlotus.api import base
     from redlotus.api.QQ import QQBot
 
     p = channel_probe
@@ -460,7 +496,6 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
 def test_qq_second_download_failure_is_not_a_partial_image_request(tmp_path, monkeypatch, timeout):
     from functools import partial
 
-    import httpx
 
     from redlotus.api import qq_media_helpers as media
 
@@ -488,7 +523,6 @@ def test_qq_second_download_failure_is_not_a_partial_image_request(tmp_path, mon
 
 @pytest.mark.parametrize("limit,public", [(0, True), (1, True), (1, False)])
 def test_qq_redirect_policy_keeps_each_destination_check(tmp_path, monkeypatch, limit, public):
-    import httpx
     import ssl
 
     from redlotus.api import qq_media_helpers as media
@@ -543,7 +577,6 @@ def test_qq_checks_all_dns_answers_before_connecting(monkeypatch, addresses, pub
 @pytest.mark.parametrize("initial", [{}, {"BASE_URL": "https://example.invalid/v1", "API_KEY": "fixture-only"}])
 async def test_first_use_enters_wizard_and_cancellation_writes_nothing(tmp_path, initial):
 
-    from redlotus.api.base import prepare_startup_configuration
 
     path = tmp_path / "config.json"
     path.write_text(json.dumps(initial), encoding="utf-8")
@@ -553,7 +586,7 @@ async def test_first_use_enters_wizard_and_cancellation_writes_nothing(tmp_path,
         questions.append(question)
         return None
 
-    assert not await prepare_startup_configuration(ask=cancel, emit=lambda text: None)
+    assert not await base.prepare_startup_configuration(ask=cancel, emit=lambda text: None)
     assert questions and not any("max_context_windows" in q for q in questions)
     assert path.read_bytes() == before and not (tmp_path / "global/config.json").exists()
 
@@ -587,7 +620,7 @@ def startup_values():
                                         "rows_per_partition": 4, "dimensions_per_sub_vector": 4}},
         "long_term_memory": {"table_name": "fixture_profile"},
         "BROWSER_HEADLESS": True,
-        "ui": {"status_refresh_seconds": .5, "panel_refresh_seconds": 3, "max_diff_lines": 300,
+        "ui": {"interrupt_repeat_seconds": 2, "status_refresh_seconds": .5, "panel_refresh_seconds": 3, "max_diff_lines": 300,
                "stream_preview_max_lines": 10, "stream_preview_max_chars": 6000, "recent_session_limit": 20,
                "max_skipped_files": 5, "file_completion_limit": 50,
                "tool_argument_preview_chars": 80, "tool_keyword_limit": 5, "tool_positional_limit": 3,
@@ -605,8 +638,6 @@ def startup_values():
 @pytest.mark.parametrize("confirm", ["y", "n"])
 async def test_first_use_collects_typed_fields_and_confirms_once(tmp_path, startup_values, confirm):
 
-    from redlotus.api.base import prepare_startup_configuration
-    from redlotus.runtime.config import config_value, missing_startup_fields, settings
 
     questions, notices, invalid = [], [], set()
 
@@ -625,7 +656,7 @@ async def test_first_use_collects_typed_fields_and_confirms_once(tmp_path, start
         value = config_value(startup_values, path)
         return value if isinstance(value, str) else json.dumps(value)
 
-    assert await prepare_startup_configuration(ask=answer, emit=notices.append) == (confirm == "y")
+    assert await base.prepare_startup_configuration(ask=answer, emit=notices.append) == (confirm == "y")
     assert sum(q.startswith("确认将") for q in questions) == 1
     assert not any("max_context_windows" in q for q in questions)
     assert any("MODEL_HTTP_TIMEOUT 无效" in notice for notice in notices)
@@ -639,8 +670,6 @@ async def test_first_use_collects_typed_fields_and_confirms_once(tmp_path, start
 
 async def test_model_reuse_preserves_role_policy_and_layered_writes(tmp_path, startup_values):
 
-    from redlotus.api.base import ConfigurationSetup, prepare_startup_configuration
-    from redlotus.runtime.config import settings, get_model_and_params
 
     global_file = tmp_path / "global/config.json"
     global_file.parent.mkdir()
@@ -656,7 +685,7 @@ async def test_model_reuse_preserves_role_policy_and_layered_writes(tmp_path, st
     async def answer(question, **kwargs):
         return next(responses)
 
-    setup = ConfigurationSetup(answer)
+    setup = base.ConfigurationSetup(answer)
     assert await setup.fill(("models", "manager", "name")) and await setup.commit()
     assert global_file.read_bytes() == before and settings()["MODEL_HTTP_TIMEOUT"] == 45
     assert settings()["models"]["manager"]["auto_compress_ratio"] == .7
@@ -667,14 +696,13 @@ async def test_model_reuse_preserves_role_policy_and_layered_writes(tmp_path, st
         assert question.startswith("现在配置 RAG")
         return "n"
 
-    assert await prepare_startup_configuration(ask=skip_optional, emit=lambda text: None)
+    assert await base.prepare_startup_configuration(ask=skip_optional, emit=lambda text: None)
 
 
 @pytest.mark.parametrize("channel_name", ["QQ", "WeChat"])
 def test_channel_startup_collects_policy_before_constructing_bot(tmp_path, startup_values, monkeypatch, channel_name):
     from importlib import import_module
 
-    from redlotus.api import base
 
     (tmp_path / "config.json").write_text(json.dumps(startup_values), encoding="utf-8")
     questions, started = [], []
@@ -703,7 +731,6 @@ def test_channel_startup_collects_policy_before_constructing_bot(tmp_path, start
 @pytest.mark.parametrize("empty", [None, " "])
 def test_legacy_numeric_limit_and_empty_model_override(tmp_path, limit, empty):
 
-    from redlotus.runtime.config import get_agent_usage_limits, get_model_and_params
 
     global_file = tmp_path / "global/config.json"
     global_file.parent.mkdir()

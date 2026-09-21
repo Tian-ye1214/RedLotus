@@ -235,19 +235,20 @@ def _history_path() -> Path:
 def create_prompt_session() -> PromptSession:
     kb = KeyBindings()
 
-    @kb.add("c-c")
+    @kb.add("c-c", eager=True)
     def _interrupt(event) -> None:
         if event.app.current_buffer.text:
             # 有内容：仅清空当前行，不退出
             return event.app.current_buffer.reset()
-        # 空行：交给外层 KeyboardInterrupt 处理（支持连按两次退出）
-        event.app.exit(exception=KeyboardInterrupt())
+        # Use a regular exception so the input task cannot abort the event loop.
+        event.app.exit(exception=InterruptedError())
 
     return PromptSession(
         history=FileHistory(str(_history_path())),
         completer=AgentCompleter(),
         complete_while_typing=False,
         key_bindings=kb,
+        interrupt_exception=InterruptedError,
     )
 
 
@@ -266,15 +267,13 @@ class InteractiveRepl:
         self._last_interrupt_at = 0.0
         self._on_interrupt_during_handler = on_interrupt_during_handler
 
-    def _get_session(self) -> PromptSession:
-        if self._session is None:
-            self._session = create_prompt_session()
-        return self._session
-
     def _on_keyboard_interrupt(self) -> bool:
         """处理空行 Ctrl+C。返回 True 表示应退出 REPL。"""
         now = time.monotonic()
-        self._interrupt_hits = 1 if now - self._last_interrupt_at > 2 else self._interrupt_hits + 1
+        self._interrupt_hits = (
+            1 if now - self._last_interrupt_at > settings()["ui"]["interrupt_repeat_seconds"]
+            else self._interrupt_hits + 1
+        )
         self._last_interrupt_at = now
         if self._interrupt_hits < 2:
             print_warning("再次按 Ctrl+C 退出，或输入 /exit、quit。")
@@ -282,10 +281,11 @@ class InteractiveRepl:
 
     async def read_line(self, *, stop_event: asyncio.Event | None = None) -> str | None:
         if sys.stdin.isatty() and sys.stdout.isatty():
-            session = self._get_session()
+            if self._session is None:
+                self._session = create_prompt_session()
             try:
                 with patch_stdout(raw=True):
-                    read_coro = session.prompt_async(self.prompt)
+                    read_coro = self._session.prompt_async(self.prompt)
                     if stop_event is None:
                         return (await read_coro).strip()
                     read_task = asyncio.create_task(read_coro)
@@ -318,13 +318,6 @@ class InteractiveRepl:
         handler 返回 "continue" | "break"。
         空行 Ctrl+C：连按两次退出；有内容时 Ctrl+C 仅清空输入行。
         """
-        await self._loop(handler, stop_event)
-
-    async def _loop(
-        self,
-        handler: Callable[[str], Awaitable[str]],
-        stop_event: asyncio.Event | None,
-    ) -> None:
         while stop_event is None or not stop_event.is_set():
             try:
                 line = await self.read_line(stop_event=stop_event)
@@ -334,7 +327,7 @@ class InteractiveRepl:
                 action = await handler(line)
                 if action == "break":
                     break
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, InterruptedError):
                 if self._on_interrupt_during_handler is not None:
                     try:
                         await self._on_interrupt_during_handler()
@@ -418,7 +411,10 @@ async def legacy_pick_snapshot(
 ) -> SnapshotSelection:
     print_panel(format_snapshot_choices(snapshots), title="加载对话")
     while True:
-        raw = await read_line()
+        try:
+            raw = await read_line()
+        except (KeyboardInterrupt, InterruptedError):
+            raw = None
         if raw is None:
             return SnapshotSelection(SnapshotAction.CANCEL)
         text = raw.strip()

@@ -574,8 +574,9 @@
     },
     "ui": {
       "type": "object",
-      "description": "终端展示策略；不裁剪正式会话或审查记录",
+      "description": "终端展示与交互策略；不裁剪正式会话或审查记录",
       "properties": {
+        "interrupt_repeat_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "旧终端空行连续按两次 Ctrl+C 退出的最大间隔秒数"},
         "status_refresh_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "运行状态刷新的间隔秒数"},
         "panel_refresh_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "用量面板刷新的间隔秒数"},
         "max_diff_lines": {"type": "integer", "minimum": 1, "description": "彩色 diff 预览最多显示的行数；截断时显示剩余数量"},
@@ -590,7 +591,7 @@
         "usage_file_limit": {"type": "integer", "minimum": 1, "description": "用量报告最多展示的源文件路径数量；累计数值和文件总数不受限制"},
         "session_error_max_chars": {"type": "integer", "minimum": 1, "description": "会话加载菜单的失败原因字符上限；完整原因仍保留在记录中"}
       },
-      "required": ["status_refresh_seconds", "panel_refresh_seconds", "max_diff_lines", "stream_preview_max_lines", "stream_preview_max_chars", "recent_session_limit", "max_skipped_files", "file_completion_limit", "tool_argument_preview_chars", "tool_keyword_limit", "tool_positional_limit", "usage_file_limit", "session_error_max_chars"]
+      "required": ["interrupt_repeat_seconds", "status_refresh_seconds", "panel_refresh_seconds", "max_diff_lines", "stream_preview_max_lines", "stream_preview_max_chars", "recent_session_limit", "max_skipped_files", "file_completion_limit", "tool_argument_preview_chars", "tool_keyword_limit", "tool_positional_limit", "usage_file_limit", "session_error_max_chars"]
     },
     "web_search": {
       "type": "object",
