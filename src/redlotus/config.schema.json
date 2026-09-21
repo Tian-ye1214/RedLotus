@@ -172,6 +172,11 @@
       "type": "object",
       "description": "路径和磁盘清理策略",
       "properties": {
+        "file_lock_timeout_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "跨进程文件锁最多等待秒数；0 表示不等待，首次配置提交使用本次填写值"
+        },
         "project_dir": {
           "type": "string",
           "description": "项目数据目录，必须在当前项目内"
@@ -235,6 +240,7 @@
         }
       },
       "required": [
+        "file_lock_timeout_seconds",
         "project_dir",
         "sessions_dir",
         "project_logs_dir",

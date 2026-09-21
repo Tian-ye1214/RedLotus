@@ -91,7 +91,7 @@ def test_config_layers_dynamic_roles_and_minimal_writeback(tmp_path):
     global_file.parent.mkdir()
     lower = {"models": {"researcher": "shared"}, "model_presets": {
         "shared": {"name": "openai:fixture", "temperature": 0.4},
-    }, "API_KEY": "isolated-fixture", "request_limit": 17}
+    }, "API_KEY": "isolated-fixture", "request_limit": 17, "storage": {"file_lock_timeout_seconds": 0}}
     global_file.write_text(json.dumps(lower), encoding="utf-8")
     (tmp_path / ".env").write_text("request_limit=11\nmodel_presets__shared__temperature=0.2\n", encoding="utf-8")
     local = tmp_path / "config.json"

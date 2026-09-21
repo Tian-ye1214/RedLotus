@@ -246,8 +246,9 @@ def atomic_write(path: Path, content: str | bytes, *, encoding: str = "utf-8") -
     os.replace(temporary, path)
 
 @contextmanager
-def file_lock(path: Path, *, timeout: float = 30.0) -> Iterator[None]:
+def file_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:
     """跨进程文件锁；锁文件与目标同目录。"""
+    timeout = settings()["storage"]["file_lock_timeout_seconds"] if timeout is None else timeout
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(str(lock_path), timeout=timeout, is_singleton=True):

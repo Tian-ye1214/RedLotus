@@ -459,7 +459,7 @@ class ConfigurationSetup:
         def apply(values):
             for path, value in self.changes.items():
                 self.assign(values, path, value)
-        update_config(apply)
+        update_config(apply, lock_timeout=self.values["storage"]["file_lock_timeout_seconds"])
         return True
 
 

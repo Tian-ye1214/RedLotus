@@ -131,6 +131,54 @@ def test_atomic_write_preserves_native_encoding_and_original_on_replace_failure(
     assert path.read_bytes() == native.read_bytes()
 
 
+@pytest.mark.parametrize("timeout", [0, .05])
+def test_shared_file_lock_obeys_configured_wait_under_real_contention(tmp_path, timeout):
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    from filelock import FileLock, Timeout
+    from redlotus.runtime.resources import file_lock
+
+    (tmp_path / "config.json").write_text(json.dumps({"storage": {"file_lock_timeout_seconds": timeout}}))
+    path = tmp_path / "owned.json"
+
+    def acquire():
+        with file_lock(path):
+            return "acquired"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with FileLock(str(path.with_suffix(".json.lock")), timeout=0):
+            waiting = executor.submit(acquire)
+            with pytest.raises(Timeout):
+                waiting.result(timeout=1)
+    assert not path.exists()
+
+
+async def test_first_configuration_commit_uses_the_pending_lock_policy(tmp_path, monkeypatch):
+    import json
+    from filelock import FileLock
+
+    from redlotus.api.base import ConfigurationSetup
+    from redlotus.runtime import resources
+
+    answers, observed = iter(["0", "y"]), []
+
+    async def answer(*args, **kwargs):
+        return next(answers)
+
+    def lock(*args, **kwargs):
+        observed.append(kwargs["timeout"])
+        return FileLock(*args, **kwargs)
+
+    monkeypatch.setattr(resources, "FileLock", lock)
+    setup = ConfigurationSetup(answer, emit=lambda text: None)
+    assert not (tmp_path / "global/config.json").exists()
+    assert await setup.fill(("storage", "file_lock_timeout_seconds"))
+    assert await setup.commit()
+    assert observed and set(observed) == {0}
+    assert json.loads((tmp_path / "global/config.json").read_text()) == {"storage": {"file_lock_timeout_seconds": 0}}
+
+
 def test_application_structure_keeps_approved_module_and_effective_line_limits():
     import ast
     import io

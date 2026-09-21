@@ -389,7 +389,7 @@ def startup_values():
         "MODEL_HTTP_TIMEOUT": 30, "request_limit": None,
         "agent_run_policy": {"max_concurrent_threads_per_session": 2, "max_command_timeout_seconds": 15, "max_task_retries": 2},
         "lifecycle": {"invocation_history_per_session": 10, "shutdown_grace_seconds": 2},
-        "storage": {"project_dir": "data", "sessions_dir": "data/sessions", "project_logs_dir": "data/logs",
+        "storage": {"file_lock_timeout_seconds": 0, "project_dir": "data", "sessions_dir": "data/sessions", "project_logs_dir": "data/logs",
                     "references_dir": "data/references", "runtime_dir": "data/runtime", "state_dir": "",
                     "cleanup": {"enabled": False, "execution_cache": False, "session_retention_days": 7, "log_retention_days": 7, "session_log_max_bytes": 4096}},
         "input_limits": {"defaults": {"max_files": 2, "max_file_bytes": 1024, "reference_download_timeout_seconds": 2}},

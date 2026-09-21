@@ -253,7 +253,7 @@ def _merge_config(target, incoming, origins, source, path=()):
             origins[field] = source
 
 @contextmanager
-def _config_locks():
+def _config_locks(timeout):
     """Acquire all configuration writer locks in a stable order."""
     from redlotus.runtime.resources import file_lock
 
@@ -261,7 +261,7 @@ def _config_locks():
     paths.add(config_file())
     with ExitStack() as locks:
         for path in sorted(paths):
-            locks.enter_context(file_lock(path))
+            locks.enter_context(file_lock(path, timeout=timeout))
         yield
 
 def settings() -> dict[str, Any]:
@@ -334,13 +334,13 @@ def _persist_changes(target, before, after):
         else:
             target[key] = deepcopy(value)
 
-def update_config(change) -> None:
+def update_config(change, *, lock_timeout=None) -> None:
     """锁内读取最新有效值，只保存本次编辑产生的差异。"""
     from redlotus.runtime.resources import atomic_write_json
 
     path = config_file()
     try:
-        with _config_locks():
+        with _config_locks(lock_timeout):
             path = config_file()
             raw = _parse_config(path, path.read_bytes() if path.is_file() else None)
             before = settings()

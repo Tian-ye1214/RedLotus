@@ -62,6 +62,7 @@ def publication(tmp_path, monkeypatch):
     from redlotus.memory.perception import MemoryJob
     from redlotus.sessions.storage import SessionFile
 
+    (tmp_path / "config.json").write_text('{"storage":{"file_lock_timeout_seconds":0}}', encoding="utf-8")
     memory = records.LongTermMemory(tmp_path / "core-memory")
     original = memory.read()
     row = records.MemoryRecord(id="A", project_id="isolated", scope="global", kind="requested",
