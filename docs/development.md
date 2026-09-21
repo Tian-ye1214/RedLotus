@@ -190,6 +190,12 @@ UI 状态／面板刷新和 diff 预览分别读取 `ui.status_refresh_seconds`�
 
 `necessity-qq-native-reply-delta.json` 衔接上述复用与原必要性清单。上一候选安装包群聊回答失败的原记录保留；省略或显式发送 `tool_choice=none` 的一次对照均返回正确答案，不足以证明参数缺陷，故没有加入协议补丁或解析工具标记。同步清理包装的所有分支必要性、真实账号生命周期、两个旧记忆接口契约和全项目函数删除证明仍未完成。
 
+最新 `necessity-current-reconciliation.json` 对齐当前 1,071 个 callable：996 个 AST 与旧审查一致，71 个修改，4 个新增，19 个旧定义删除或替换。独立审查检查了 24 个应用文件的差异和消费者，复现两个 P2：配置热更新使 FileLock singleton 构造参数不一致；代理 CONNECT 502 被映射为 `ProxyError`，跳过后续公网地址。`0b876831` 分别复用原生 `acquire(timeout=...)`、扩充现有地址回退的异常类型，各改一个语句，应用有效行和函数数不增加。源码 161 项回归通过（39.20 秒），实际安装 wheel 161 项通过（51.58 秒）；真实源码／pip 均验证锁热更新、附件及模型读取。首次失败、原生 CONNECT 的 1→8 次尝试及复核结论见 `necessity-review-lock-proxy-delta.json`，不能以增量审查代替全项目证明。
+
+两个旧 MemoryReader 接口的不同输出、项目 episode 过滤、拒绝语义和证据保留已验证，使用隔离正式记录、真实 embedding／rerank 服务；四次 embedding 返回 68 输入 Token，两次 rerank 未返回 usage，保留未知。证据 `memory-reader-contract-live.json` 对应修改前的 `45937e81`，不是新候选重复调用；外部消费者需求仍未确认，继续保留接口。
+
+onefile 在新深目录的 264 字符解压目标失败，且覆盖配置使显式 `TMP` 无效。`03acaea2` 删除 `runtime_tmpdir="WorkDatabase"` 及注释，使用 [PyInstaller 原生临时目录选择](https://github.com/pyinstaller/pyinstaller/blob/v6.20.0/bootloader/src/pyi_utils_win32.c#L209)，没有新增 Python 包装、短路径映射或修改注册表。相同失败工作目录与 E 盘 `TMP` 对照、真实浏览器和退出结果见现行设计；只读包资源临时展开与应用数据、下载缓存的归属分别核对。
+
 ## 真实验收习惯
 
 ### 环境与范围
@@ -225,6 +231,8 @@ UI 状态／面板刷新和 diff 预览分别读取 `ui.status_refresh_seconds`�
 ## 数据与清理
 
 项目会话和日志属于项目 `.redlotus`，产物、引用与 runtime 属于项目 `WorkDatabase`。全部 LanceDB 记忆库可使用用户 `.redlotus`；不能把项目会话、下载、依赖或测试中间产物转移到 C、D 盘全局目录。
+
+onefile 包内库和浏览器资源由原生 bootloader 在启动环境选择的临时目录展开、退出时清理；这不授权迁移项目数据、下载缓存或全局安装依赖。验收通过仅当前进程的 `TMP` 显式选择 E 盘临时目录，并核对其回收；不在产品中硬编码机器路径。
 
 测试临时资料少量放 E 盘，记忆使用用户数据目录内明确的独立测试命名空间。不要通过改 HOME／USERPROFILE 掩盖路径，亦不以目录链接替代真实归属。
 
