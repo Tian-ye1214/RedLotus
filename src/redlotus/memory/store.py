@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pydantic_ai import ToolReturn
-from redlotus.memory.records import CREDENTIAL_PATTERN, MemoryRecord
+from redlotus.memory.records import CREDENTIAL_PATTERN, MemoryConflict, MemoryRecord
 
 import asyncio
 import hashlib
@@ -132,7 +132,7 @@ class MemoryStore:
                     if saved.last_change_id == record.last_change_id:
                         continue
                     if record.version != saved.version + 1:
-                        raise ValueError(f"Memory {record.id} changed before commit")
+                        raise MemoryConflict(f"Memory {record.id} changed before commit")
                 digest = hashlib.sha256(record.text().encode()).hexdigest()
                 rows.append(
                     dict(
@@ -374,7 +374,7 @@ class MemoryStore:
             return previous
         base = job.bases.get(identity)
         if (previous.version if previous else 0) != (base.version if base else 0):
-            raise ValueError(f"Memory {identity} changed since candidate generation")
+            raise MemoryConflict(f"Memory {identity} changed since candidate generation")
         if (
             previous
             and not explicit

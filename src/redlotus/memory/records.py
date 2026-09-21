@@ -25,6 +25,11 @@ import re
 import shutil
 from pathlib import Path
 import hashlib
+from filelock import AsyncFileLock
+
+
+class MemoryConflict(ValueError):
+    """A produced candidate no longer matches its formal or user-edited baseline."""
 
 
 class MemoryContent(BaseModel):
@@ -166,6 +171,10 @@ class ObservedTurn(BaseModel):
 
 SECTIONS = ("用户画像", "可复用经验")
 EMPTY_MEMORY = "# MEMORY\n\n## 用户画像\n\n## 可复用经验\n"
+MEMORY_BLOCK = re.compile(
+    r"<!-- memory:(?P<id>[a-zA-Z0-9_-]+)(?: version:(?P<version>[0-9]+))? -->\n"
+    r"(?P<body>.*?)\n<!-- /memory -->", re.S,
+)
 CREDENTIAL_PATTERN = re.compile(
     r"(?i)(?:\b(?:api[_ -]?key|access[_ -]?token|password|secret|密码|密钥)\s*[:=：]\s*\S+"
     r"|\bsk-[A-Za-z0-9_-]{12,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|Bearer\s+[A-Za-z0-9_.-]{12,})"
@@ -226,52 +235,66 @@ class LongTermMemory:
             + "\n"
         )
 
-    def get_injection(self):
-        return "<core_memory>\n" + self.read() + "\n</core_memory>"
+    def publication_lock(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        return AsyncFileLock(self.directory / "publication.lock", run_in_executor=False)
 
-    def apply_record(self, record, previous=None, *, core_old_text=""):
-        self.read()
-        with file_lock(self.path):
-            original = self.path.read_text(encoding="utf-8")
-            prefix, sections = self._parse(original)
-            marker = re.compile(
-                r"<!-- memory:"
-                + re.escape(record.id)
-                + r" -->\n(.*?)\n<!-- /memory -->",
-                re.S,
-            )
-            match = marker.search(original)
-            content = record.content or record.result or record.goal
-            if match and previous and record.origin != "explicit":
-                old = previous.content or previous.result or previous.goal
-                if match.group(1).strip() not in (old.strip(), content.strip()):
-                    return False
-            sections = {
-                name: marker.sub("", text).strip() for name, text in sections.items()
-            }
-            if record.state == "active" and record.projection != "none":
-                if CREDENTIAL_PATTERN.search(content):
-                    raise ValueError("Credentials cannot enter core memory")
-                name = "用户画像" if record.projection == "profile" else "可复用经验"
-                text = sections[name]
-                block = f"<!-- memory:{record.id} -->\n{content}\n<!-- /memory -->"
-                if core_old_text and text.count(core_old_text) == 1:
-                    sections[name] = text.replace(core_old_text, block, 1)
-                elif core_old_text and not match and content not in text:
-                    raise ValueError("Core memory changed; old text no longer matches")
-                elif content not in text:
-                    sections[name] = (text + "\n\n" + block).strip()
-            elif core_old_text and not match:
-                if sum(text.count(core_old_text) for text in sections.values()) > 1:
-                    raise ValueError("Core memory text to remove is ambiguous")
-                sections = {
-                    name: text.replace(core_old_text, "", 1).strip()
-                    for name, text in sections.items()
-                }
-            updated = self._render(prefix, sections)
-            if updated != original:
-                atomic_write_text(self.path, updated)
-            return True
+    def get_injection(self, records, *, body=None):
+        """Only formally committed managed blocks may enter a new session snapshot."""
+        current = {row.id: row for row in records if row.state == "active" and row.projection != "none"}
+
+        def verified(match):
+            row = current.get(match["id"])
+            if row is None:
+                return ""
+            valid = (int(match["version"]) == row.version if match["version"] else
+                     match["body"].strip() == (row.content or row.result or row.goal).strip())
+            return match[0] if valid else ""
+
+        return "<core_memory>\n" + MEMORY_BLOCK.sub(verified, self.read() if body is None else body) + "\n</core_memory>"
+
+    @classmethod
+    def project_record(cls, original, record, previous=None, *, baseline=None, core_old_text=""):
+        """Calculate one projection without writing; retain edits outside its own block."""
+        match, expected = (
+            next((item for item in MEMORY_BLOCK.finditer(text) if item["id"] == record.id), None)
+            for text in (original, original if baseline is None else baseline)
+        )
+        content = record.content or record.result or record.goal
+        active = record.state == "active" and record.projection != "none"
+        block = f"<!-- memory:{record.id} version:{record.version} -->\n{content}\n<!-- /memory -->"
+        if (active and match and match[0] == block) or (not active and not match and not core_old_text):
+            return original
+        if baseline is not None and (match[0] if match else None) != (expected[0] if expected else None):
+            raise MemoryConflict("Core memory changed after candidate generation")
+        if baseline is None and match and previous:
+            old = previous.content or previous.result or previous.goal
+            if match["body"].strip() not in (old.strip(), content.strip()):
+                raise MemoryConflict("Core memory changed; previous text no longer matches")
+        prefix, sections = cls._parse(original)
+        sections = {name: MEMORY_BLOCK.sub(lambda item: "" if item["id"] == record.id else item[0], text).strip()
+                    for name, text in sections.items()}
+        if core_old_text and not match and any(
+            text.count(core_old_text) != MEMORY_BLOCK.sub("", text).count(core_old_text)
+            for text in sections.values()
+        ):
+            raise MemoryConflict("Core memory text belongs to another managed record")
+        if active:
+            if CREDENTIAL_PATTERN.search(content):
+                raise ValueError("Credentials cannot enter core memory")
+            name = "用户画像" if record.projection == "profile" else "可复用经验"
+            text = sections[name]
+            if core_old_text and not match:
+                if text.count(core_old_text) != 1:
+                    raise MemoryConflict("Core memory changed; old text no longer matches")
+                sections[name] = text.replace(core_old_text, block, 1)
+            elif content not in text:
+                sections[name] = (text + "\n\n" + block).strip()
+        elif core_old_text and not match:
+            if sum(text.count(core_old_text) for text in sections.values()) > 1:
+                raise MemoryConflict("Core memory text to remove is ambiguous")
+            sections = {name: text.replace(core_old_text, "", 1).strip() for name, text in sections.items()}
+        return cls._render(prefix, sections)
 
     def legacy_content(self):
         body = self.read()

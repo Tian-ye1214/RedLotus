@@ -79,7 +79,7 @@ RedLotus 是以终端为主要入口、围绕本地项目工作的个人 AI Agen
 
 基线源码的包版本仍为 `1.0.1`。仓库中的 1.0.1 发布记录与之后的 develop 改动不是同一制品；同版本候选 wheel 替换也不等于新版本公开发布。已发布制品应以 [PyPI](https://pypi.org/project/RedLotus/) 和 [GitHub Releases](https://github.com/Tian-ye1214/RedLotus/releases) 为准。
 
-当前已有源码、日常 Miniconda pip、实际 onedir 的定向真实证据，涵盖对话、Worker、图片、面板及恢复。另有真实记忆、Skills、浏览器和 goal 任务的局部证据。它们不能替代完整的三环境 360 轮、自动压缩、感知质量、资源及各环境缓存命中率验收。
+基线版本曾有源码、日常 Miniconda pip、实际 onedir 的定向真实证据，涵盖对话、Worker、图片、面板及恢复。本轮重做版本已有源码对话、调度恢复、浏览器、记忆保存／跨会话读取及分阶段故障恢复证据；日常 pip 和实际打包制品仍待重新验收。历史结果和局部通过均不能替代完整三环境、自动压缩、感知质量、资源及缓存命中率门槛。
 
 历史报告已从当前 docs 删除，仍保留在 Git 的 `d6bcc414` 及更早提交中。例如：
 

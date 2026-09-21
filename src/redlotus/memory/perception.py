@@ -368,6 +368,7 @@ class MemoryJob(BaseModel):
     sources: dict = Field(default_factory=dict)
     reference_ids: list[str] = Field(default_factory=list)
     bases: dict[str, MemoryRecord] = Field(default_factory=dict)
+    core_snapshot: str | None = None
     model_snapshot: dict = Field(default_factory=dict)
     perception_config: dict = Field(default_factory=dict)
     prompt_snapshot: str = ""
@@ -420,6 +421,7 @@ async def produce_job(service, job):
     if job.target_id:
         target_record = await asyncio.to_thread(service.store.get, job.target_id)
         job.bases[target_record.id] = target_record
+    job.core_snapshot = await service.long_term.list_memory()
     payload = dict(
         mode="migration"
         if job.events[0].origin == "migration"
@@ -437,7 +439,7 @@ async def produce_job(service, job):
         if job.window
         else [event.id for event in job.events],
         overlap_turn_ids=job.window.overlap_turn_ids if job.window else [],
-        core_memory=await service.long_term.list_memory(),
+        core_memory=service.long_term.get_injection(inactive, body=job.core_snapshot),
         explicit_request=job.request,
         requested_scope=job.scope,
         operation=job.operation,

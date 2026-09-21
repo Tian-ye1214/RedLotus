@@ -23,13 +23,15 @@ from redlotus.runtime.resources import (
     save_locked_json,
     WorkspaceContext,
     current_workspace,
+    atomic_write_text,
+    finish_file_io,
 )
 from redlotus.runtime import logging as logger
 from redlotus.runtime.network import ModelTarget
 from redlotus.prompts.prompt import load_prompt
 from redlotus.tools.references import ReferenceStore
 from redlotus.core.agents import AgentRegistry, SubagentFactory, SubagentSpec
-from redlotus.memory.records import EvidenceReader, LongTermMemory, ObservationStore
+from redlotus.memory.records import EvidenceReader, LongTermMemory, MemoryConflict, ObservationStore
 from redlotus.memory.perception import MemoryPerception, MemoryJob, produce_job
 from redlotus.memory.store import MemoryStore, MemoryReader
 
@@ -99,9 +101,10 @@ class MemoryService:
     async def begin_turn(self, session_id, turn_id, user_text, *, references=()):
         if self.owner_memory_allowed:
             if self._injection_snapshot is None:
-                self._injection_snapshot = await asyncio.to_thread(
-                    self.long_term.get_injection
-                )
+                async with self.long_term.publication_lock():
+                    self._injection_snapshot = await finish_file_io(asyncio.to_thread(
+                        lambda: self.long_term.get_injection(self.store.all("global", active_only=False))
+                    ))
             self.current = self.observations.begin(
                 session_id, turn_id, user_text, [ref.id for ref in references]
             )
@@ -160,7 +163,8 @@ class MemoryService:
                             for key, row in job.sources.items()}
         value["indexed"] = "indexed_at" in job.timings
         if value["indexed"]:
-            value.update(event_ids=[], sources={}, bases={}, prompt_snapshot="", model_snapshot={}, perception_config={})
+            value.update(event_ids=[], sources={}, bases={}, core_snapshot=None,
+                         prompt_snapshot="", model_snapshot={}, perception_config={})
             value["result"] = {"records": [], "reason": job.result.reason,
                                "request_authorized": job.result.request_authorized}
         self.session.update(jobs={job.id: value})
@@ -182,7 +186,7 @@ class MemoryService:
             if not search or search.get("scope") != "global" or search.get("retrieval_error"):
                 raise ValueError(json.dumps({"error": "memory_publication_search", "search_id": draft.search_id}))
             if search.get("revision") != await asyncio.to_thread(self.store.revision, "global"):
-                raise ValueError(json.dumps({"error": "memory_publication_changed", "search_id": draft.search_id}))
+                raise MemoryConflict(json.dumps({"error": "memory_publication_changed", "search_id": draft.search_id}))
 
     async def _check_promotion_sources(self, job, changes):
         """Require live project evidence before publishing automatically promoted L2."""
@@ -202,30 +206,43 @@ class MemoryService:
                 if source.scope != "project" or source.state != "active":
                     raise ValueError(json.dumps({"error": "memory_l_one_inactive", "id": identity}))
 
-    async def _apply(self, job):
-        self.long_term.directory.mkdir(parents=True, exist_ok=True)
-        async with AsyncFileLock(
-            self.long_term.directory / "publication.lock", run_in_executor=False
-        ):
-            await self._check_searches(job)
-            changes = [
-                (record, draft)
-                for index, draft in enumerate(job.result.records)
-                if (record := await asyncio.to_thread(self.store.materialize, job, draft, index, self._cleared_at))
-            ]
-            await self._check_promotion_sources(job, changes)
-            committed = []
-            for record, draft in changes:
-                if not await asyncio.to_thread(
-                    self.long_term.apply_record,
-                    record,
-                    job.bases.get(record.id),
+    def _publish(self, job, records):
+        """Commit the prepared batch before its derived file; checkpoint the durable phase."""
+        self.long_term.read()
+        with file_lock(self.long_term.path):
+            committed = "records_committed_at" in job.timings
+            original = updated = self.long_term.path.read_text(encoding="utf-8")
+            for record in records:
+                draft = job.result.records[int(record.last_change_id.rsplit(":", 1)[-1])]
+                updated = self.long_term.project_record(
+                    updated, record, job.bases.get(record.id), baseline=job.core_snapshot,
                     core_old_text=draft.core_old_text,
-                ):
-                    continue
-                committed.append(record)
-            await asyncio.to_thread(self.store.save, committed)
-            job.records = [record.id for record in committed]
+                )
+            if not committed:
+                self._save_job(job)
+                self.store.save(records)
+                job.records = [record.id for record in records]
+                job.timings["records_committed_at"] = iso_utc_now()
+                self._save_job(job)
+            if updated != original:
+                atomic_write_text(self.long_term.path, updated)
+
+    async def _apply(self, job):
+        async with self.long_term.publication_lock():
+            if "records_committed_at" not in job.timings:
+                await self._check_searches(job)
+                changes = [
+                    (record, draft)
+                    for index, draft in enumerate(job.result.records)
+                    if (record := await asyncio.to_thread(self.store.materialize, job, draft, index, self._cleared_at))
+                ]
+                await self._check_promotion_sources(job, changes)
+                records = [record for record, _ in changes]
+            else:
+                records = [record for identity in job.records if
+                           (record := await asyncio.to_thread(self.store.get, identity)).last_change_id.startswith(job.id + ":")]
+                job.records = [record.id for record in records]
+            await finish_file_io(asyncio.to_thread(self._publish, job, records))
             if job.window:
                 self.observations.commit(job.window)
             else:
@@ -264,13 +281,13 @@ class MemoryService:
     async def _produce_and_apply(self, job):
         if job.done:
             return True
-        if self._paused():
+        if job.result is None and self._paused():
             self.last_error = self._processor().get(
                 "error", "记忆服务已暂停。"
             )
             return False
-        recipe = self._route()
-        if job.blocked_recipe == recipe:
+        recipe = self._route() if job.result is None else ""
+        if recipe and job.blocked_recipe == recipe:
             self.last_error = job.error
             return False
         try:
@@ -282,7 +299,7 @@ class MemoryService:
             self._processor({})
             return True
         except Exception as exc:
-            if isinstance(exc, ValueError):
+            if isinstance(exc, ValueError) and not isinstance(exc, MemoryConflict) and "records_committed_at" not in job.timings:
                 job.result = None
             job.error = self.last_error = str(exc)
             job.failures.append(dict(recorded_at=iso_utc_now(), error=job.error))
@@ -372,7 +389,8 @@ class MemoryService:
                           operation=operation, target_id=target_id)
             )
             if not await self._execute(job):
-                return "Error: 请求已登记但未保存为记忆：" + self.last_error
+                stage = "正式记忆已保存，核心投影尚未完成" if "records_committed_at" in job.timings else "请求已登记但未保存为记忆"
+                return f"Error: {stage}：{self.last_error}"
             if not job.result.request_authorized:
                 return json.dumps(
                     dict(status="rejected", reason=job.result.reason, records=[]),
@@ -549,10 +567,7 @@ class MemoryService:
     async def _clear(self, scope):
         if not self.owner_memory_allowed:
             return
-        self.long_term.directory.mkdir(parents=True, exist_ok=True)
-        async with AsyncFileLock(
-            self.long_term.directory / "publication.lock", run_in_executor=False
-        ):
+        async with self.long_term.publication_lock():
             save_locked_json(self._clear_path(scope), dict(cleared_at=iso_utc_now()))
             await self.store.clear(scope)
             if scope == "global":
