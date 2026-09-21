@@ -300,8 +300,6 @@ class OutputConsoleProxy:
 
 
 console = OutputConsoleProxy()
-STREAM_PREVIEW_MAX_LINES = 10
-STREAM_PREVIEW_MAX_CHARS = 6000
 
 
 def render_review_hunk(name, hunk, status=None) -> Text:
@@ -336,13 +334,13 @@ def user_text_panel(content, title, *, text_style="bold white", border_style="br
     )
 
 
-def model_stream_visible_text(text) -> str:
+def model_stream_visible_text(text, policy) -> str:
     """Bound only the transient preview; the full response remains in the log."""
     body = text or ""
-    if len(body) > STREAM_PREVIEW_MAX_CHARS:
-        body = body[-STREAM_PREVIEW_MAX_CHARS:].lstrip("\n")
+    if len(body) > policy["stream_preview_max_chars"]:
+        body = body[-policy["stream_preview_max_chars"]:].lstrip("\n")
     lines = body.splitlines()
-    return "\n".join(lines[-STREAM_PREVIEW_MAX_LINES:]) if len(lines) > STREAM_PREVIEW_MAX_LINES else body
+    return "\n".join(lines[-policy["stream_preview_max_lines"]:]) if len(lines) > policy["stream_preview_max_lines"] else body
 
 
 def print_message(message, *, prefix="", style=""):
@@ -448,7 +446,6 @@ def print_repl_welcome() -> None:
 
 
 Reader = Callable[[Path], tuple[list[Any], dict[str, Any]]]
-RECENT_SESSION_LIMIT = 20
 
 
 @dataclass
@@ -544,7 +541,7 @@ async def build_panel_snapshot(
     history, sessions = await asyncio.to_thread(
         _collect_history, root, cache or PanelSnapshotCache()
     )
-    visible_sessions = sessions if include_all else sessions[:RECENT_SESSION_LIMIT]
+    visible_sessions = sessions if include_all else sessions[:settings()["ui"]["recent_session_limit"]]
     runtime = await _collect_runtime(system, coordinator_history, manager_history)
     return PanelSnapshot(
         runtime=runtime,
@@ -574,12 +571,13 @@ def _collect_history(
 ) -> tuple[PanelHistoryStats, list[PanelSessionSummary]]:
     history = PanelHistoryStats()
     sessions: dict[str, PanelSessionSummary] = {}
+    max_skipped_files = settings()["ui"]["max_skipped_files"]
     files = sorted(log_root.rglob(MODEL_MESSAGES_GLOB), key=str)
     for path in files:
         summary = cache.load(path)
         if isinstance(summary, str):
             history.skipped_count += 1
-            if len(history.skipped_files) < 5:
+            if len(history.skipped_files) < max_skipped_files:
                 history.skipped_files.append(summary)
             continue
         date, topic = summary.meta["date"], summary.meta["topic"]
@@ -735,7 +733,7 @@ def _render_sessions(
     sessions: list[PanelSessionSummary], *, include_all: bool
 ) -> Table:
     """Compare labeled session totals without implying continuous time or quota progress."""
-    scope = "全部" if include_all else f"最近 {RECENT_SESSION_LIMIT} 个"
+    scope = "全部" if include_all else f"最近 {settings()['ui']['recent_session_limit']} 个"
     table = Table(title=f"会话 API 用量 · {scope} · 最近活动优先", expand=True, show_lines=True)
     table.add_column("时间 / 会话", min_width=12, ratio=1, overflow="fold")
     table.add_column("相对用量", width=12, overflow="crop", no_wrap=True)

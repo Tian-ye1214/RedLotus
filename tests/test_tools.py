@@ -1,25 +1,37 @@
 """File review transaction faults, exercised against real isolated files."""
 
+import asyncio
+import csv
+import json
+import os
 import threading
+import time
+from contextlib import contextmanager
+from functools import partial
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import httpx
 import pytest
+import requests
 
 
-@pytest.fixture
-def reviewed_file(tmp_path):
+@pytest.fixture(params=["\n", "\r\n"])
+def reviewed_file(tmp_path, request):
     from redlotus.tools.base_tools import PendingReviewStore
 
     path = tmp_path / "review.txt"
-    path.write_text("a\nkeep\nz\n", encoding="utf-8")
+    path.write_bytes("a{0}keep{0}z{0}".format(request.param).encode())
     store = PendingReviewStore(threading.Lock())
     store.activate(lambda: None)
-    store.write(path, path.name, lambda _: "A\nkeep\nZ\n")
-    return path, store
+    store.write(path, path.name, lambda _: "A{0}keep{0}Z{0}".format(request.param))
+    return path, store, request.param
 
 
 @pytest.mark.parametrize("decision", [None, False, True])
 def test_review_refuses_external_edit_before_second_write(reviewed_file, decision):
-    path, store = reviewed_file
+    path, store, _ = reviewed_file
     entry = store.get(str(path))
     if decision is not None:
         store.decide(entry, 0, decision)
@@ -35,7 +47,7 @@ def test_review_refuses_external_edit_before_second_write(reviewed_file, decisio
 
 
 def test_second_write_keeps_accepted_changes_as_the_new_baseline(reviewed_file):
-    path, store = reviewed_file
+    path, store, _ = reviewed_file
     store.decide(store.get(str(path)), 0, False)
     store.write(path, path.name, lambda previous: previous + "later\n")
     entry = store.get(str(path))
@@ -45,13 +57,13 @@ def test_second_write_keeps_accepted_changes_as_the_new_baseline(reviewed_file):
 
 
 def test_reject_all_after_partial_rejection_and_another_write(reviewed_file):
-    path, store = reviewed_file
+    path, store, newline = reviewed_file
     store.decide(store.get(str(path)), 0, True)
     store.write(path, path.name, lambda previous: previous + "later\n")
     entry = store.get(str(path))
     for hunk in entry.hunks:
         store.decide(entry, hunk.index, True)
-    assert path.read_text(encoding="utf-8") == "a\nkeep\nz\n"
+    assert path.read_bytes() == f"a{newline}keep{newline}z{newline}".encode()
 
 
 def test_review_refuses_external_deletion_of_an_empty_original(tmp_path):
@@ -75,18 +87,17 @@ def test_review_refuses_external_deletion_of_an_empty_original(tmp_path):
 
 @pytest.mark.parametrize("operation", ["write", "reject"])
 def test_failed_write_preserves_file_and_review_state(reviewed_file, monkeypatch, operation):
-    from pathlib import Path
 
-    path, store = reviewed_file
+    path, store, _ = reviewed_file
     entry = store.get(str(path))
     original = path.read_bytes()
-    original_write = Path.write_text
+    original_write = Path.write_bytes
 
     def fail_write(target, content, *args, **kwargs):
         original_write(target, content[:1], *args, **kwargs)
         raise OSError("injected disk failure")
 
-    monkeypatch.setattr(Path, "write_text", fail_write)
+    monkeypatch.setattr(Path, "write_bytes", fail_write)
     with pytest.raises(OSError, match="disk failure"):
         if operation == "write":
             store.write(path, path.name, lambda _: "replacement")
@@ -133,7 +144,6 @@ def test_atomic_write_preserves_native_encoding_and_original_on_replace_failure(
 
 @pytest.mark.parametrize("timeout", [0, .05])
 def test_shared_file_lock_obeys_configured_wait_under_real_contention(tmp_path, timeout):
-    import json
     from concurrent.futures import ThreadPoolExecutor
 
     from filelock import FileLock, Timeout
@@ -155,7 +165,6 @@ def test_shared_file_lock_obeys_configured_wait_under_real_contention(tmp_path, 
 
 
 async def test_first_configuration_commit_uses_the_pending_lock_policy(tmp_path, monkeypatch):
-    import json
     from filelock import FileLock
 
     from redlotus.api.base import ConfigurationSetup
@@ -184,7 +193,6 @@ def test_application_structure_keeps_approved_module_and_effective_line_limits()
     import io
     import tokenize
     from collections import Counter
-    from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "src/redlotus"
     counts = Counter()
@@ -215,7 +223,7 @@ async def test_toolset_telemetry_preserves_results_without_execution_policy(tmp_
     from redlotus.sessions.context import TRACE_STORE, turn_context
     from redlotus.tools import registry
 
-    (tmp_path / "config.json").write_text('{"lifecycle":{"trace_history_turns":10}}')
+    (tmp_path / "config.json").write_text('{"lifecycle":{"trace_history_turns":10},"ui":{"tool_argument_preview_chars":80,"tool_keyword_limit":5,"tool_positional_limit":3}}')
     result = ToolReturn(return_value="original")
     notices = []
     monkeypatch.setattr(registry.logger, "debug", notices.append)
@@ -243,7 +251,6 @@ async def test_toolset_telemetry_preserves_results_without_execution_policy(tmp_
 
 
 def test_trace_retention_reads_configuration_only_when_recording(tmp_path):
-    import json
 
     from redlotus.sessions.context import TurnTraceStore
 
@@ -259,7 +266,6 @@ def test_trace_retention_reads_configuration_only_when_recording(tmp_path):
 
 @pytest.mark.parametrize("requested", [None, 300])
 async def test_all_external_processes_obey_configured_command_deadline(tmp_path, monkeypatch, requested):
-    import json
     import subprocess
     import sys
 
@@ -284,8 +290,6 @@ async def test_all_external_processes_obey_configured_command_deadline(tmp_path,
 
 
 async def test_inherited_pipe_failure_obeys_configured_cleanup_deadline(tmp_path):
-    import asyncio
-    from types import SimpleNamespace
 
     from redlotus.tools.execution import _terminate_process_tree
 
@@ -300,8 +304,6 @@ async def test_inherited_pipe_failure_obeys_configured_cleanup_deadline(tmp_path
 
 @pytest.mark.parametrize("parallelism", [1, 2])
 async def test_reference_parser_keeps_input_order_and_obeys_its_own_concurrency(tmp_path, monkeypatch, parallelism):
-    import asyncio
-    import json
 
     from redlotus.runtime.network import ModelInputPolicy
     from redlotus.runtime.resources import WorkspaceContext
@@ -341,8 +343,6 @@ async def test_reference_parser_keeps_input_order_and_obeys_its_own_concurrency(
     ("YES", True, {"width": 640, "height": 480}, "zh-CN"),
 ])
 async def test_browser_launch_uses_explicit_configuration(tmp_path, monkeypatch, headless, expected, viewport, locale):
-    import json
-    from types import SimpleNamespace
 
     from playwright import async_api
     from redlotus.tools.execution import PlaywrightBrowserSession
@@ -373,7 +373,6 @@ async def test_browser_launch_uses_explicit_configuration(tmp_path, monkeypatch,
 
 
 async def test_subagent_close_joins_its_thread_without_blocking_the_owner_loop(tmp_path):
-    import asyncio
 
     from redlotus.core.agents import SubagentHandle
     from redlotus.runtime.resources import WorkspaceContext
@@ -395,7 +394,6 @@ async def test_subagent_close_joins_its_thread_without_blocking_the_owner_loop(t
 
 
 def test_cancelled_close_does_not_keep_the_owner_executor_alive(tmp_path):
-    import asyncio
 
     from redlotus.core.agents import SubagentHandle
     from redlotus.runtime.resources import WorkspaceContext
@@ -436,10 +434,7 @@ def test_cancelled_close_does_not_keep_the_owner_executor_alive(tmp_path):
 
 
 async def test_reference_download_updates_its_http_timeout_and_keeps_contents(tmp_path, monkeypatch):
-    import json
-    from functools import partial
 
-    import httpx
 
     from redlotus.runtime.network import ModelInputPolicy, close_all_clients
     from redlotus.runtime.resources import WorkspaceContext
@@ -474,12 +469,7 @@ async def test_reference_download_updates_its_http_timeout_and_keeps_contents(tm
 
 @pytest.mark.parametrize("overrides", [{}, {"width": 128, "height": 96, "max_wait_time": 5}])
 async def test_image_generation_shares_configured_http_and_preserves_explicit_arguments(tmp_path, monkeypatch, overrides):
-    import asyncio
-    import json
-    from functools import partial
 
-    import httpx
-    import requests
     from redlotus.runtime import logging as logger
     from redlotus.runtime.network import close_all_clients
     from redlotus.tools.base_tools import generate_image_from_flux
@@ -526,13 +516,7 @@ async def test_image_generation_shares_configured_http_and_preserves_explicit_ar
 
 @pytest.mark.parametrize("phase", ["submission", "poll", "download", "cancel"])
 async def test_image_deadline_includes_submission_and_cancels_async_io(tmp_path, monkeypatch, phase):
-    import asyncio
-    import json
-    import time
-    from functools import partial
 
-    import httpx
-    import requests
     from redlotus.runtime import logging as logger
     from redlotus.runtime.network import close_all_clients
     from redlotus.tools.base_tools import generate_image_from_flux
@@ -579,8 +563,6 @@ async def test_image_deadline_includes_submission_and_cancels_async_io(tmp_path,
 
 
 async def test_browser_updates_separate_action_and_navigation_policies(tmp_path):
-    import json
-    from types import SimpleNamespace
 
     from redlotus.tools.execution import PlaywrightBrowserSession
 
@@ -604,9 +586,43 @@ async def test_browser_updates_separate_action_and_navigation_policies(tmp_path)
         assert observed["action"] == action * 1000 and navigations[-1] == navigation * 1000
 
 
+@pytest.mark.parametrize("max_results", [None, 2])
+def test_web_search_reads_config_and_preserves_explicit_limit(tmp_path, monkeypatch, max_results):
+
+    from redlotus.tools import base_tools
+
+    policy = {"max_results": 1, "region": "wt-wt", "timeout_seconds": 7,
+              "safesearch": "moderate", "timelimit": None, "backend": "auto"}
+    (tmp_path / "config.json").write_text(json.dumps({"web_search": policy}))
+    factory = MagicMock()
+    search = factory.return_value.__enter__.return_value.text
+    search.return_value = [{"title": "Fixture", "href": "https://example.invalid", "body": "complete snippet"}]
+    monkeypatch.setattr(base_tools, "DDGS", factory)
+    result = base_tools.BasicToolkit.search_web(None, "isolated query", max_results=max_results)
+    factory.assert_called_once_with(timeout=7)
+    expected = {key: value for key, value in policy.items() if key != "timeout_seconds"}
+    expected["max_results"] = policy["max_results"] if max_results is None else max_results
+    search.assert_called_once_with("isolated query", **expected)
+    assert "Fixture" in result and "https://example.invalid" in result and "complete snippet" in result
+    assert json.loads((tmp_path / "config.json").read_text())["web_search"] == policy
+
+
+@pytest.mark.parametrize("limit,newline,expected", [(4, "\n", "a|b\n"), (8, "\r\n", "a|b\r\n1|2")])
+def test_csv_detection_sample_does_not_truncate_parsed_rows(tmp_path, monkeypatch, limit, newline, expected):
+    from redlotus.tools.references import DocumentReader
+
+    (tmp_path / "config.json").write_text(json.dumps({"input_limits": {"csv_sniff_chars": limit}}))
+    path = tmp_path / "table.csv"
+    path.write_bytes(newline.join(("a|b", "1|2", "3|4", "")).encode())
+    sniff = MagicMock(wraps=csv.Sniffer().sniff)
+    monkeypatch.setattr(csv.Sniffer, "sniff", sniff)
+    parts = DocumentReader().csv(path, tmp_path)
+    assert sniff.call_args.args[0] == expected
+    assert json.loads(parts[0].text) == [["a", "b"], ["1", "2"], ["3", "4"]]
+
+
 @pytest.mark.parametrize("retries", [0, 1])
 async def test_task_retry_limit_comes_from_config(tmp_path, retries):
-    import json
 
     from redlotus.core.tasks import TaskManager
     from redlotus.sessions.context import SubagentResult
@@ -631,15 +647,11 @@ async def test_task_retry_limit_comes_from_config(tmp_path, retries):
 
 
 def test_log_retention_and_rotation_follow_config(tmp_path, monkeypatch):
-    import json
-    import os
-    import time
-    from contextlib import contextmanager
-    from types import SimpleNamespace
 
     from redlotus.runtime import logging as logger
+    from redlotus.tools.base_tools import BasicToolkit
 
-    (tmp_path / "config.json").write_text(json.dumps({"storage": {"cleanup": {
+    (tmp_path / "config.json").write_text(json.dumps({"storage": {"filename_max_chars": 7, "cleanup": {
         "log_retention_days": 1, "session_log_max_bytes": 1,
     }}}))
     monkeypatch.setattr(logger, "_configured_dir", tmp_path)
@@ -654,8 +666,12 @@ def test_log_retention_and_rotation_follow_config(tmp_path, monkeypatch):
         Message.record["extra"] = extra
         yield
 
+    toolkit = object.__new__(BasicToolkit)
+    toolkit._WORK_DATABASE_ROOT = tmp_path
+    assert toolkit.set_task_directory("  fixture/child  ").name == "fixture"
+    assert toolkit.set_task_directory("").name == "default"
     monkeypatch.setattr(logger, "_lg", SimpleNamespace(contextualize=contextualize))
-    with logger.session_log_context("fixture"):
+    with logger.session_log_context("fixture-long"):
         with monkeypatch.context() as scoped:
             scoped.setattr(logger, "settings", lambda: pytest.fail("A log record must use its session's policy snapshot"))
             logger._session_sink(Message("second"))

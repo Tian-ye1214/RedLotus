@@ -15,12 +15,14 @@ import time
 import tokenize
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 from typing import Any, Callable
 
 import yaml
 
 from redlotus.runtime import logging as logger
+from redlotus.runtime.config import settings
 from redlotus.runtime.resources import (
     skills_dir,
     user_skills_dir,
@@ -641,17 +643,20 @@ def wrap_tools_for_user_notify(tools: list[Any]) -> list[Any]:
 def _notify(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
     """把一次调用以 "🔧 名字 [agent] · 参数" 推给用户；无回调则降级为 debug。"""
 
+    policy = settings()["ui"]
+
     def brief(v: Any) -> str:
         text = repr(v)
-        return text if len(text) <= 80 else f"{text[:79]}…"
+        limit = policy["tool_argument_preview_chars"]
+        return text if len(text) <= limit else f"{text[:limit-1]}…"
 
     parts = [f"🔧 {name}"]
     if agent_id := current_short_agent_id():
         parts.append(f"[{agent_id}]")
     if kwargs:
-        parts.append(", ".join(f"{k}={brief(v)}" for k, v in list(kwargs.items())[:5]))
+        parts.append(", ".join(f"{k}={brief(v)}" for k, v in islice(kwargs.items(), policy["tool_keyword_limit"])))
     elif args:
-        parts.append(", ".join(brief(v) for v in args[:3]))
+        parts.append(", ".join(brief(v) for v in islice(args, policy["tool_positional_limit"])))
     line = " · ".join(parts)
 
     callback = _notify_callback.get()

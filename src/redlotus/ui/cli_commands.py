@@ -246,7 +246,7 @@ def _format_usage_report(report: UsageReport) -> str:
                 f"  missing price: {summary.price_unavailable_responses} responses"
             )
     lines.extend(
-        [f"Files: {len(report.files)}", *(str(item.path) for item in report.files[:10])]
+        [f"Files: {len(report.files)}", *(str(item.path) for item in report.files[:settings()["ui"]["usage_file_limit"]])]
     )
     return "\n".join(lines)
 
@@ -678,7 +678,7 @@ class WorkspaceSnapshot:
 
     @property
     def error_summary(self) -> str:
-        return " ".join(self.error.split())[:120] or "会话文件不可读取"
+        return " ".join(self.error.split())[:settings()["ui"]["session_error_max_chars"]] or "会话文件不可读取"
 
     @property
     def label(self):

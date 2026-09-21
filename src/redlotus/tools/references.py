@@ -221,7 +221,7 @@ class DocumentReader:
     def csv(self, source: Path, directory: Path) -> list[ReferencePart]:
         text = self.decode(source.read_bytes())
         try:
-            dialect = csv.Sniffer().sniff(text[:65536], delimiters=",;\t|")
+            dialect = csv.Sniffer().sniff(text[:settings()["input_limits"]["csv_sniff_chars"]], delimiters=",;\t|")
         except csv.Error:
             dialect = csv.excel
         rows = list(csv.reader(io.StringIO(text), dialect))

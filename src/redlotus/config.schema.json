@@ -184,6 +184,7 @@
       "type": "object",
       "description": "路径和磁盘清理策略",
       "properties": {
+        "filename_max_chars": {"type": "integer", "minimum": 1, "description": "任务产物目录名和会话日志名的清洗长度；修改会影响新生成名称"},
         "file_lock_timeout_seconds": {
           "type": "number",
           "minimum": 0,
@@ -252,6 +253,7 @@
         }
       },
       "required": [
+        "filename_max_chars",
         "file_lock_timeout_seconds",
         "project_dir",
         "sessions_dir",
@@ -266,6 +268,7 @@
       "type": "object",
       "description": "全局和身份输入限制",
       "properties": {
+        "csv_sniff_chars": {"type": "integer", "minimum": 1, "description": "CSV 分隔符探测最多读取的字符数；解析仍保留完整文件"},
         "max_redirects": {
           "type": "integer",
           "minimum": 0,
@@ -286,6 +289,7 @@
         }
       },
       "required": [
+        "csv_sniff_chars",
         "defaults",
         "parse_concurrency",
         "max_redirects"
@@ -574,9 +578,32 @@
       "properties": {
         "status_refresh_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "运行状态刷新的间隔秒数"},
         "panel_refresh_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "用量面板刷新的间隔秒数"},
-        "max_diff_lines": {"type": "integer", "minimum": 1, "description": "彩色 diff 预览最多显示的行数；截断时显示剩余数量"}
+        "max_diff_lines": {"type": "integer", "minimum": 1, "description": "彩色 diff 预览最多显示的行数；截断时显示剩余数量"},
+        "stream_preview_max_lines": {"type": "integer", "minimum": 1, "description": "流式正文预览最多保留的末尾行数；不裁剪完整回复"},
+        "stream_preview_max_chars": {"type": "integer", "minimum": 1, "description": "流式正文预览最多保留的末尾字符数；不裁剪完整回复"},
+        "recent_session_limit": {"type": "integer", "minimum": 1, "description": "用量面板默认展示的最近会话数量；全部模式不限制"},
+        "max_skipped_files": {"type": "integer", "minimum": 1, "description": "面板展示的损坏会话文件明细上限；失败总数仍完整统计"},
+        "file_completion_limit": {"type": "integer", "minimum": 1, "description": "路径输入补全最多展示的候选数量，目录仍排在文件之前"},
+        "tool_argument_preview_chars": {"type": "integer", "minimum": 1, "description": "每个工具参数在通知中的字符上限；不改模型实际参数"},
+        "tool_keyword_limit": {"type": "integer", "minimum": 1, "description": "工具通知最多展示的命名参数数量"},
+        "tool_positional_limit": {"type": "integer", "minimum": 1, "description": "工具通知最多展示的位置参数数量"},
+        "usage_file_limit": {"type": "integer", "minimum": 1, "description": "用量报告最多展示的源文件路径数量；累计数值和文件总数不受限制"},
+        "session_error_max_chars": {"type": "integer", "minimum": 1, "description": "会话加载菜单的失败原因字符上限；完整原因仍保留在记录中"}
       },
-      "required": ["status_refresh_seconds", "panel_refresh_seconds", "max_diff_lines"]
+      "required": ["status_refresh_seconds", "panel_refresh_seconds", "max_diff_lines", "stream_preview_max_lines", "stream_preview_max_chars", "recent_session_limit", "max_skipped_files", "file_completion_limit", "tool_argument_preview_chars", "tool_keyword_limit", "tool_positional_limit", "usage_file_limit", "session_error_max_chars"]
+    },
+    "web_search": {
+      "type": "object",
+      "description": "搜索工具的等待和原生 DDGS 参数；显式工具数量参数可覆盖本次请求",
+      "properties": {
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "搜索服务 HTTP 操作等待秒数"},
+        "max_results": {"type": "integer", "minimum": 1, "description": "工具未指定时的搜索结果数量"},
+        "region": {"type": "string", "description": "DDGS 搜索区域，例如 cn-zh 或 wt-wt"},
+        "safesearch": {"type": "string", "string_values": ["on", "moderate", "off"], "description": "DDGS 内容过滤级别"},
+        "timelimit": {"type": ["string", "null"], "description": "DDGS 搜索时间范围；null 表示不限制"},
+        "backend": {"type": "string", "description": "DDGS 搜索后端；auto 由原生库选择，可按库支持指定后端"}
+      },
+      "required": ["timeout_seconds", "max_results", "region", "safesearch", "timelimit", "backend"]
     },
     "BROWSER_HEADLESS": {
       "type": ["boolean", "string", "integer"],
@@ -637,7 +664,8 @@
     "browser",
     "BROWSER_HEADLESS",
     "ui",
-    "image_generation"
+    "image_generation",
+    "web_search"
   ],
   "$defs": {
     "model": {

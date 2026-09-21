@@ -8,6 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
+from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
@@ -150,9 +151,6 @@ def completion_for_input(text: str) -> InputCompletion | None:
     return None
 
 
-_COMPLETION_LIMIT = 50
-
-
 class AgentCompleter(Completer):
     """根据光标前上下文补全命令、角色名或文件路径。"""
 
@@ -208,12 +206,9 @@ def _iter_file_completions(fragment: str, *, at_mode: bool):
     except (PermissionError, OSError):
         return
 
-    count = 0
-    for child in children:
-        name = child.name.casefold() if os.name == "nt" else child.name
-        match = prefix.casefold() if os.name == "nt" else prefix
-        if not name.startswith(match):
-            continue
+    match = prefix.casefold() if os.name == "nt" else prefix
+    matching = (child for child in children if (child.name.casefold() if os.name == "nt" else child.name).startswith(match))
+    for child in islice(matching, settings()["ui"]["file_completion_limit"]):
         try:
             candidate = child.relative_to(current_workspace()).as_posix()
         except ValueError:
@@ -230,9 +225,6 @@ def _iter_file_completions(fragment: str, *, at_mode: bool):
             display=display,
             display_meta="dir" if child.is_dir() else "file",
         )
-        count += 1
-        if count >= _COMPLETION_LIMIT:
-            break
 
 
 def _history_path() -> Path:
@@ -476,7 +468,6 @@ class AgentInput(Input):
     BINDINGS = [
         *Input.BINDINGS,
         Binding("tab", "cursor_right", "Complete", show=False),
-        Binding("ctrl+enter", "app.submit_urgent", "发送", key_display="Ctrl+Enter"),
     ]
 
     async def on_key(self, event: events.Key) -> None:
@@ -741,7 +732,7 @@ class RunStatus(Static):
 
     def render(self) -> Any:
         if self.app._panel_mode:
-            return Text("Panel 总览    ·    每 3 秒刷新    ·    Esc 退出", style="bold")
+            return Text(str(self.app.query_one("#panel-view").border_title), style="bold")
         if self.app._review_mode:
             return Text(
                 "审查改动中    ·    y 保留    ·    n 撤销    ·    ↑↓ 切换    ·    Esc 退出",

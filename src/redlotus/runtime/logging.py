@@ -157,7 +157,7 @@ def setup_task_logger(task_name: str = "task") -> None:
     log_dir = logs_dir(workspace) if workspace is not None else get_log_dir()
     with _configuration_lock:
         log_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{safe_name(task_name, max_len=50, fallback='task')}_{ts}.log"
+        filename = f"{safe_name(task_name, fallback='task')}_{ts}.log"
         path = log_dir / filename
         _task_log_paths[log_dir] = path
         _task_log_path.set(path)
@@ -188,7 +188,7 @@ def session_log_context(session_name: str):
     workspace = active_workspace()
     log_dir = logs_dir(workspace) if workspace is not None else get_log_dir()
     with _lg.contextualize(
-        session=safe_name(session_name, max_len=50, fallback="task"),
+        session=safe_name(session_name, fallback="task"),
         session_log_max_bytes=settings()["storage"]["cleanup"]["session_log_max_bytes"],
         **{_SESSION_LOG_DIR: str(log_dir)},
     ):

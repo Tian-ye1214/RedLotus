@@ -30,6 +30,7 @@ from redlotus.runtime.resources import (
     bind_to_loop,
     current_workspace,
     runtime_dir,
+    safe_name,
     user_skills_dir,
 )
 from redlotus.tools.execution import (
@@ -62,7 +63,7 @@ async def generate_image_from_flux(prompt: str, width: int | None = None, height
     start_time = time.monotonic()
     try:
         async with asyncio.timeout(max_wait_time):
-            logger.info(f"正在提交图像生成请求: {prompt[:50]}...")
+            logger.info("正在提交图像生成请求")
             response = await client.post(bfl_base_url, headers=headers, json={"prompt": prompt, "width": width, "height": height})
             response.raise_for_status()
             response_data = response.json()
@@ -187,15 +188,7 @@ class BasicToolkit:
         Returns:
             Path to the task work directory.
         """
-        safe_name = "".join(
-            c if c.isalnum() or c in ("_", "-", " ") else "_" for c in task_name
-        )
-        safe_name = safe_name.strip()[:50]
-
-        if not safe_name:
-            safe_name = "default_task"
-
-        task_dir = self._WORK_DATABASE_ROOT / safe_name
+        task_dir = self._WORK_DATABASE_ROOT / safe_name(task_name, extra="_- ", fallback="default_task")
         self._artifact_dir = task_dir
         logger.info(f"📁 任务工作目录已设置: {task_dir}")
 
@@ -317,7 +310,7 @@ class BasicToolkit:
         """
         try:
             return (
-                self._readable_path(name).read_text(encoding="utf-8", errors="replace")
+                self._readable_path(name).read_bytes().decode("utf-8", errors="replace")
                 or "File is empty"
             )
         except (OSError, ValueError) as exc:
@@ -428,19 +421,20 @@ class BasicToolkit:
         except Exception as e:
             return f"Search error: {e}"
 
-    def search_web(self, query: str, max_results: int = 5) -> str:
+    def search_web(self, query: str, max_results: int | None = None) -> str:
         """
         Search web pages. Returns a list of search results (title, link, summary).
 
         Args:
             query: Search keywords
-            max_results: Maximum number of results to return, defaults to 5
+            max_results: Maximum number of results; omitted or null uses web_search.max_results from configuration.
         """
+        policy = dict(settings()["web_search"])
+        if max_results is not None:
+            policy["max_results"] = max_results
         try:
-            with DDGS() as ddgs:
-                results = list(
-                    ddgs.text(query, max_results=max_results, region="cn-zh")
-                )
+            with DDGS(timeout=policy.pop("timeout_seconds")) as ddgs:
+                results = list(ddgs.text(query, **policy))
 
             if not results:
                 logger.warning("⚠️ 没有找到相关搜索结果")
@@ -453,8 +447,7 @@ class BasicToolkit:
                 snippet = result.get("body", "No summary")
                 output.append(f"{i}. {title}\n   Link: {link}\n   Summary: {snippet}\n")
 
-            result_text = "\n".join(output)
-            return result_text
+            return "\n".join(output)
         except Exception as e:
             logger.error(f"❌ 搜索出错: {e}")
             return f"Error during search: {e}"
@@ -681,7 +674,7 @@ class PendingReviewStore:
     def write(self, path: Path, name: str, update):
         """Publish file contents and their review snapshot as one locked operation."""
         with self._lock:
-            previous = path.read_text(encoding="utf-8") if path.exists() else None
+            previous = path.read_bytes().decode("utf-8") if path.exists() else None
             old = self._entries.get(str(path))
             if old:
                 old.check_current(previous)
@@ -691,7 +684,7 @@ class PendingReviewStore:
                 {hunk.index for hunk in old.hunks if old.decisions.get(hunk.index) is not False},
             ) if old else previous or ""
             existed = old.existed or False in old.decisions.values() if old else previous is not None
-            atomic_write(path, content)
+            atomic_write(path, content.encode("utf-8"))
             if self._on_change is not None and baseline != content:
                 self._entries[str(path)] = ReviewEntry(path, name, baseline, content, existed=existed)
             else:
@@ -713,7 +706,7 @@ class PendingReviewStore:
         with self._lock:
             if self._entries.get(str(entry.path)) is not entry:
                 return False
-            entry.check_current(entry.path.read_text(encoding="utf-8") if entry.path.exists() else None)
+            entry.check_current(entry.path.read_bytes().decode("utf-8") if entry.path.exists() else None)
             decisions = {**entry.decisions, index: reject}
             rejected = {key for key, value in decisions.items() if value}
             if not entry.existed and len(rejected) == len(entry.hunks):
@@ -721,7 +714,7 @@ class PendingReviewStore:
             else:
                 atomic_write(
                     entry.path,
-                    reconstruct(entry.baseline, entry.snapshot, rejected),
+                    reconstruct(entry.baseline, entry.snapshot, rejected).encode("utf-8"),
                 )
             entry.decisions = decisions
         return True

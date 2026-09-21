@@ -364,7 +364,6 @@ class RedLotusTui(App[None]):
         self._panel_include_all = include_all
         self.query_one("#output", RichLog).display = False
         panel_view = self.query_one("#panel-view", VerticalScroll)
-        panel_view.border_title = "工作区总览 · 每 3 秒刷新 · Esc 退出"
         panel_view.display = True
         self._schedule_panel_refresh()
         self._ensure_panel_timer()
@@ -406,7 +405,9 @@ class RedLotusTui(App[None]):
     def _ensure_panel_timer(self) -> None:
         if self._panel_timer is not None:
             return
-        self._panel_timer = self.set_interval(settings()["ui"]["panel_refresh_seconds"], self._schedule_panel_refresh)
+        interval = settings()["ui"]["panel_refresh_seconds"]
+        self._panel_timer = self.set_interval(interval, self._schedule_panel_refresh)
+        self.query_one("#panel-view").border_title = f"工作区总览 · 每 {interval:g} 秒刷新 · Esc 退出"
 
     def _stop_panel_timer(self) -> None:
         timer = self._panel_timer
@@ -507,7 +508,7 @@ class RedLotusTui(App[None]):
         self._display_content(
             "stream-preview",
             user_text_panel(
-                model_stream_visible_text(self._model_stream_text),
+                model_stream_visible_text(self._model_stream_text, self._stream_policy),
                 self._model_stream_title,
                 text_style="white",
                 border_style="cyan",
@@ -518,6 +519,7 @@ class RedLotusTui(App[None]):
     def begin_model_stream(self, title: str) -> None:
         self.clear_model_stream()
         self._stream_session = (self.system.session_key, self.system._session.generation)
+        self._stream_policy = settings()["ui"]
         self._model_stream_title = title
         self._refresh_model_stream()
 
@@ -621,13 +623,6 @@ class RedLotusTui(App[None]):
 
     async def ask_config(self, question: str, *, secret=False):
         return await self.ask_user(question, record_reply=False, secret=secret)
-
-    async def action_submit_urgent(self) -> None:
-        """Submit Ctrl+Enter through the same input path with explicit priority."""
-        inp = self.query_one("#input", AgentInput)
-        if inp.disabled or self.controller.is_transitioning:
-            return
-        await inp.action_submit(urgent=True)
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "session-load" or self.controller.is_transitioning or self._active_line_handlers:

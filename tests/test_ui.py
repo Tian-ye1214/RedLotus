@@ -1,5 +1,7 @@
 """Auxiliary UI contracts; product/API acceptance is recorded separately."""
 
+import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -64,7 +66,6 @@ def test_textual_sink_preserves_ansi_and_dispatches_on_ui_thread():
 
 
 def test_diff_preview_reads_config_without_truncating_the_plain_record(tmp_path):
-    import json
 
     from redlotus.ui.presentation import DiffKind, DiffLine, DiffStyle, format_diff_text, render_diff
 
@@ -82,6 +83,7 @@ def test_diff_preview_reads_config_without_truncating_the_plain_record(tmp_path)
 async def test_real_textual_timers_obey_refresh_configuration(tmp_path, monkeypatch):
     from redlotus.ui import presentation
     from redlotus.ui.tui import RedLotusTui
+    from redlotus.ui.widgets import RunStatus
 
     (tmp_path / "config.json").write_text('{"ui":{"status_refresh_seconds":0.02,"panel_refresh_seconds":0.03}}')
     ticks = {"status": 0, "panel": 0}
@@ -105,10 +107,93 @@ async def test_real_textual_timers_obey_refresh_configuration(tmp_path, monkeypa
                                  set_snapshot_loaded_callback=lambda callback: None)
     async with RedLotusTui(controller).run_test() as pilot:
         pilot.app._ensure_panel_timer()
+        pilot.app._panel_mode = True
+        assert "0.03" in str(pilot.app.query_one("#panel-view").border_title)
+        assert "0.03" in pilot.app.query_one(RunStatus).render().plain
         before = dict(ticks)
         await pilot.pause(.15)
         assert ticks["status"] > before["status"] and ticks["panel"] > before["panel"]
         pilot.app._stop_panel_timer()
+
+
+@pytest.mark.parametrize("lines, chars, expected", [(2, 100, "line-2\nline-3"), (20, 4, "ne-3")])
+def test_stream_preview_obeys_configured_line_and_character_limits(tmp_path, lines, chars, expected):
+
+    from redlotus.ui.presentation import model_stream_visible_text
+    from redlotus.runtime.config import settings
+
+    (tmp_path / "config.json").write_text(json.dumps({"ui": {"stream_preview_max_lines": lines, "stream_preview_max_chars": chars}}))
+    assert model_stream_visible_text("line-1\nline-2\nline-3", settings()["ui"]) == expected
+
+
+@pytest.mark.parametrize("limit", [1, 2])
+def test_tool_notice_limits_do_not_change_the_tool_arguments(tmp_path, monkeypatch, limit):
+    from redlotus.tools import registry
+
+    (tmp_path / "config.json").write_text(json.dumps({"ui": {
+        "tool_argument_preview_chars": 5, "tool_keyword_limit": limit, "tool_positional_limit": limit,
+    }}))
+    notices, values = [], ("abcdefgh", "second", "third")
+    monkeypatch.setattr(registry.logger, "debug", notices.append)
+    registry._notify("fixture", values, {})
+    registry._notify("fixture", (), dict(zip(("first", "second", "third"), values)))
+    assert notices[0] == "🔧 fixture · " + ("'abc…" if limit == 1 else "'abc…, 'sec…")
+    assert notices[1] == "🔧 fixture · " + ("first='abc…" if limit == 1 else "first='abc…, second='sec…")
+    assert values == ("abcdefgh", "second", "third")
+
+
+@pytest.mark.parametrize("limit", [1, 2])
+def test_usage_and_session_error_display_keep_complete_records(tmp_path, limit):
+    from datetime import datetime, timezone
+    from redlotus.core.history import UsageReport
+    from redlotus.ui.cli_commands import WorkspaceSnapshot, _format_usage_report
+
+    (tmp_path / "config.json").write_text(json.dumps({"ui": {"usage_file_limit": limit, "session_error_max_chars": 5}}))
+    report = UsageReport(files=[SimpleNamespace(path=tmp_path / f"session-{i}") for i in (1, 2, 3)])
+    text = _format_usage_report(report)
+    assert "Files: 3" in text and f"session-{limit}" in text and f"session-{limit+1}" not in text
+    assert len(report.files) == 3
+    snapshot = WorkspaceSnapshot(tmp_path, {}, datetime.now(timezone.utc), "coordinator", "", "fixture", 0, "first\nsecond")
+    assert snapshot.error_summary == "first" and snapshot.error == "first\nsecond"
+
+
+async def test_panel_limits_visible_sessions_and_error_details_without_losing_totals(tmp_path):
+
+    from redlotus.ui.presentation import PanelSnapshotCache, build_panel_snapshot, _render_sessions
+
+    def read(path):
+        return [], json.loads(path.read_text(encoding="utf-8"))
+
+    for name in ("first", "second", "third", "bad-1", "bad-2"):
+        path = tmp_path / name / "model_messages.json"
+        path.parent.mkdir()
+        path.write_text("invalid" if name.startswith("bad") else json.dumps({
+            "date": "2026-09-22", "topic": name, "session_id": name, "saved_at": "2026-09-22T00:00:00+00:00",
+        }), encoding="utf-8")
+    for limit in (1, 2):
+        (tmp_path / "config.json").write_text(json.dumps({"ui": {"recent_session_limit": limit, "max_skipped_files": limit}}))
+        snapshot = await build_panel_snapshot(log_root=tmp_path, cache=PanelSnapshotCache(reader=read))
+        assert len(snapshot.visible_sessions) == limit and snapshot.history.conversation_count == 3
+        assert snapshot.history.skipped_count == 2 and len(snapshot.history.skipped_files) == limit
+        assert f"最近 {limit} 个" in _render_sessions(snapshot.visible_sessions, include_all=False).title
+        complete = await build_panel_snapshot(log_root=tmp_path, cache=PanelSnapshotCache(reader=read), include_all=True)
+        assert len(complete.visible_sessions) == 3 and "全部" in _render_sessions(complete.visible_sessions, include_all=True).title
+
+
+@pytest.mark.parametrize("limit", [1, 2])
+def test_file_completion_uses_configured_limit_and_keeps_directory_first(tmp_path, limit):
+
+    from redlotus.runtime.resources import WorkspaceContext, workspace_context
+    from redlotus.ui.widgets import input_completions
+
+    (tmp_path / "config.json").write_text(json.dumps({"ui": {"file_completion_limit": limit}}))
+    (tmp_path / "item folder").mkdir()
+    for name in ("item a.txt", "item b.txt"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    with workspace_context(WorkspaceContext.from_path(tmp_path)):
+        choices = list(input_completions("@item"))
+    assert len(choices) == limit and "item folder" in choices[0].text
+    assert choices[0].display_meta_text == "dir"
 
 
 async def test_release_ui_has_no_keyboard_diagnostics(tmp_path, monkeypatch):
@@ -216,7 +301,6 @@ def channel_message(text, *names):
                                                ("/stop", ["second"]), ("/clear", ["fresh"]),
                                                ("结束任务", ["second", "fresh"])])
 async def test_slow_channel_attachment_respects_queue_stop_and_clear(channel_probe, command, expected):
-    import asyncio
 
     p = channel_probe
     started, release = asyncio.Event(), asyncio.Event()
@@ -251,7 +335,6 @@ async def test_slow_channel_attachment_respects_queue_stop_and_clear(channel_pro
 @pytest.mark.parametrize("names, missing", [(('missing.txt',), False),
                                           (('first.txt', 'missing.txt'), False), (('missing.txt',), True)])
 async def test_channel_attachment_failure_never_executes_partial_request(channel_probe, names, missing):
-    import asyncio
 
     p = channel_probe
 
@@ -273,7 +356,6 @@ async def test_channel_attachment_failure_never_executes_partial_request(channel
 
 
 async def test_channel_wait_uses_configured_deadline(channel_probe):
-    import asyncio
 
     from redlotus.api.base import QueuedTurn
     from redlotus.sessions.control import UserMessage
@@ -294,7 +376,6 @@ async def test_channel_wait_uses_configured_deadline(channel_probe):
 
 
 async def test_channel_normal_input_retries_paused_checkpoint_before_queued_turn(channel_probe, monkeypatch):
-    import asyncio
 
     p, writable, committed = channel_probe, False, []
     original = p.bot._run_turn
@@ -329,7 +410,6 @@ async def test_channel_normal_input_retries_paused_checkpoint_before_queued_turn
 
 
 async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
-    import asyncio
 
     from pydantic_ai import BinaryContent
 
@@ -405,7 +485,6 @@ def test_qq_second_download_failure_is_not_a_partial_image_request(tmp_path, mon
 
 @pytest.mark.parametrize("limit,public", [(0, True), (1, True), (1, False)])
 def test_qq_redirect_policy_keeps_each_destination_check(tmp_path, monkeypatch, limit, public):
-    import json
     import httpx
 
     from redlotus.api import qq_media_helpers as media
@@ -437,7 +516,6 @@ def test_qq_redirect_policy_keeps_each_destination_check(tmp_path, monkeypatch, 
 
 @pytest.mark.parametrize("initial", [{}, {"BASE_URL": "https://example.invalid/v1", "API_KEY": "fixture-only"}])
 async def test_first_use_enters_wizard_and_cancellation_writes_nothing(tmp_path, initial):
-    import json
 
     from redlotus.api.base import prepare_startup_configuration
 
@@ -471,10 +549,10 @@ def startup_values():
         "MODEL_HTTP_TIMEOUT": 30, "request_limit": None,
         "agent_run_policy": {"max_concurrent_threads_per_session": 2, "max_command_timeout_seconds": 15, "max_task_retries": 2},
         "lifecycle": {"invocation_history_per_session": 10, "shutdown_grace_seconds": 2, "process_termination_timeout_seconds": 1, "trace_history_turns": 20},
-        "storage": {"file_lock_timeout_seconds": 0, "project_dir": "data", "sessions_dir": "data/sessions", "project_logs_dir": "data/logs",
+        "storage": {"filename_max_chars": 50, "file_lock_timeout_seconds": 0, "project_dir": "data", "sessions_dir": "data/sessions", "project_logs_dir": "data/logs",
                     "references_dir": "data/references", "runtime_dir": "data/runtime", "state_dir": "",
                     "cleanup": {"enabled": False, "execution_cache": False, "session_retention_days": 7, "log_retention_days": 7, "session_log_max_bytes": 4096}},
-        "input_limits": {"parse_concurrency": 2, "max_redirects": 1, "defaults": {"max_files": 2, "max_file_bytes": 1024, "reference_download_timeout_seconds": 2}},
+        "input_limits": {"csv_sniff_chars": 65536, "parse_concurrency": 2, "max_redirects": 1, "defaults": {"max_files": 2, "max_file_bytes": 1024, "reference_download_timeout_seconds": 2}},
         "memory_perception": {"model_role": "worker", "window_turns": 20, "overlap_turns": 3, "quiescence_wait_timeout_seconds": 2},
         "short_term_memory": {"db_path": "memory", "table_name": "fixture", "turn_token_limit": 200,
                               "turn_chunk_overlap_tokens": 20, "vector_search_limit": 5, "final_top_k": 2,
@@ -483,7 +561,12 @@ def startup_values():
                                         "rows_per_partition": 4, "dimensions_per_sub_vector": 4}},
         "long_term_memory": {"table_name": "fixture_profile"},
         "BROWSER_HEADLESS": True,
-        "ui": {"status_refresh_seconds": .5, "panel_refresh_seconds": 3, "max_diff_lines": 300},
+        "ui": {"status_refresh_seconds": .5, "panel_refresh_seconds": 3, "max_diff_lines": 300,
+               "stream_preview_max_lines": 10, "stream_preview_max_chars": 6000, "recent_session_limit": 20,
+               "max_skipped_files": 5, "file_completion_limit": 50,
+               "tool_argument_preview_chars": 80, "tool_keyword_limit": 5, "tool_positional_limit": 3,
+               "usage_file_limit": 10, "session_error_max_chars": 120},
+        "web_search": {"timeout_seconds": 5, "max_results": 5, "region": "cn-zh", "safesearch": "moderate", "timelimit": None, "backend": "auto"},
         "image_generation": {"width": 512, "height": 512, "max_wait_seconds": 60, "http_timeout_seconds": 5,
                              "poll_interval_seconds": .5, "progress_every_polls": 10},
         "browser": {"viewport": {"width": 900, "height": 700}, "locale": "en-US", "action_timeout_seconds": 2, "navigation_timeout_seconds": 7},
@@ -495,7 +578,6 @@ def startup_values():
 
 @pytest.mark.parametrize("confirm", ["y", "n"])
 async def test_first_use_collects_typed_fields_and_confirms_once(tmp_path, startup_values, confirm):
-    import json
 
     from redlotus.api.base import prepare_startup_configuration
     from redlotus.runtime.config import config_value, missing_startup_fields, settings
@@ -530,7 +612,6 @@ async def test_first_use_collects_typed_fields_and_confirms_once(tmp_path, start
 
 
 async def test_model_reuse_preserves_role_policy_and_layered_writes(tmp_path, startup_values):
-    import json
 
     from redlotus.api.base import ConfigurationSetup, prepare_startup_configuration
     from redlotus.runtime.config import settings, get_model_and_params
@@ -565,7 +646,6 @@ async def test_model_reuse_preserves_role_policy_and_layered_writes(tmp_path, st
 
 @pytest.mark.parametrize("channel_name", ["QQ", "WeChat"])
 def test_channel_startup_collects_policy_before_constructing_bot(tmp_path, startup_values, monkeypatch, channel_name):
-    import json
     from importlib import import_module
 
     from redlotus.api import base
@@ -596,7 +676,6 @@ def test_channel_startup_collects_policy_before_constructing_bot(tmp_path, start
 @pytest.mark.parametrize("limit", ["12", " +12 ", "1_2"])
 @pytest.mark.parametrize("empty", [None, " "])
 def test_legacy_numeric_limit_and_empty_model_override(tmp_path, limit, empty):
-    import json
 
     from redlotus.runtime.config import get_agent_usage_limits, get_model_and_params
 

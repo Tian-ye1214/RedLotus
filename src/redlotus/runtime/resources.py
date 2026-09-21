@@ -271,11 +271,12 @@ def save_locked_json(path: Path, data: Any) -> None:
         atomic_write_json(path, data)
 
 def safe_name(
-    text: str, *, extra: str = "_-", max_len: int = 50, fallback: str = "default"
+    text: str, *, extra: str = "_-", max_len: int | None = None, fallback: str = "default"
 ) -> str:
     """把任意字符串清洗成文件名/键安全形式：非字母数字且不在 extra 内的字符替换为 _。"""
     cleaned = "".join(c if c.isalnum() or c in extra else "_" for c in text)
-    return cleaned[:max_len] or fallback
+    max_len = settings()["storage"]["filename_max_chars"] if max_len is None else max_len
+    return (cleaned.strip() or fallback)[:max_len]
 
 def iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
