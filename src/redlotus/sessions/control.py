@@ -156,6 +156,8 @@ class SessionController:
     def admit(self, workspace, *, urgent=False, input_id=None) -> InputAdmission:
         self._sequence += 1
         urgent = urgent and self.active and self.accepting_urgent
+        if not urgent:
+            self._storage_retry.set()
         return InputAdmission(
             input_id or uuid4().hex,
             self._sequence,

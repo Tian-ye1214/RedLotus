@@ -245,6 +245,41 @@ async def test_channel_wait_uses_configured_deadline(channel_probe):
         await p.bot.release_all_resources_async()
 
 
+async def test_channel_normal_input_retries_paused_checkpoint_before_queued_turn(channel_probe, monkeypatch):
+    import asyncio
+
+    p, writable, committed = channel_probe, False, []
+    original = p.bot._run_turn
+
+    def save():
+        if not writable:
+            raise OSError("Isolated temporary storage failure")
+        committed.append("first")
+
+    async def run(identity, state, turn):
+        if turn.user_message.text == "first":
+            await state.inputs.write(save)
+        return await original(identity, state, turn)
+
+    monkeypatch.setattr(p.bot, "_run_turn", run)
+    sdk = SimpleNamespace(reply=p.reply)
+    try:
+        await p.bot._handle_message(sdk, channel_message("first"))
+        inputs = p.bot._sessions["wx_fixture"].inputs
+        async with asyncio.timeout(2):
+            while not inputs.storage_paused:
+                await asyncio.sleep(.01)
+        assert not committed and not p.calls
+        writable = True
+        await p.bot._handle_message(sdk, channel_message("second"))
+        await asyncio.wait_for(inputs.queue.join(), 2)
+        assert committed == ["first"]
+        assert [call[0] for call in p.calls] == ["first", "second"]
+        assert not inputs.storage_paused
+    finally:
+        await p.bot.release_all_resources_async()
+
+
 async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
     import asyncio
 

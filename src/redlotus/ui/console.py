@@ -367,10 +367,6 @@ class AgentCliController:
         async with self._admission_lock:
             if transition != self._transition or not self._ready.is_set():
                 return "continue"
-            if not urgent:
-                self.system._session._storage_retry.set()
-                if transition != self._transition or not self._ready.is_set():
-                    return "continue"
             admission = self.system._session.admit(
                 self.system.workspace, urgent=urgent, input_id=input_id
             )

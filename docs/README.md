@@ -20,7 +20,7 @@ RedLotus 是以终端为主要入口、围绕本地项目工作的个人 AI Agen
 
 这三份 docs 文档分别负责总览、设计和开发约定。新的阶段性测试记录不应不断扩充这里的文件数量；影响现行设计或开发约束的结论，应更新对应章节。
 
-当前源码包含八个模块：`runtime`、`sessions`、`core`、`tools`、`memory`、`prompts`、`ui`、`api`。新增的 `ui` 和 `sessions` 分别消除编排对终端的反向依赖、集中共享输入与会话事务；工具和记忆通过既有工厂注入模型能力。命令入口仍为 `redlotus.api.base:main`，源码继续使用 `python main.py`。当前每模块最多 5 个 Python 文件、每文件最多 499 有效行；总量精简、逐函数审查与发布验收仍未完成；源码首次配置证据见现行设计。
+当前源码包含八个模块：`runtime`、`sessions`、`core`、`tools`、`memory`、`prompts`、`ui`、`api`。新增的 `ui` 和 `sessions` 分别消除编排对终端的反向依赖、集中共享输入与会话事务；工具和记忆通过既有工厂注入模型能力。命令入口仍为 `redlotus.api.base:main`，源码继续使用 `python main.py`。当前每模块最多 5 个 Python 文件、每文件最多 498 有效行；总量精简已达到数量要求，逐函数审查与发布验收仍未完成；源码首次配置证据见现行设计。
 
 ## 角色分工
 
