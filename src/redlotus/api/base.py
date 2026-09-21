@@ -29,7 +29,7 @@ import time
 import asyncio
 import contextvars
 import mimetypes
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from redlotus.runtime import config as app_config, logging as logger
@@ -38,7 +38,9 @@ from redlotus.tools.interaction import UserMessage
 if TYPE_CHECKING:
     from redlotus.core.system import AgentSystem
 from redlotus.core.history import ChatHistory
-from redlotus.core.session import TurnQueue
+from redlotus.core.session import SessionController
+from redlotus.core.agents import InputAdmission
+from redlotus.runtime.resources import WorkspaceContext, current_workspace
 from redlotus.tools import registry as tool_telemetry
 
 
@@ -47,11 +49,13 @@ class QueuedTurn:
     user_message: UserMessage
     send_reply: Callable[..., Awaitable[Any]]
     loop: asyncio.AbstractEventLoop
+    prepare: Callable[[], Awaitable[list]] | None = None
+    admission: InputAdmission | None = None
 
 
 @dataclass
 class ChatSession:
-    queue: TurnQueue
+    inputs: SessionController
     history: ChatHistory = field(default_factory=ChatHistory)
     agent: AgentSystem | None = None
     question: asyncio.Future | None = None
@@ -103,7 +107,7 @@ class BotBase:
     session_prefix: str
 
     def _new_session(self):
-        return ChatSession(TurnQueue())
+        return ChatSession(SessionController())
 
     def _session(self, session_id):
         if session_id not in self._sessions:
@@ -128,7 +132,8 @@ class BotBase:
         state = self._session(session_id)
         if state.agent is None:
             state.agent = AgentSystem(
-                owner_memory_allowed=self._is_owner_session(session_id)
+                owner_memory_allowed=self._is_owner_session(session_id),
+                input_controller=state.inputs,
             )
             state.agent.set_ask_user_handler(self._ask_user)
             state.agent.set_task_directory(f"{self.platform_tag}_{session_id[:20]}")
@@ -137,21 +142,23 @@ class BotBase:
     async def _close_session(self, state):
         if state.question and not state.question.done():
             state.question.cancel()
-        await state.queue.cancel(discard=True)
-        await state.queue.join()
+        state.inputs.reset(discard=True)
+        await state.inputs.queue.cancel(discard=True)
+        await state.inputs.queue.join()
         if state.agent:
             await state.agent.shutdown()
 
     async def _reset_session(self, session_id, *, preserve_queue=False):
         old = self._sessions.pop(session_id, None)
         state = self._new_session()
+        self._sessions[session_id] = state
         if old:
-            pending = [entry[2] for entry in old.queue.pending]
-            old.queue.discard()
+            old.inputs.reset(discard=True)
+            pending = [entry[2] for entry in old.inputs.queue.pending]
+            old.inputs.queue.discard()
             if preserve_queue:
                 for turn in pending:
                     self._submit_turn(session_id, state, turn)
-        self._sessions[session_id] = state
         try:
             if old:
                 await self._close_session(old)
@@ -169,8 +176,8 @@ class BotBase:
             await asyncio.sleep(self.SESSION_GC_INTERVAL_S)
             for identity, state in list(self._sessions.items()):
                 if (
-                    not state.queue.current
-                    and not state.queue.pending
+                    not state.inputs.queue.current
+                    and not state.inputs.queue.pending
                     and time.monotonic() - state.touched > self.SESSION_IDLE_TTL_S
                 ):
                     self._sessions.pop(identity, None)
@@ -178,7 +185,12 @@ class BotBase:
             logger.prune_old_logs()
 
     def _submit_turn(self, identity, state, turn):
-        return state.queue.submit(
+        turn = replace(turn, admission=state.inputs.admit(
+            WorkspaceContext.from_path(current_workspace()),
+            input_id=turn.admission.id if turn.admission else None,
+        ))
+        logger.debug("[%s] input admitted id=%s sequence=%s", self.platform_tag, turn.admission.id, turn.admission.sequence)
+        return state.inputs.queue.submit(
             lambda: self._consume_turn(identity, state, turn), data=turn
         )
 
@@ -191,8 +203,9 @@ class BotBase:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.error("[%s] Agent 请求失败: %s", self.platform_tag, exc)
-            result = f"本轮执行失败，未完成的操作不能视为成功：{exc}"
+            error = f"{type(exc).__name__}: {exc}"
+            logger.error("[%s] Agent 请求失败: %s", self.platform_tag, error)
+            result = f"本轮执行失败（输入 {turn.admission.id}），未完成的操作不能视为成功：{error}"
         finally:
             state.touched = time.monotonic()
         if self._sessions.get(identity) is state:
@@ -244,6 +257,12 @@ class BotBase:
         turn.loop.call_soon_threadsafe(lambda: asyncio.create_task(send()))
 
     async def _run_turn(self, identity, state, turn):
+        if turn.prepare:
+            turn.user_message.attachments = await turn.prepare()
+        if self._sessions.get(identity) is not state or not state.inputs.accepts(turn.admission):
+            raise asyncio.CancelledError()
+        if not (turn.user_message.text or turn.user_message.attachments or turn.user_message.references):
+            return ""
         agent = self._agent_for_session(identity)
         token = self._agent_ctx.set((identity, state, turn))
         tool_telemetry.set_user_notify_callback(self._notify)
@@ -255,6 +274,7 @@ class BotBase:
                 _, result = await agent.run_agent_system(
                     turn.user_message,
                     state.history,
+                    turn_id=turn.admission.id,
                     conversation_log_hint=identity,
                     conversation_log_extra={
                         "session_id": identity,
@@ -280,7 +300,7 @@ class BotBase:
             finally:
                 state.question = None
 
-    async def dispatch_user_message(self, session_id, message, send_reply):
+    async def dispatch_user_message(self, session_id, message, send_reply, *, prepare=None):
         user_text = message.text
         if not session_id or self._released:
             return
@@ -289,6 +309,9 @@ class BotBase:
         if user_text == "/stop":
             if state.agent:
                 await state.agent.stop_current_turn()
+            else:
+                state.inputs.reset()
+                await state.inputs.queue.cancel()
             await self._safe_send(send_reply, "已停止当前任务，保留会话记录。")
             return
         if (
@@ -301,25 +324,25 @@ class BotBase:
             )
             await self._safe_send(send_reply, "已结束当前任务并清空上下文。")
             return
-        if state.question and not state.question.done():
+        if state.question and not state.question.done() and not (prepare or message.attachments or message.references):
             state.question.set_result(user_text)
             state.agent._session.user_inputs.append(user_text)
             return
-        if not user_text and not message.attachments and not message.references:
+        if not user_text and not message.attachments and not message.references and prepare is None:
             return
         app_config.reload_config()
         if missing := app_config.missing_main_api_keys():
             await self._safe_send(send_reply, "缺少模型接口配置：" + ", ".join(missing))
             return
-        if state.queue.maxsize and len(state.queue.pending) >= state.queue.maxsize:
+        if state.inputs.queue.maxsize and len(state.inputs.queue.pending) >= state.inputs.queue.maxsize:
             await self._safe_send(
-                send_reply, f"待处理消息已达上限 {state.queue.maxsize}，请稍后再试。"
+                send_reply, f"待处理消息已达上限 {state.inputs.queue.maxsize}，请稍后再试。"
             )
             return
         self._submit_turn(
             session_id,
             state,
-            QueuedTurn(message, send_reply, asyncio.get_running_loop()),
+            QueuedTurn(message, send_reply, asyncio.get_running_loop(), prepare),
         )
         await self._safe_send(send_reply, "✓ 收到，正在处理…")
         self._ensure_session_gc()

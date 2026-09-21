@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from pydantic_ai import BinaryContent
@@ -27,39 +28,36 @@ class WeChatAgentBot(BotBase):
     platform_tag = "WeChat"
     session_prefix = "wx_"
 
-    async def _build_user_message(self, bot: WeChatBot, msg) -> UserMessage:
-        """Build a UserMessage from text plus downloaded media bytes."""
-        text = self.clean_text(msg.text or "")
-        attachments: list = []
-        try:
-            media = await bot.download(msg)
-        except Exception as e:
-            logger.warning(f"[WeChat] 下载媒体失败: {e}")
-            media = None
-        if media is not None and getattr(media, "data", None):
-            filename = getattr(media, "file_name", None) or ""
-            mtype = (getattr(media, "type", None) or "").lower()
-            mime = self.guess_download_mime(filename=filename, media_type_key=mtype)
-            attachments.append(
-                BinaryContent(
-                    data=media.data, media_type=mime, identifier=filename or None
-                )
-            )
-        return UserMessage(
-            text=text,
-            attachments=attachments,
-            original_text=self.clean_text(msg.text or ""),
-        )
+    async def _download_attachments(self, bot: WeChatBot, msg) -> list:
+        """Download every SDK media item; one failed item rejects the entire request."""
+        attachments = []
+        for kind in self._MIME_MAP:
+            for index, item in enumerate(getattr(msg, kind + "s")):
+                identity = getattr(item, "file_name", None) or f"{kind}[{index + 1}]"
+                single = replace(msg, **{name + "s": [item] if name == kind else [] for name in self._MIME_MAP})
+                try:
+                    media = await bot.download(single)
+                    if media is None or not media.data:
+                        raise ValueError("下载结果为空")
+                except Exception as exc:
+                    raise ValueError(f"附件 {identity} 准备失败：{exc}；请重新发送完整消息。") from exc
+                attachments.append(BinaryContent(
+                    data=media.data,
+                    media_type=self.guess_download_mime(filename=identity, media_type_key=media.type),
+                    identifier=identity,
+                ))
+        return attachments
 
     async def _handle_message(self, bot: WeChatBot, msg) -> None:
         if not msg.user_id:
             return
         session_id = f"{self.session_prefix}{msg.user_id}"
-        user_message = await self._build_user_message(bot, msg)
+        text = self.clean_text(msg.text or "")
         await self.dispatch_user_message(
             session_id,
-            user_message,
+            UserMessage(text=text, original_text=text),
             partial(bot.reply, msg),
+            prepare=partial(self._download_attachments, bot, msg) if any(getattr(msg, kind + "s") for kind in self._MIME_MAP) else None,
         )
 
     async def _async_main(self) -> None:

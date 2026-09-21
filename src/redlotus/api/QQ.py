@@ -11,7 +11,7 @@ from redlotus.runtime import logging as logger
 from redlotus.runtime.config import get_env, user_config_dir
 from redlotus.tools.interaction import UserMessage
 from redlotus.api.base import BotBase
-from redlotus.api.qq_media_helpers import extract_media
+from redlotus.api.qq_media_helpers import extract_media, iter_segments
 
 if TYPE_CHECKING:
     from ncatbot.core import BaseMessageEvent, MetaEvent
@@ -105,15 +105,17 @@ class QQBot(BotBase):
             return
         session_id = self._session_id(event)
         user_text = self.clean_text(raw_text)
-        attachments = await self._extract_attachments(event)
         await self.dispatch_user_message(
             session_id,
             UserMessage(
                 text=user_text,
-                attachments=attachments,
                 original_text=self.clean_text(raw_text),
             ),
             partial(self._reply_event, event),
+            prepare=partial(self._extract_attachments, event) if (
+                any(kind in ("image", "video", "file") for kind, _ in iter_segments(event))
+                or re.search(r"\[CQ:(?:image|video|file),", raw_text)
+            ) else None,
         )
 
     def _register_handlers(self) -> None:

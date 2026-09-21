@@ -99,15 +99,14 @@ class MemoryService:
         return notices
 
     async def begin_turn(self, session_id, turn_id, user_text, *, references=()):
-        if self.owner_memory_allowed:
-            if self._injection_snapshot is None:
-                async with self.long_term.publication_lock():
-                    self._injection_snapshot = await finish_file_io(asyncio.to_thread(
-                        lambda: self.long_term.get_injection(self.store.all("global", active_only=False))
-                    ))
-            self.current = self.observations.begin(
-                session_id, turn_id, user_text, [ref.id for ref in references]
-            )
+        if self.owner_memory_allowed and self._injection_snapshot is None:
+            async with self.long_term.publication_lock():
+                self._injection_snapshot = await finish_file_io(asyncio.to_thread(
+                    lambda: self.long_term.get_injection(self.store.all("global", active_only=False))
+                ))
+        self.current = self.observations.begin(
+            session_id, turn_id, user_text, [ref.id for ref in references]
+        )
         return self.current
 
     async def finish_turn(

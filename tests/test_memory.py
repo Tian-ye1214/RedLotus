@@ -4,6 +4,31 @@ import pytest
 from types import SimpleNamespace
 
 
+async def test_non_owner_turns_count_without_reading_or_producing_personal_memory(tmp_path):
+    import json
+    from redlotus.core.session import SessionFile
+    from redlotus.memory.records import ObservationStore
+    from redlotus.memory.service import MemoryService
+    from redlotus.runtime.resources import WorkspaceContext
+
+    (tmp_path / "config.json").write_text(json.dumps({
+        "memory_perception": {"window_turns": 20, "overlap_turns": 3},
+        "storage": {"project_dir": ".redlotus"},
+    }), encoding="utf-8")
+    workspace = WorkspaceContext.from_path(tmp_path)
+    service = object.__new__(MemoryService)
+    service.owner_memory_allowed, service.current = False, None
+    service.session = SessionFile.create(tmp_path / "sessions", workspace.project_id, session_id="channel")
+    service.observations = ObservationStore(workspace)
+    service.observations.bind(service.session)
+    # No long_term, store or factory exists: non-owner input must never use them.
+    event = await service.begin_turn("channel", "input-id", "Public channel text")
+    await service.finish_turn(event, status="success", user_inputs=["Public channel text"], evidence_paths=[])
+    assert service.session.completed_turns == 1
+    assert service.session.turn(event.id)["turn_id"] == "input-id"
+    assert not service.session.pending_jobs()
+
+
 @pytest.fixture
 def publication(tmp_path, monkeypatch):
     from redlotus.core.session import SessionFile

@@ -1,4 +1,4 @@
-"""QQ 媒体解析与下载（供 QQ.py 使用，减小主文件体积）。"""
+"""QQ media preparation: validate and download every attachment before execution."""
 
 from __future__ import annotations
 
@@ -13,9 +13,8 @@ import socket
 from typing import Any, TYPE_CHECKING
 
 import httpx
-from pydantic_ai import BinaryContent, ImageUrl
+from pydantic_ai import BinaryContent
 
-from redlotus.runtime import logging as logger
 from redlotus.runtime.network import ModelInputPolicy
 
 if TYPE_CHECKING:
@@ -42,16 +41,6 @@ def mime_magic(raw: bytes) -> str:
     return ""
 
 
-def coerce_mm(url: str, header_ct: str, raw: bytes) -> str:
-    ct = (header_ct or "").split(";")[0].strip().lower()
-    if ct.startswith("image/") and ct != "image/octet-stream":
-        return ct
-    if ct.startswith("video/") and ct != "video/octet-stream":
-        return ct
-    g, _ = mimetypes.guess_type(url)
-    return g if g and g.startswith(("image/", "video/")) else mime_magic(raw)
-
-
 def pick_ct(url: str, header_ct: str, raw: bytes, filename: str = "") -> str:
     ct = (header_ct or "").split(";")[0].strip().lower()
     if ct and ct not in ("application/octet-stream", "binary/octet-stream"):
@@ -62,8 +51,7 @@ def pick_ct(url: str, header_ct: str, raw: bytes, filename: str = "") -> str:
     ):
         if guess:
             return guess
-    mm = coerce_mm(url, header_ct, raw)
-    return mm if mm else "application/octet-stream"
+    return mime_magic(raw) or "application/octet-stream"
 
 
 _MAX_REDIRECTS = 5
@@ -100,18 +88,17 @@ def _resolve_public_addr(host: str) -> str | None:
     return chosen
 
 
-def download_to_binary(url: str, filename: str = "") -> BinaryContent | None:
+def download_to_binary(url: str, filename: str = "") -> BinaryContent:
     url = norm_url(url)
     try:
         with httpx.Client(timeout=30, follow_redirects=False) as client:
             for _ in range(_MAX_REDIRECTS + 1):
                 parsed = httpx.URL(url)
                 if parsed.scheme not in ("http", "https") or not parsed.host:
-                    return None
+                    raise ValueError("附件地址必须是完整的 http/https URL")
                 ip = _resolve_public_addr(parsed.host)
                 if ip is None:
-                    logger.warning(f"[QQ] 拒绝下载非公网媒体地址 {url[:80]}")
-                    return None
+                    raise ValueError("附件地址无法解析为公网地址")
                 host_header = (
                     parsed.host
                     if parsed.port is None
@@ -137,28 +124,25 @@ def download_to_binary(url: str, filename: str = "") -> BinaryContent | None:
                         policy.check([size])
                         chunks.append(chunk)
                     raw = b"".join(chunks)
+                    if not raw:
+                        raise ValueError("下载结果为空")
                     return BinaryContent(
                         data=raw,
                         media_type=pick_ct(url, resp.headers.get("content-type", ""), raw, filename=filename),
                         identifier=filename or None,
                     )
-        logger.warning(f"[QQ] 重定向次数过多 {url[:80]}")
-        return None
-    except Exception as e:
-        logger.warning(f"[QQ] 下载媒体失败 {url[:80]}: {e}")
-        return None
+        raise ValueError("重定向次数过多")
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        raise ValueError(f"附件 {filename or '媒体'} 准备失败：{exc}；请重新发送完整消息。") from exc
 
 
 def binary_b64(file_val: str) -> BinaryContent | None:
     if not file_val or not file_val.startswith("base64://"):
         return None
-    try:
-        return BinaryContent(
-            data=base64.b64decode(file_val[9:]), media_type="image/png"
-        )
-    except Exception as e:
-        logger.warning(f"[QQ] 解析 base64 图片失败: {e}")
-        return None
+    raw = base64.b64decode(file_val[9:], validate=True)
+    if not raw:
+        raise ValueError("base64 图片附件为空")
+    return BinaryContent(data=raw, media_type=mime_magic(raw) or "image/png")
 
 
 def iter_segments(event: BaseMessageEvent):
@@ -176,52 +160,40 @@ def iter_segments(event: BaseMessageEvent):
 
 
 def extract_image_video(event: BaseMessageEvent) -> list[Any]:
-    urls, attachments = [], []
-    for seg_type, seg_data in iter_segments(event):
-        if seg_type not in ("image", "video"):
-            continue
+    media = [(kind, data) for kind, data in iter_segments(event) if kind in ("image", "video")]
+    if not media:
+        media = [(match[1], {"url": match[2]}) for match in re.finditer(
+            r"\[CQ:(image|video),[^\]]*url=([^\],]+)", getattr(event, "raw_message", "") or ""
+        )]
+    attachments = []
+    for index, (seg_type, seg_data) in enumerate(media):
         fv = seg_data.get("file") or ""
         bc = binary_b64(fv)
         if bc:
             attachments.append(bc)
             continue
         u = norm_url(seg_data.get("url") or fv)
-        if u.startswith("http"):
-            urls.append((seg_type, u))
-    if not urls:
-        raw = getattr(event, "raw_message", "") or ""
-        for m in re.finditer(r"\[CQ:(image|video),[^\]]*url=([^\],]+)", raw):
-            urls.append((m.group(1), norm_url(m.group(2))))
-    for kind, u in urls:
-        if kind == "image":
-            attachments.append(ImageUrl(u))
-            continue
-        bc = download_to_binary(u)
-        if bc:
-            attachments.append(bc)
+        attachments.append(download_to_binary(u, f"{seg_type}[{index + 1}]"))
     return attachments
 
 
 async def file_id_to_binary(
     bot_api, event: BaseMessageEvent, file_id: str, filename: str, allow: frozenset[str]
-) -> BinaryContent | None:
-    from ncatbot.core import GroupMessageEvent
-
+) -> BinaryContent:
     ext = os.path.splitext(filename or "")[1].lower()
     if not file_id or ext not in allow:
-        return None
+        raise ValueError(f"附件 {filename}（{file_id}）缺少文件 ID 或类型不受支持；请重新发送完整消息。")
+    from ncatbot.core import GroupMessageEvent
     try:
         url = await (
             bot_api.get_group_file_url(event.group_id, file_id)
             if isinstance(event, GroupMessageEvent)
             else bot_api.get_private_file_url(file_id)
         )
-    except Exception as e:
-        logger.warning(f"[QQ] 获取文件 URL 失败 file_id={file_id[:24]}...: {e}")
-        return None
+    except Exception as exc:
+        raise ValueError(f"附件 {filename}（{file_id}）无法获取下载地址：{exc}") from exc
     if not url:
-        logger.warning(f"[QQ] get_*_file_url 返回空，file_id={file_id[:24]}...")
-        return None
+        raise ValueError(f"附件 {filename}（{file_id}）下载地址为空")
     return await asyncio.to_thread(download_to_binary, url, filename)
 
 
@@ -232,12 +204,10 @@ async def extract_media(
     seen: set[str] = set()
 
     async def add_fid(fid: str, fname: str) -> None:
-        if not fid or fid in seen:
+        if fid in seen:
             return
         seen.add(fid)
-        bc = await file_id_to_binary(bot_api, event, fid, fname, allow)
-        if bc:
-            attachments.append(bc)
+        attachments.append(await file_id_to_binary(bot_api, event, fid, fname, allow))
 
     for st, sd in iter_segments(event):
         if st == "file":

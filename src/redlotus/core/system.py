@@ -78,11 +78,12 @@ class AgentSystem:
         workspace: WorkspaceContext | None = None,
         owner_memory_allowed: bool = True,
         exit_deadline=None,
+        input_controller: SessionController | None = None,
     ):
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
         logger.activate_log_dir(logger.prepare_log_dir(self.workspace))
         self._owner_memory_allowed = owner_memory_allowed
-        self._session = SessionController()
+        self._session = input_controller or SessionController()
         self._registry = AgentRegistry()
         self._shutdown_done = False
         self._shutdown_task: asyncio.Task | None = None
