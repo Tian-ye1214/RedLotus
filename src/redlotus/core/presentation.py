@@ -380,7 +380,7 @@ def show_model_output(text: str, *, title: str = "模型", markdown: bool = True
     body = (text or "").strip()
     if not body:
         return
-    content: str | Markdown = Markdown(body) if markdown else body
+    content = Markdown(body) if markdown else Text(body)
     emit_renderable(Panel(content, title=title, border_style="cyan"))
     logger.info_file_only("[模型]\n%s", body)
 

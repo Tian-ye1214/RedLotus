@@ -70,7 +70,12 @@ def format_long_term_memory_for_prompt(memory_injection: str) -> str:
 def session_prompt_from_history(messages) -> str | None:
     for message in reversed(messages):
         if instructions := getattr(message, "instructions", None):
-            return instructions
+            length = (message.metadata or {}).get("instruction_prefix_length")
+            if length is not None:
+                return instructions[:length]
+            # Legacy SDK requests combined role text and the native deferred catalog.
+            from pydantic_ai.capabilities._deferred_capability_loader import DEFERRED_CAPABILITY_CATALOG_PREFIX
+            return instructions.partition("\n\n" + DEFERRED_CAPABILITY_CATALOG_PREFIX)[0]
     return None
 
 

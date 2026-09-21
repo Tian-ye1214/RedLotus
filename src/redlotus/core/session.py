@@ -823,13 +823,13 @@ class SessionFile:
                 "saved_at": datetime.fromtimestamp(self.path.stat().st_mtime, timezone.utc).isoformat(),
                 "message_count": len(self._contexts.get("", [])), "input_usage": self.input_usage()}
 
-    def compact(self, *, keep_turn_ids, release_turn_id=None):
+    def compact(self, *, keep_turn_ids, release_turn_id=None, keep_agent_ids=()):
         """Prune only released bodies while retaining context, pending evidence, and totals."""
         with self._locked_state():
             if self._pending_update is not None:
                 raise OSError(f"尚未确认保存的批次不能被清理覆盖: {self.path}")
             contexts = {agent: context for agent, context in self._contexts.items()
-                        if release_turn_id is None or not any(
+                        if release_turn_id is None or agent in keep_agent_ids or not any(
                             self._records[key]["turn_id"] == release_turn_id for key in context
                         )}
             context_ids = {key for context in contexts.values() for key in context}

@@ -710,7 +710,10 @@ Outcome = Literal["success", "failed", "cancelled", "needs_input", "unverified"]
 
 
 class SubagentResult(BaseModel):
-    """Validated child output; absence of evidence must never imply success."""
+    """Outcome of this child's assigned task only, not of the entire parent goal.
+
+    Absence of evidence must never imply success.
+    """
 
     model_config = ConfigDict(str_strip_whitespace=True)
 

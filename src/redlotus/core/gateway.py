@@ -41,6 +41,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     FunctionToolResultEvent,
+    InstructionPart,
     ModelRequest,
     ModelResponse,
     TextPart,
@@ -401,6 +402,7 @@ class RequestPolicy(AbstractCapability):
             model = self.model
         parameters = request_context.model_request_parameters
         tool_definitions = [*parameters.function_tools, *parameters.output_tools]
+        candidate = request_context.messages
         if self.role in ("coordinator", "manager", "worker"):
             from redlotus.core.history import compact_request_messages
 
@@ -411,9 +413,16 @@ class RequestPolicy(AbstractCapability):
                 task_state=self.task_state() if self.task_state else "",
                 tools=tool_definitions,
             )
-            if candidate is not request_context.messages and self.persist_context:
-                await self.persist_context(candidate)
-            request_context.messages = candidate
+        request = candidate[-1]
+        request.metadata = {
+            **(request.metadata or {}),
+            "instruction_prefix_length": len(InstructionPart.join([
+                part for part in parameters.instruction_parts or [] if not part.dynamic
+            ]) or ""),
+        }
+        if candidate is not request_context.messages and self.persist_context:
+            await self.persist_context(candidate)
+        request_context.messages = candidate
         self.target, self.model = target, model
         ModelInputPolicy.from_limits(target.limits).check_messages(
             request_context.messages

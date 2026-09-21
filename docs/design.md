@@ -63,7 +63,7 @@ flowchart TD
 
 | 身份 | 注册范围 |
 | --- | --- |
-| 本人 Coordinator | 下表执行工具，另加 `execute_task_with_manager`、`execute_task_with_worker` |
+| 本人 Coordinator | 下表执行工具，另加 `execute_task_with_manager`、`execute_task_with_worker`、`resume_task` |
 | Manager 规划 | `create_todo_list`、`get_todo_list`、`ask_user`；本人权限下加 `search_memory` |
 | Manager 最终汇报 | 不注册规划工具 |
 | Coordinator 直接委派的 Worker | 下表执行工具，包含浏览器 |
@@ -83,6 +83,12 @@ flowchart TD
 | 浏览器 | `browser_navigate`、`browser_get_content`、`browser_screenshot`、`browser_click`、`browser_fill`、`browser_press_key`、`browser_wait_for_selector`、`browser_evaluate`、`browser_close` |
 
 Worker 使用 SDK 原生能力组：读取工具常驻，其他工具按组渐进加载。Coordinator 直接执行复用完整函数集合。Skills 的名称与简介进入会话提示词快照，正文和资源按需读取；磁盘 Skills 在后续用户回合重新发现，不重写已固定的 system 快照。
+
+计划创建、派发和结果转换经同一会话的持久化回调保存；依赖批次等待完成状态落盘。加载时把中断的 running 标成 unverified，取消及未验证结果不进入自动重试。`resume_task(task_id)` 只恢复指定阻塞任务，取用当前会话实际接纳的新用户输入，保留其他已完成结果；重新提交相同任务定义不能解除阻塞。
+
+Worker 输入分别标明父目标背景、唯一分配的任务 ID／描述、已完成依赖结果及用户补充；结构化结果仅描述该 Worker 的任务。真实 API 首测暴露过 A、C 同时执行 C 的追加操作，调整输入结构后重测为 A 等输入、C 执行一次。C 的首次产物仍有行尾空格，不能据此宣称产物验收完全通过。
+
+Manager／Worker 续执行从历史复用基础 instructions；SDK 的动态工具说明不作为基础提示词再次拼入。请求元数据保存静态前缀长度，旧会话依据 SDK 自身的目录标记兼容读取。真实续跑曾暴露重复追加 6,701 字符；修复后相同 Worker 的新请求提示词指纹恢复为首次值。压缩候选与普通检查点共用保存回调，保存成功并核对会话及取消状态后才采用。回合清理保留未完成计划任务的 Worker 上下文。真实自动压缩阈值和全部新建／重建身份路径仍待完整验收。
 
 同一 session 的工厂线程上限为已确认的 16，Worker、Manager 及感知按实际工厂调用共享额度；取得名额后才创建线程。等待名额不另开 Agent 线程，工具调用不单独算 Agent。这个上限不是整个进程的操作系统线程总数。
 
@@ -213,7 +219,9 @@ flowchart TD
 
 ## 验收状态与已知缺口
 
-本轮重做的当前证据：18 项隔离辅助检查通过；源码实际入口完成连续 3 回合 API 对话及恢复，加载列表显示 1／2／3 回合，浏览器实际打开、读取、截图和关闭通过。另以真实 Coordinator 委派复现 Worker 检查点持续写盘失败，修复后停止、清空、切项目均返回，3 个故障回合保存为取消，切项目后新对话成功。该故障在 Worker 模型请求前触发，不能冒充 Worker 模型调用验收。OpenRouter 实际元数据查询已验证容量缺失与 null 的回退；完整结构、任务恢复、记忆、pip／EXE 及发布门槛仍未完成。
+本轮重做的当前证据：36 项隔离辅助检查通过，覆盖任务恢复／保存顺序、子 Agent 压缩保存、SDK 提示词拼接、旧记忆候选版本及索引缺失／过期；尚不能替代这些能力的完整真实验收。源码实际入口完成连续 3 回合 API 对话及恢复，加载列表显示 1／2／3 回合，浏览器实际打开、读取、截图和关闭通过。另以真实 Coordinator 委派复现 Worker 检查点持续写盘失败，修复后停止、清空、切项目均返回，3 个故障回合保存为取消，切项目后新对话成功；该故障在 Worker 模型请求前触发。
+
+最新真实 Manager／Worker 场景保存 A 待输入、B 待依赖、C 完成；重启后的第一次恢复因模型尝试不存在的能力而失败，准确保留为未验证且未自动重试。修复提示词重复并明确补充后，再次重启恢复 A，随后执行 B，C 的输入边界、完成结果及文件字节保持不变。调度及恢复链路已有真实证据；C 的首次产物有行尾空格，B 返回 CSV 正文而非格式名称，仍保留为模型交付偏差，不能称该题全项通过。隔离记忆库另完成真实 embedding 建索引及同义检索；这不等于完整感知／投影验收。OpenRouter 实际元数据查询已验证容量缺失与 null 的回退；完整结构、记忆提交事务、pip／EXE 及发布门槛仍未完成。
 
 以下保留 `ca98b811` 的历史结论，全部不作为当前重做版本的通过证据。新版须重新执行真实 API、安装和打包验收；本轮隔离回归也不能替代这些门槛。
 

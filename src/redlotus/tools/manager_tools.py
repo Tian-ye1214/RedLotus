@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from enum import Enum
 from graphlib import CycleError, TopologicalSorter
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -23,6 +24,8 @@ class TaskStatus(Enum):
     IN_PROGRESS = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNVERIFIED = "unverified"
     PENDING_CONFIRMATION = "pending_confirmation"
 
 
@@ -42,13 +45,17 @@ class Task(TaskDefinition):
     worker_chat_history: ChatHistory = Field(default_factory=ChatHistory, exclude=True)
     artifacts: list[str] = Field(default_factory=list)
     tool_summaries: list[str] = Field(default_factory=list)
+    input_cursor: tuple[str | None, int] = (None, 0)
+    user_updates: list[str] = Field(default_factory=list)
 
 
 class TaskManager:
     """An incrementally updated dependency graph with one authoritative task state."""
 
-    def __init__(self):
+    def __init__(self, *, persist=None, input_source=None):
         self.tasks: dict[str, Task] = {}
+        self._persist, self._input_source = persist, input_source
+        self._save_lock = asyncio.Lock()
 
     def reset(self):
         self.tasks.clear()
@@ -61,6 +68,12 @@ class TaskManager:
 
     def snapshot(self):
         return [task.model_dump(mode="json") for task in self.tasks.values()]
+
+    async def save(self):
+        """Serialize plan checkpoints before any dependent work can start."""
+        async with self._save_lock:
+            if self._persist is not None:
+                await self._persist(self.snapshot())
 
     @staticmethod
     def _validate(tasks):
@@ -83,10 +96,10 @@ class TaskManager:
         self._validate(tasks)
         for task in tasks.values():
             if task.status == TaskStatus.IN_PROGRESS:
-                task.status = TaskStatus.PENDING
+                task.status = TaskStatus.UNVERIFIED
         self.tasks = tasks
 
-    def create_todo_list(self, tasks_json: str) -> str:
+    async def create_todo_list(self, tasks_json: str) -> str:
         """Add tasks to the plan while preserving existing progress and results.
 
         Existing task IDs must keep their descriptions and dependencies. Use a new
@@ -114,10 +127,11 @@ class TaskManager:
                     )
                 merged.setdefault(row.id, Task(**row.model_dump()))
             self._validate(merged)
-            self.tasks = merged
-            return self.get_todo_list()
         except (ValueError, CycleError) as exc:
             return f"Error: {exc}"
+        self.tasks = merged
+        await self.save()
+        return self.get_todo_list()
 
     def get_all_ready_tasks(self):
         return [
@@ -130,21 +144,50 @@ class TaskManager:
             )
         ]
 
-    def mark_task_complete(self, task_id, result=""):
-        task = self.tasks[task_id]
-        task.status, task.result = TaskStatus.COMPLETED, result
-        return self.get_todo_list()
+    async def start(self, task):
+        """Record the actual input boundary before dispatching a Worker."""
+        turn_id, inputs = self._input_source()
+        task.input_cursor = turn_id, len(inputs)
+        task.status = TaskStatus.IN_PROGRESS
+        await self.save()
 
-    def mark_task_failed(self, task_id, reason):
-        task = self.tasks[task_id]
-        task.failure_history.append(reason)
-        task.retry_count += 1
-        task.status = (
-            TaskStatus.FAILED
-            if task.retry_count > task.max_retries
-            else TaskStatus.PENDING
-        )
-        return f"Task {task_id}: {task.status.value}, attempts={task.retry_count}, reason={reason}"
+    async def finish(self, task, report):
+        """Persist one outcome; only a confirmed failure enters automatic retry."""
+        task.result = report.model_dump_json()
+        task.artifacts = list(dict.fromkeys([*task.artifacts, *report.artifacts]))
+        task.tool_summaries.extend(report.risks)
+        task.status = {
+            "success": TaskStatus.COMPLETED,
+            "failed": TaskStatus.FAILED,
+            "needs_input": TaskStatus.PENDING_CONFIRMATION,
+            "cancelled": TaskStatus.CANCELLED,
+            "unverified": TaskStatus.UNVERIFIED,
+        }[report.status]
+        if report.needs_user_confirmation and report.status not in {"cancelled", "unverified"}:
+            task.status = TaskStatus.PENDING_CONFIRMATION
+        if task.status == TaskStatus.FAILED:
+            task.failure_history.append(task.result)
+            task.retry_count += 1
+            if task.retry_count <= task.max_retries:
+                task.status = TaskStatus.PENDING
+        await self.save()
+
+    async def resume(self, task_id):
+        """Requeue exactly one blocked task using new, admitted user input."""
+        task = self.tasks.get(task_id)
+        if task is None or task.status not in {
+            TaskStatus.PENDING_CONFIRMATION, TaskStatus.CANCELLED, TaskStatus.UNVERIFIED, TaskStatus.FAILED,
+        }:
+            return f"Error: Task {task_id} is not blocked."
+        turn_id, inputs = self._input_source()
+        previous_turn, count = task.input_cursor
+        updates = inputs[count:] if turn_id == previous_turn else inputs
+        if turn_id is None or not updates:
+            return "Error: New user input is required before resuming this task."
+        task.user_updates.extend(updates)
+        task.status = TaskStatus.PENDING
+        await self.save()
+        return self.get_todo_list()
 
     def get_todo_list(self) -> str:
         """Return each planned task's status, dependencies, retry count and total progress."""

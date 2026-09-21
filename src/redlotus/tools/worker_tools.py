@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import inspect
+import json
 import uuid
 from typing import Callable
 from pydantic_ai.capabilities import Capability
@@ -15,9 +16,9 @@ from redlotus.core.config import get_agent_usage_limits
 from redlotus.core.gateway import AgentRunner, ModelTarget, create_agent, create_function_toolset
 from redlotus.core.history import ChatHistory, messages_safe_for_new_prompt
 from redlotus.prompts.prompt import (
-    get_manager_system_prompt, get_worker_system_prompt, with_runtime_context,
+    get_manager_system_prompt, get_worker_system_prompt, session_prompt_from_history, with_runtime_context,
 )
-from redlotus.tools.manager_tools import Task, TaskManager, TaskStatus
+from redlotus.tools.manager_tools import Task, TaskManager
 
 
 def worker_tool_groups(toolkit, memory, *, owner_loop=None, include_browser=True) -> dict[str, list]:
@@ -152,7 +153,7 @@ class WorkerOrchestrator:
                     toolsets, capabilities = create_worker_toolsets(
                         toolkit, memory_service, owner_loop, include_browser=include_browser
                     )
-                    instructions = get_worker_system_prompt(
+                    instructions = session_prompt_from_history(messages) or get_worker_system_prompt(
                         toolkit.skills_manager, memory
                     )
                     output_type = SubagentResult
@@ -163,10 +164,24 @@ class WorkerOrchestrator:
                         )
                     ]
                     capabilities = []
-                    instructions = get_manager_system_prompt(
+                    instructions = session_prompt_from_history(messages) or get_manager_system_prompt(
                         toolkit.skills_manager, memory
                     )
                     output_type = str
+                async def save_context(candidate):
+                    await persist(
+                        lambda: session_file.role_file(role).save_context(
+                            candidate, turn_id=turn_id, agent_id=agent_id, invocation=invocation,
+                        ),
+                        cancelling=bool(asyncio.current_task().cancelling()),
+                    )
+                    if (
+                        session_file is not self.session_file or session_key != self._session_key
+                        or asyncio.current_task().cancelling()
+                    ):
+                        raise asyncio.CancelledError("Child checkpoint belongs to an ended invocation.")
+                    local_history.set_messages(candidate)
+
                 agent = create_agent(
                     target,
                     instructions=instructions,
@@ -174,18 +189,11 @@ class WorkerOrchestrator:
                     capabilities=capabilities,
                     output_type=output_type,
                     role=role,
+                    persist_context=save_context,
                 )
 
                 async def save_node(run):
-                    local_history.set_messages(list(run.all_messages()))
-                    if session_file:
-                        await persist(
-                            lambda: session_file.role_file(role).save_context(
-                                local_history.messages, turn_id=turn_id,
-                                agent_id=agent_id, invocation=invocation,
-                            ),
-                            cancelling=bool(asyncio.current_task().cancelling()),
-                        )
+                    await save_context(list(run.all_messages()))
 
                 result = await AgentRunner().run(
                     agent=agent,
@@ -216,7 +224,7 @@ class WorkerOrchestrator:
             if role != "worker":
                 raise
             return SubagentResult(
-                status="failed", summary=f"{type(exc).__name__}: {exc}"
+                status="unverified", summary=f"{type(exc).__name__}: {exc}"
             )
 
     async def plan(
@@ -253,34 +261,26 @@ class WorkerOrchestrator:
     async def _execute_task(
         self, task: Task, user_goal: str, attachments: list | None, turn_id: str | None
     ):
-        task.status = TaskStatus.IN_PROGRESS
-        dependencies = "\n".join(
-            self._task_manager.tasks[d].result for d in task.dependencies
-        )
-        prompt = f"[Delegated task]\nGoal: {user_goal}\nTask: {task.description}\nDependencies:\n{dependencies}"
-        if task.failure_history:
-            prompt += "\nPrevious failures:\n" + "\n".join(task.failure_history)
+        prompt = json.dumps({
+            "parent_goal_context": user_goal,
+            "completed_dependency_results": {key: self._task_manager.tasks[key].result for key in task.dependencies},
+            "previous_failures": task.failure_history,
+            "assigned_task": {"id": task.id, "description": task.description},
+            "user_follow_up": task.user_updates,
+        }, ensure_ascii=False)
         content = [prompt, *attachments] if attachments else prompt
         try:
+            await self._task_manager.start(task)
             report = await self._execute(
                 content, task.worker_chat_history, turn_id=turn_id, task_id=task.id,
                 include_browser=False,
             )
-            task.artifacts = list(dict.fromkeys([*task.artifacts, *report.artifacts]))
-            task.tool_summaries.extend(report.risks)
-            if report.status == "needs_input" or report.needs_user_confirmation:
-                task.status = TaskStatus.PENDING_CONFIRMATION
-                task.result = report.model_dump_json()
-            elif report.success:
-                self._task_manager.mark_task_complete(task.id, report.model_dump_json())
-            else:
-                self._task_manager.mark_task_failed(task.id, report.model_dump_json())
         except asyncio.CancelledError:
-            task.status = TaskStatus.FAILED
-            task.failure_history.append(
-                "Cancelled by the owner; completion is unverified."
-            )
+            await self._task_manager.finish(task, SubagentResult(
+                status="cancelled", summary="Cancelled by the owner; completion is unverified.",
+            ))
             raise
+        await self._task_manager.finish(task, report)
 
     async def execute_all_tasks_parallel(
         self, user_goal: str, attachments: list | None = None, *, turn_id: str | None

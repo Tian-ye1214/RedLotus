@@ -189,10 +189,13 @@ class MemoryStore:
     async def search(self, query, scope=None):
         records = await asyncio.to_thread(self.all, scope)
         by_id = {row.id: row for row in records}
-        reason = self.rag_unavailable_reason(scope)
-        if not query.strip() or not records:
-            self.retrieval_error = reason
+        self.retrieval_error = ""
+        if not records:
             return []
+        if not query.strip():
+            self.retrieval_error = "An empty query cannot establish memory absence."
+            return []
+        reason = self.rag_unavailable_reason(scope)
         ranked, errors = [], []
         if reason:
             errors.append(reason)
@@ -200,6 +203,14 @@ class MemoryStore:
             for name in [scope] if scope else self.indexes:
                 index = self.indexes[name]
                 try:
+                    await index.refresh_embedding_space()
+                    space = index.index_key
+                    rows = await asyncio.to_thread(self._rows, name)
+                    indexed = await index.indexed_record_ids()
+                    if any(row["id"] not in indexed for row in rows):
+                        errors.append(f"{name}: memory index missing; recall is incomplete.")
+                    if any(row["indexed"] != row["body_hash"] + space for row in rows):
+                        errors.append(f"{name}: memory index stale; recall is incomplete.")
                     ranked.extend(
                         row["record_id"]
                         for row in await index.retrieve(query)
@@ -207,6 +218,8 @@ class MemoryStore:
                     )
                     if index.last_error:
                         errors.append(index.last_error)
+                    if index.index_key != space:
+                        errors.append(f"{name}: embedding model changed during recall.")
                 except Exception as exc:
                     errors.append(str(exc))
                     if str(exc) not in self.retrieval_error:
@@ -358,6 +371,9 @@ class MemoryStore:
             previous = None
         if previous and previous.last_change_id == f"{job.id}:{index}":
             return previous
+        base = job.bases.get(identity)
+        if (previous.version if previous else 0) != (base.version if base else 0):
+            raise ValueError(f"Memory {identity} changed since candidate generation")
         if (
             previous
             and not explicit

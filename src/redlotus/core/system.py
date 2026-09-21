@@ -11,7 +11,7 @@ import inspect
 from collections.abc import Callable
 from typing import Any, Tuple
 from redlotus.tools.interaction import UserMessage
-from redlotus.tools.manager_tools import TaskManager, manager_tools
+from redlotus.tools.manager_tools import TaskManager, TaskStatus, manager_tools
 from redlotus.prompts.prompt import load_prompt
 from redlotus.core.gateway import create_coordinator_agent
 from redlotus.tools.registry import SkillsManager
@@ -101,7 +101,10 @@ class AgentSystem:
             self._skills_manager,
             workspace=self.workspace,
         )
-        self._task_manager = TaskManager()
+        self._task_manager = TaskManager(
+            persist=self._save_tasks,
+            input_source=lambda: (self._session.turn_id, self._session.user_inputs),
+        )
         self._planning_lock = asyncio.Lock()
         self._orchestrator = WorkerOrchestrator(
             self._toolkit,
@@ -305,7 +308,7 @@ class AgentSystem:
                 agent_id=make_agent_id(storage.session_id, "manager", "planning"),
             ))
         await self._durable_write(lambda: storage.save_context(
-            coordinator.messages, turn_id=None, metadata={"tasks": self._task_manager.snapshot()},
+            coordinator.messages, turn_id=None,
         ))
         if not current():
             return ["会话已改变，压缩候选不再应用。"]
@@ -554,6 +557,10 @@ class AgentSystem:
             messages = storage.model_messages()
             repaired = repair_interrupted_tool_calls(messages)
             from redlotus.core.agents import make_agent_id
+            for task in tasks.tasks.values():
+                task.worker_chat_history.set_messages(repair_interrupted_tool_calls(storage.role_messages(
+                    "worker", agent_id=make_agent_id(storage.session_id, "worker", task.id),
+                )))
             manager_messages = repair_interrupted_tool_calls(storage.role_messages(
                 "manager", agent_id=make_agent_id(storage.session_id, "manager", "planning"),
             ))
@@ -561,10 +568,11 @@ class AgentSystem:
             history.set_messages(repaired)
             manager_history.set_messages(manager_messages)
             active = metadata.get("active_turn")
-            if active or repaired != messages:
+            if active or repaired != messages or tasks.snapshot() != metadata.get("tasks", []):
                 await finish_file_io(asyncio.to_thread(lambda: storage.save_context(
                     repaired, turn_id=(active.get("turn_id") or active.get("id")) if active else None,
-                    metadata={"active_turn": None, "interrupted_turn": dict(active, status="interrupted") if active else None},
+                    metadata={"active_turn": None, "interrupted_turn": dict(active, status="interrupted") if active else None,
+                              "tasks": tasks.snapshot()},
                 )))
             if generation != self._session.generation or self._shutdown_done:
                 raise ValueError("加载已取消；目标会话未提交")
@@ -791,6 +799,7 @@ class AgentSystem:
 
         if not continue_from_previous:
             self._task_manager.reset()
+            await self._task_manager.save()
             self._manager_history.reset()
             print_phase("第一阶段: Manager 规划任务列表")
             tmpl = await asyncio.to_thread(load_prompt, "manager_planning_new.md")
@@ -837,6 +846,30 @@ class AgentSystem:
             if self._task_manager.completed
             else "Error: Plan is incomplete.\n" + report
         )
+
+    async def resume_task(self, task_id: str) -> str:
+        """Resume a blocked planned task by ID after the user supplies new input.
+
+        Completed tasks keep their results. Cancelled or unverified work requires
+        the user's explicit retry instruction after checking possible side effects.
+        The task receives admitted user input, not model-generated replacement text.
+
+        Args:
+            task_id: The existing blocked task ID shown in the current plan.
+        """
+        async with self._planning_lock:
+            result = await self._task_manager.resume(task_id)
+            if result.startswith("Error:"):
+                return result
+            from redlotus.core.agents import make_agent_id
+            task = self._task_manager.tasks[task_id]
+            task.worker_chat_history.set_messages(repair_interrupted_tool_calls(
+                await asyncio.to_thread(self._session_file.role_messages, "worker",
+                                        agent_id=make_agent_id(self.session_key, "worker", task_id)),
+            ))
+            return await self._orchestrator.execute_all_tasks_parallel(
+                "\n".join(self._session.user_inputs), self._current_attachments, turn_id=self._cli_turn_id,
+            )
 
     async def execute_task_with_worker(
         self, task_description: str, user_goal: str = "", retry_info: str = ""
@@ -887,6 +920,7 @@ class AgentSystem:
             routing_tools = [
                 self.execute_task_with_manager,
                 self.execute_task_with_worker,
+                self.resume_task,
             ]
             if self._coordinator_agent is None:
                 from redlotus.prompts.prompt import session_prompt_from_history
@@ -971,8 +1005,13 @@ class AgentSystem:
             await self._checkpoint(history, turn_id)
             worker_storage = self._session_file.role_file("worker", create=False)
             if worker_storage is not None:
+                from redlotus.core.agents import make_agent_id
+                retained = {
+                    make_agent_id(self.session_key, "worker", task.id)
+                    for task in self._task_manager.tasks.values() if task.status != TaskStatus.COMPLETED
+                }
                 await self._durable_write(lambda: worker_storage.compact(
-                    keep_turn_ids=set(), release_turn_id=turn_id,
+                    keep_turn_ids=set(), release_turn_id=turn_id, keep_agent_ids=retained,
                 ))
             return history, output
 
@@ -986,13 +1025,16 @@ class AgentSystem:
         if storage is not self._session_file or session_id != self._session_key:
             raise asyncio.CancelledError("Session changed during checkpoint persistence.")
 
+    async def _save_tasks(self, tasks):
+        storage = self._session_file
+        await self._durable_write(lambda: storage.update(metadata={"tasks": tasks}))
+
     async def _checkpoint(self, history, turn_id):
-        """Append context and task changes to the session's sole recovery file."""
+        """Append model context; the task state machine owns its checkpoints."""
         storage, messages = self._session_file, list(history.messages)
         await self._durable_write(lambda: storage.save_context(
             messages,
             turn_id=turn_id,
-            metadata={"tasks": self._task_manager.snapshot()},
         ))
 
     async def prepare_cli_session(self) -> tuple[str, ...]:
