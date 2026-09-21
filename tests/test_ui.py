@@ -286,3 +286,126 @@ def test_qq_second_download_failure_is_not_a_partial_image_request(monkeypatch):
                                     for name in ("first.png", "missing.png")], raw_message="")
     with pytest.raises(ValueError, match="image\\[2\\]"):
         media.extract_image_video(event)
+
+
+@pytest.mark.parametrize("initial", [{}, {"BASE_URL": "https://example.invalid/v1", "API_KEY": "fixture-only"}])
+async def test_first_use_enters_wizard_and_cancellation_writes_nothing(tmp_path, initial):
+    import json
+
+    from redlotus.api.base import prepare_startup_configuration
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(initial), encoding="utf-8")
+    before, questions = path.read_bytes(), []
+
+    async def cancel(question, **kwargs):
+        questions.append(question)
+        return None
+
+    assert not await prepare_startup_configuration(ask=cancel, emit=lambda text: None)
+    assert questions and not any("max_context_windows" in q for q in questions)
+    assert path.read_bytes() == before and not (tmp_path / "global/config.json").exists()
+
+
+@pytest.fixture
+def startup_values():
+    """Independently authored non-sensitive answers, never a copy of owner configuration."""
+    return {
+        "models": {
+            "coordinator": {"name": "openai:fixture", "auto_compress_ratio": .8,
+                            "compress_head_turns": 1, "compress_tail_turns": 2},
+            "manager": {"name": "openai:fixture", "auto_compress_ratio": .7,
+                        "compress_head_turns": 0, "compress_tail_turns": 2},
+            "worker": {"name": "openai:fixture", "auto_compress_ratio": .9,
+                       "compress_head_turns": 1, "compress_tail_turns": 1},
+            "compressor": {"name": "openai:fixture"}, "title": {"name": "openai:fixture"},
+        },
+        "BASE_URL": "https://example.invalid/v1", "API_KEY": "not-a-real-key",
+        "MODEL_HTTP_TIMEOUT": 30, "request_limit": None,
+        "agent_run_policy": {"max_concurrent_threads_per_session": 2, "max_command_timeout_seconds": 15},
+        "lifecycle": {"invocation_history_per_session": 10, "shutdown_grace_seconds": 2},
+        "storage": {"project_dir": "data", "sessions_dir": "data/sessions", "project_logs_dir": "data/logs",
+                    "references_dir": "data/references", "runtime_dir": "data/runtime", "state_dir": "",
+                    "cleanup": {"enabled": False, "execution_cache": False, "session_retention_days": 7}},
+        "input_limits": {"defaults": {"max_files": 2, "max_file_bytes": 1024}},
+        "memory_perception": {"model_role": "worker", "window_turns": 20, "overlap_turns": 3},
+        "short_term_memory": {"db_path": "memory", "table_name": "fixture", "turn_token_limit": 200,
+                              "turn_chunk_overlap_tokens": 20, "vector_search_limit": 5, "final_top_k": 2,
+                              "min_similarity": .4, "use_rerank": False,
+                              "index": {"metric": "cosine", "min_rows": 10, "rebuild_every_n_adds": 10,
+                                        "rows_per_partition": 4, "dimensions_per_sub_vector": 4}},
+        "long_term_memory": {"table_name": "fixture_profile"},
+        "model_metadata": {"url": "https://openrouter.ai/api/v1/models", "timeout": 10,
+                           "supported_thinking_efforts": ["low", "high"]},
+        "rag_service": {"http2": False, "timeout": 10, "embedding_batch_size": 2, "index_batch_size": 2},
+    }
+
+
+@pytest.mark.parametrize("confirm", ["y", "n"])
+async def test_first_use_collects_typed_fields_and_confirms_once(tmp_path, startup_values, confirm):
+    import json
+
+    from redlotus.api.base import prepare_startup_configuration
+    from redlotus.runtime.config import config_value, missing_startup_fields, settings
+
+    questions, notices, invalid = [], [], set()
+
+    async def answer(question, **kwargs):
+        questions.append(question)
+        if question.startswith("确认将"):
+            return confirm
+        if question.startswith("现在配置 RAG"):
+            return "n"
+        path = tuple(question.split("（", 1)[0].split("."))
+        if path == ("MODEL_HTTP_TIMEOUT",) and path not in invalid:
+            invalid.add(path)
+            return "true"  # bool is not a valid numeric timeout.
+        if path[:2] == ("models", "title"):
+            return "=coordinator"
+        value = config_value(startup_values, path)
+        return value if isinstance(value, str) else json.dumps(value)
+
+    assert await prepare_startup_configuration(ask=answer, emit=notices.append) == (confirm == "y")
+    assert sum(q.startswith("确认将") for q in questions) == 1
+    assert not any("max_context_windows" in q for q in questions)
+    assert any("MODEL_HTTP_TIMEOUT 无效" in notice for notice in notices)
+    if confirm == "y":
+        assert not missing_startup_fields(settings())
+        assert settings()["models"]["title"] == startup_values["models"]["title"]
+        assert settings()["storage"]["state_dir"] == ""
+    else:
+        assert not (tmp_path / "global/config.json").exists() and not settings()
+
+
+async def test_model_reuse_preserves_role_policy_and_layered_writes(tmp_path, startup_values):
+    import json
+
+    from redlotus.api.base import ConfigurationSetup, prepare_startup_configuration
+    from redlotus.runtime.config import settings, get_model_and_params
+
+    global_file = tmp_path / "global/config.json"
+    global_file.parent.mkdir()
+    startup_values["models"]["reviewer"] = "review"
+    startup_values["model_presets"] = {"review": {"name": "openai:review"}}
+    global_file.write_text(json.dumps(startup_values), encoding="utf-8")
+    local_file = tmp_path / "config.json"
+    local_file.write_text("{}", encoding="utf-8")
+    (tmp_path / ".env").write_text("MODEL_HTTP_TIMEOUT=45\n", encoding="utf-8")
+    before = global_file.read_bytes()
+    responses = iter(["=coordinator", "y"])
+
+    async def answer(question, **kwargs):
+        return next(responses)
+
+    setup = ConfigurationSetup(answer)
+    assert await setup.fill(("models", "manager", "name")) and await setup.commit()
+    assert global_file.read_bytes() == before and settings()["MODEL_HTTP_TIMEOUT"] == 45
+    assert settings()["models"]["manager"]["auto_compress_ratio"] == .7
+    assert json.loads(local_file.read_text()) == {}, "Unchanged inherited model must not be copied to local config"
+    assert get_model_and_params("reviewer")[0] == "openai:review"
+
+    async def skip_optional(question, **kwargs):
+        assert question.startswith("现在配置 RAG")
+        return "n"
+
+    assert await prepare_startup_configuration(ask=skip_optional, emit=lambda text: None)

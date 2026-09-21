@@ -58,6 +58,7 @@ include-package-data = false
 
 [tool.setuptools.package-data]
 redlotus = [
+    "config.schema.json",
     "prompts/*.md",
     "tools/skills/**/*",
     "api/config.yaml.example",

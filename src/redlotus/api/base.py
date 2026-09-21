@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import mimetypes
 import os
 import re
@@ -12,7 +13,6 @@ import threading
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
@@ -21,15 +21,16 @@ from redlotus.runtime import logging as logger
 from redlotus.runtime.config import (
     ConfigError,
     _frozen,
-    _model_roles,
     _model_selection_field,
-    _selected_model_name_path,
     _validate_config,
+    config_field,
     config_file,
     config_source_summary,
+    config_value,
     get_env,
     get_model_and_params,
     load_config,
+    missing_startup_fields,
     settings,
     update_config,
 )
@@ -362,14 +363,6 @@ class BotBase:
         return re.sub(r"\s+", " ", (raw or "").strip())
 
 
-def initialize_user_configuration() -> Path:
-    """Validate user-selected sources without copying or creating configuration files."""
-    path = config_file()
-    values = load_config()
-    if not values:
-        raise ConfigError(f"缺少配置 models；请填写 {path}。检查来源: {config_source_summary()}")
-    return path
-
 async def ask_configuration(question: str, *, secret=False):
     """Read a startup answer with the same hidden-key contract as the TUI dialog."""
     from prompt_toolkit import PromptSession
@@ -398,18 +391,12 @@ class ConfigurationSetup:
         self.changes = {}
         self.ask, self.emit = ask or ask_configuration, emit
 
-    def value(self, path):
-        node = self.values
-        for key in path:
-            if not isinstance(node, dict) or key not in node:
-                return None
-            node = node[key]
-        return node
-
     @staticmethod
     def assign(values, path, value):
         node = values
         for key in path[:-1]:
+            if isinstance(node.get(key), str) and path[:1] == ("models",) and key == path[1]:
+                node[key] = {"preset": node[key]}
             node = node.setdefault(key, {})
         node[path[-1]] = deepcopy(value)
 
@@ -427,23 +414,34 @@ class ConfigurationSetup:
     async def fill(self, path):
         """Validate one field, retaining previous input until the whole dialog succeeds."""
         key = ".".join(path)
-        current = self.value(path)
-        secret = "key" in path[-1].lower() or "token" in path[-1].lower()
+        current = config_value(self.values, path)
+        field = config_field(path)
+        secret = "key" in path[-1].lower() or "token" in path[-1].lower() or any(
+            gateway.get("api_key_env") == path[-1] for gateway in self.values.get("gateways", {}).values()
+        )
         shown = ("已填写" if current else "空") if secret else str(current if current is not None else "空")
         hint = "回车保留"
         if _model_selection_field(path) and path[0] == "models":
-            hint += "；输入 =角色名 可明确复用其模型"
+            hint += "；输入 =角色名 复用模型名，保留本角色的连接与策略"
         while True:
-            answer = await self.ask(f"{key}（当前 {shown}；{hint}；Esc 取消）：", secret=secret)
+            answer = await self.ask(f"{key}（当前 {shown}；{hint}；{field.get('description', '')}；Esc 取消）：", secret=secret)
             if answer is None or answer == "\x1b":
                 return False
             text = answer.strip()
             if not text and current not in (None, ""):
                 return True
             try:
-                if not text:
+                if not text and not field.get("allow_empty"):
                     raise ValueError("不能为空")
-                value = get_model_and_params(text[1:], cfg=self.values)[0] if text.startswith("=") and path[0] == "models" else text
+                if text.startswith("=") and _model_selection_field(path):
+                    value = get_model_and_params(text[1:], cfg=self.values)[0]
+                elif field.get("type") == "string" or "string" in field.get("type", []) and path != ("request_limit",):
+                    value = text
+                else:
+                    try:
+                        value = json.loads(text)
+                    except json.JSONDecodeError:
+                        value = text
                 if "url" in path[-1].lower() or path[-1] == "SILICONFLOW_BASE":
                     parsed = urlsplit(value)
                     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -458,13 +456,19 @@ class ConfigurationSetup:
             self.changes[path] = value
             return True
 
-    def commit(self):
-        """Only changed fields are applied to the latest locked configuration."""
-        if self.changes:
-            def apply(values):
-                for path, value in self.changes.items():
-                    self.assign(values, path, value)
-            update_config(apply)
+    async def commit(self):
+        """Confirm once, then apply only this dialog's edits to the latest locked layer."""
+        if not self.changes:
+            return True
+        answer = await self.ask(f"确认将 {len(self.changes)} 项修改写入 {config_file()}？y 确认 / 其他取消：")
+        if answer is None or answer.strip().lower() not in {"y", "yes", "是"}:
+            return False
+        def apply(values):
+            for path, value in self.changes.items():
+                self.assign(values, path, value)
+        update_config(apply)
+        return True
+
 
 def python_tool_startup_notice(cfg: dict[str, Any]) -> str | None:
     """Explain an optional frozen-build Python requirement without blocking chat."""
@@ -482,52 +486,26 @@ def rag_configuration_paths():
     return [("SILICONFLOW_BASE",), ("SILICONFLOW_KEY",), ("RAG_models", "embedding"), ("RAG_models", "reranker")]
 
 async def prepare_startup_configuration(*, ask=None, emit=print) -> bool:
-    """Complete first-use configuration before constructing Agents or starting clients."""
-    initialize_user_configuration()
+    """Collect missing typed fields before constructing Agents; never silently fill policy values."""
     setup = ConfigurationSetup(ask, emit)
-    schema = setup.values
+    interactive = ask is not None or configuration_prompt_available()
+    emit(f"配置修改目标: {config_file()}\n读取来源: {config_source_summary()}")
     try:
-        missing_model_names = []
-        roles = _model_roles(schema, setup.values)
-        if "coordinator" not in roles:
-            raise ConfigError(f"缺少配置 models.coordinator；检查来源: {config_source_summary()}")
-        roles.sort(key=lambda role: role != "coordinator")
-        for role in roles:
-            try:
-                get_model_and_params(role, cfg=setup.values)
-            except ConfigError as exc:
-                path = _selected_model_name_path(role, setup.values, schema)
-                missing_role = str(exc).startswith(
-                    f"缺少配置 models.{role}；"
-                ) or str(exc).startswith("缺少配置 models；")
-                if ".".join(path) not in str(exc) and not missing_role:
-                    raise
-                missing_model_names.append(path)
-        interactive = ask is not None or configuration_prompt_available()
-        if not interactive:
-            missing = list(missing_model_names)
-            if not missing:
-                paths = dict.fromkeys(path for role in roles for path in setup.connection_paths(role))
-                missing.extend(path for path in paths if not str(setup.value(path) or "").strip())
-            if missing:
-                fields = "、".join(".".join(path) for path in missing)
-                raise ConfigError(f"非交互启动缺少必填配置 {fields}；请编辑 {config_file()} 后重试")
-            missing_rag = [path for path in rag_configuration_paths() if not str(setup.value(path) or "").strip()]
-            if missing_rag:
-                emit("RAG 尚未配置；可先聊天，使用 /api embedding 补齐向量检索配置。")
-            if notice := python_tool_startup_notice(setup.values):
-                emit(notice)
-            return True
-        emit(f"配置修改目标: {config_file()}\n读取来源: {config_source_summary()}")
-        for path in dict.fromkeys(missing_model_names):
+        while missing := missing_startup_fields(setup.values):
+            if not interactive:
+                raise ConfigError(f"非交互启动缺少必填配置 {', '.join('.'.join(path) for path in missing)}；请编辑 {config_file()}")
+            if not await setup.fill(missing[0]):
+                return False
+        paths = dict.fromkeys(path for role in setup.values["models"] for path in setup.connection_paths(role))
+        for path in paths:
+            if str(config_value(setup.values, path) or "").strip():
+                continue
+            if not interactive:
+                raise ConfigError(f"非交互启动缺少必填配置 {'.'.join(path)}；请编辑 {config_file()}")
             if not await setup.fill(path):
                 return False
-        paths = dict.fromkeys(path for role in roles for path in setup.connection_paths(role))
-        for path in paths:
-            if not str(setup.value(path) or "").strip() and not await setup.fill(path):
-                return False
-        missing_rag = [path for path in rag_configuration_paths() if not str(setup.value(path) or "").strip()]
-        if missing_rag:
+        missing_rag = [path for path in rag_configuration_paths() if not str(config_value(setup.values, path) or "").strip()]
+        if missing_rag and interactive:
             choice = await setup.ask("现在配置 RAG 向量检索吗？y 配置 / n 稍后（回车稍后；Esc 取消）：")
             if choice is None or choice == "\x1b":
                 return False
@@ -535,13 +513,17 @@ async def prepare_startup_configuration(*, ask=None, emit=print) -> bool:
                 for path in missing_rag:
                     if not await setup.fill(path):
                         return False
-        setup.commit()
+        elif missing_rag:
+            emit("RAG 尚未配置；可先聊天，使用 /api embedding 补齐向量检索配置。")
+        if not await setup.commit():
+            return False
         if notice := python_tool_startup_notice(setup.values):
             emit(notice)
         return True
     except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
         emit("配置已取消，未保存本次填写内容。")
         return False
+
 
 async def configure_api(*, embedding=False, ask=None, emit=print) -> bool:
     """Edit service fields atomically for both plain CLI and TUI callers."""
@@ -551,8 +533,7 @@ async def configure_api(*, embedding=False, ask=None, emit=print) -> bool:
         for path in paths:
             if not await setup.fill(path):
                 return False
-        setup.commit()
-        return True
+        return await setup.commit()
     except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
         return False
 

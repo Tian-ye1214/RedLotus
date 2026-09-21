@@ -102,9 +102,9 @@ python -m playwright install chromium
 
 全局配置位于 `~/.redlotus/config.json`。逐字段优先级为本地 `src/redlotus/config.json` → 本地 `.env` → 全局 JSON；源码以仓库根目录、pip 以当前目录、PyInstaller 以 EXE 目录为本地查找基准，不向父目录搜索，也不使用 AppData 配置。`/config` 显示实际来源和修改目标。
 
-可用 `REDLOTUS_CONFIG_FILE` 或 `REDLOTUS_CONFIG_DIR` 显式选择配置。缺少必填项时会明确报错，不从隐藏模板补齐。项目会话与日志保存在项目 `.redlotus`，引用、缓存和产物位于项目 `WorkDatabase`；记忆数据库及长期记忆文档位于用户 `.redlotus`。安装包不含凭据。
+可用 `REDLOTUS_CONFIG_FILE` 或 `REDLOTUS_CONFIG_DIR` 显式选择配置。交互启动会根据公开的[字段契约](src/redlotus/config.schema.json)询问必填缺项；非交互启动会列出缺失字段，不从隐藏模板补齐。向导显示来源和写入目标，确认后只写本次修改，取消不落盘。项目会话与日志保存在项目 `.redlotus`，引用、缓存和产物位于项目 `WorkDatabase`；记忆数据库及长期记忆文档位于用户 `.redlotus`。安装包不含凭据。
 
-至少需要配置模型服务地址和密钥：
+全新安装可直接运行 `redlotus` 完成配置。输入 `=角色名` 只复用模型名，保留目标角色的连接与策略。`max_context_windows` 只在 JSON 中编辑，缺失或 `null` 时查询 OpenRouter 元数据。以下只是连接字段片段，其他启动字段由向导继续收集：
 
 ```json
 {
@@ -113,7 +113,7 @@ python -m playwright install chromium
 }
 ```
 
-网关复用 Pydantic AI 的 OpenAI Chat、OpenAI Responses、Anthropic Messages 和 Google 适配。Manager、Worker、Coordinator、Compressor 可以分别配置或选择命名预设。感知通过 `memory_perception.model_role` 选择子 Agent 配置，默认使用 Worker，与上下文压缩独立。RAG 连接、模型及请求策略由 `SILICONFLOW_BASE`、`SILICONFLOW_KEY`、`RAG_models` 和 `rag_service` 提供。
+网关复用 Pydantic AI 的 OpenAI Chat、OpenAI Responses、Anthropic Messages 和 Google 适配。Manager、Worker、Coordinator、Compressor 可以分别配置或选择命名预设。感知通过 `memory_perception.model_role` 选择子 Agent 配置，与上下文压缩独立。RAG 连接、模型及请求策略由 `SILICONFLOW_BASE`、`SILICONFLOW_KEY`、`RAG_models` 和 `rag_service` 提供。
 
 命名凭据引用（如 `api_key_env`）从同一份三层配置读取，包含本地 `.env`；不读取宿主环境变量或全局 `.env`。直接密钥与命名引用遵守相同的来源优先级。不要将真实密钥提交到 Git。配置与模型路由见 [现行设计](docs/design.md)。
 

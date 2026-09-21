@@ -1,0 +1,597 @@
+{
+  "type": "object",
+  "description": "RedLotus 公开字段契约；不包含配置值、模型选择、凭据或策略默认值",
+  "properties": {
+    "models": {
+      "type": "object",
+      "description": "当前内置能力需要的模型配置；可增加任意新身份，运行时按本配置枚举",
+      "properties": {
+        "coordinator": {
+          "$ref": "#/$defs/context_model"
+        },
+        "manager": {
+          "$ref": "#/$defs/context_model"
+        },
+        "worker": {
+          "$ref": "#/$defs/context_model"
+        },
+        "compressor": {
+          "$ref": "#/$defs/model"
+        },
+        "title": {
+          "$ref": "#/$defs/model"
+        }
+      },
+      "required": [
+        "coordinator",
+        "manager",
+        "worker",
+        "compressor",
+        "title"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/model"
+      }
+    },
+    "model_presets": {
+      "type": "object",
+      "description": "显式复用的模型预设",
+      "properties": {},
+      "required": [],
+      "additionalProperties": {
+        "$ref": "#/$defs/model",
+        "type": "object"
+      }
+    },
+    "gateways": {
+      "type": "object",
+      "description": "命名网关",
+      "properties": {},
+      "required": [],
+      "additionalProperties": {
+        "type": "object",
+        "description": "网关连接",
+        "properties": {
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "完整服务地址"
+          },
+          "api_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "服务凭据，输入隐藏"
+          },
+          "api_key_env": {
+            "type": "string",
+            "description": "配置或 .env 中保存凭据的字段名"
+          },
+          "timeout": {
+            "type": "number",
+            "description": "模型 HTTP 总超时秒数",
+            "exclusiveMinimum": 0
+          },
+          "connect_timeout": {
+            "type": "number",
+            "description": "模型 HTTP 建连超时秒数",
+            "exclusiveMinimum": 0
+          },
+          "input_limits": {
+            "$ref": "#/$defs/input_limits"
+          }
+        },
+        "required": []
+      }
+    },
+    "BASE_URL": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "默认模型服务的完整 http/https 地址"
+    },
+    "API_KEY": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "默认模型服务凭据，输入隐藏"
+    },
+    "MODEL_HTTP_TIMEOUT": {
+      "type": "number",
+      "description": "模型 HTTP 总超时秒数",
+      "exclusiveMinimum": 0
+    },
+    "request_limit": {
+      "type": [
+        "integer",
+        "string",
+        "null"
+      ],
+      "description": "单次 Agent 运行最多模型请求数；null 为不限",
+      "minimum": 0,
+      "allow_empty": true,
+      "string_values": [
+        "",
+        "none",
+        "unlimited",
+        "null"
+      ]
+    },
+    "agent_run_policy": {
+      "type": "object",
+      "description": "Agent 执行策略",
+      "properties": {
+        "max_concurrent_threads_per_session": {
+          "type": "integer",
+          "description": "同一会话子 Agent 并发线程上限",
+          "minimum": 1
+        },
+        "max_command_timeout_seconds": {
+          "type": "integer",
+          "description": "工具命令允许的最长执行秒数",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "max_concurrent_threads_per_session",
+        "max_command_timeout_seconds"
+      ]
+    },
+    "lifecycle": {
+      "type": "object",
+      "description": "调用记录与退出策略",
+      "properties": {
+        "invocation_history_per_session": {
+          "type": "integer",
+          "description": "每个会话保留的调用记录数",
+          "minimum": 1
+        },
+        "shutdown_grace_seconds": {
+          "type": "number",
+          "description": "取消与退出清理的期限秒数",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "invocation_history_per_session",
+        "shutdown_grace_seconds"
+      ]
+    },
+    "storage": {
+      "type": "object",
+      "description": "路径和磁盘清理策略",
+      "properties": {
+        "project_dir": {
+          "type": "string",
+          "description": "项目数据目录，必须在当前项目内"
+        },
+        "sessions_dir": {
+          "type": "string",
+          "description": "会话目录，必须在当前项目内"
+        },
+        "project_logs_dir": {
+          "type": "string",
+          "description": "日志目录，必须在当前项目内"
+        },
+        "references_dir": {
+          "type": "string",
+          "description": "引用快照目录，必须在当前项目内"
+        },
+        "runtime_dir": {
+          "type": "string",
+          "description": "执行依赖与缓存目录，必须在当前项目内"
+        },
+        "state_dir": {
+          "type": "string",
+          "description": "用户数据目录；空字符串使用 ~/.redlotus",
+          "allow_empty": true
+        },
+        "cleanup": {
+          "type": "object",
+          "description": "磁盘写满后是否清理已经关闭的旧会话与依赖缓存",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "是否启用写满后的保守清理"
+            },
+            "execution_cache": {
+              "type": "boolean",
+              "description": "是否允许清理确认归属且不再活动的执行缓存"
+            },
+            "session_retention_days": {
+              "type": "number",
+              "description": "会话保留天数",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "enabled",
+            "execution_cache",
+            "session_retention_days"
+          ]
+        }
+      },
+      "required": [
+        "project_dir",
+        "sessions_dir",
+        "project_logs_dir",
+        "references_dir",
+        "runtime_dir",
+        "state_dir",
+        "cleanup"
+      ]
+    },
+    "input_limits": {
+      "type": "object",
+      "description": "全局和身份输入限制",
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/input_limits"
+        }
+      },
+      "required": [
+        "defaults"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/input_limits"
+      }
+    },
+    "memory_perception": {
+      "type": "object",
+      "description": "记忆生产策略",
+      "properties": {
+        "model_role": {
+          "type": "string",
+          "description": "感知使用的 models 中的身份名称"
+        },
+        "window_turns": {
+          "type": "integer",
+          "description": "每次封窗的新增用户回合数",
+          "minimum": 1
+        },
+        "overlap_turns": {
+          "type": "integer",
+          "description": "每窗引用前窗的重叠回合数",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "model_role",
+        "window_turns",
+        "overlap_turns"
+      ]
+    },
+    "short_term_memory": {
+      "type": "object",
+      "description": "项目记忆与检索配置",
+      "properties": {
+        "db_path": {
+          "type": "string",
+          "description": "LanceDB 路径；相对路径基于用户数据目录"
+        },
+        "table_name": {
+          "type": "string",
+          "description": "项目记忆基础表名"
+        },
+        "turn_token_limit": {
+          "type": "integer",
+          "description": "向量分块的 Token 上限",
+          "minimum": 1
+        },
+        "turn_chunk_overlap_tokens": {
+          "type": "integer",
+          "description": "相邻分块重叠 Token 数",
+          "minimum": 0
+        },
+        "vector_search_limit": {
+          "type": "integer",
+          "description": "向量召回候选数",
+          "minimum": 1
+        },
+        "final_top_k": {
+          "type": "integer",
+          "description": "最终返回的记忆数",
+          "minimum": 1
+        },
+        "min_similarity": {
+          "type": "number",
+          "description": "向量相似度下限"
+        },
+        "use_rerank": {
+          "type": "boolean",
+          "description": "是否调用重排模型"
+        },
+        "index": {
+          "type": "object",
+          "description": "向量索引参数",
+          "properties": {
+            "metric": {
+              "type": "string",
+              "description": "向量距离算法，例如 cosine、l2 或 dot"
+            },
+            "min_rows": {
+              "type": "integer",
+              "description": "创建向量索引的最少记录数",
+              "minimum": 1
+            },
+            "rebuild_every_n_adds": {
+              "type": "integer",
+              "description": "新增多少行后重建向量索引",
+              "minimum": 1
+            },
+            "rows_per_partition": {
+              "type": "integer",
+              "description": "每个向量分区的目标行数",
+              "minimum": 1
+            },
+            "dimensions_per_sub_vector": {
+              "type": "integer",
+              "description": "每个子向量的维数",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "metric",
+            "min_rows",
+            "rebuild_every_n_adds",
+            "rows_per_partition",
+            "dimensions_per_sub_vector"
+          ]
+        }
+      },
+      "required": [
+        "db_path",
+        "table_name",
+        "turn_token_limit",
+        "turn_chunk_overlap_tokens",
+        "vector_search_limit",
+        "final_top_k",
+        "min_similarity",
+        "use_rerank",
+        "index"
+      ]
+    },
+    "long_term_memory": {
+      "type": "object",
+      "description": "长期记忆存储",
+      "properties": {
+        "table_name": {
+          "type": "string",
+          "description": "长期记忆基础表名"
+        }
+      },
+      "required": [
+        "table_name"
+      ]
+    },
+    "model_metadata": {
+      "type": "object",
+      "description": "OpenRouter 模型元数据",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "模型元数据 API 地址"
+        },
+        "timeout": {
+          "type": "number",
+          "description": "查询元数据的超时秒数",
+          "exclusiveMinimum": 0
+        },
+        "supported_thinking_efforts": {
+          "type": "array",
+          "description": "允许使用的思考强度名称",
+          "items": {
+            "type": "string",
+            "description": "思考强度"
+          }
+        }
+      },
+      "required": [
+        "url",
+        "timeout",
+        "supported_thinking_efforts"
+      ]
+    },
+    "rag_service": {
+      "type": "object",
+      "description": "向量与重排服务的传输策略",
+      "properties": {
+        "http2": {
+          "type": "boolean",
+          "description": "是否使用 HTTP/2"
+        },
+        "timeout": {
+          "type": "number",
+          "description": "请求超时秒数",
+          "exclusiveMinimum": 0
+        },
+        "embedding_batch_size": {
+          "type": "integer",
+          "description": "每批 embedding 的条目数",
+          "minimum": 1
+        },
+        "index_batch_size": {
+          "type": "integer",
+          "description": "每批索引更新的条目数",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "http2",
+        "timeout",
+        "embedding_batch_size",
+        "index_batch_size"
+      ]
+    },
+    "SILICONFLOW_BASE": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "向量服务完整地址；可稍后配置"
+    },
+    "SILICONFLOW_KEY": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "向量服务凭据，输入隐藏；可稍后配置"
+    },
+    "RAG_models": {
+      "type": "object",
+      "description": "向量模型选择；可稍后配置",
+      "properties": {},
+      "required": [],
+      "additionalProperties": {
+        "type": "string",
+        "description": "模型名称"
+      }
+    }
+  },
+  "required": [
+    "models",
+    "MODEL_HTTP_TIMEOUT",
+    "request_limit",
+    "agent_run_policy",
+    "lifecycle",
+    "storage",
+    "input_limits",
+    "memory_perception",
+    "short_term_memory",
+    "long_term_memory",
+    "model_metadata",
+    "rag_service"
+  ],
+  "$defs": {
+    "model": {
+      "type": [
+        "object",
+        "string"
+      ],
+      "description": "模型对象或已命名的预设",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "SDK 的 服务:模型 标识；输入 =已配置角色 复用模型名，连接与策略保持当前角色配置"
+        },
+        "preset": {
+          "type": "string",
+          "description": "已有 model_presets 中的名称"
+        },
+        "gateway": {
+          "type": "string",
+          "description": "已有 gateways 中的名称；未指定时使用 BASE_URL / API_KEY"
+        },
+        "max_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "模型最大输出 Token，null 由服务决定",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "服务支持的采样温度"
+        },
+        "top_p": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "服务支持的 top_p"
+        },
+        "thinking": {
+          "type": "string",
+          "description": "模型思考开关，例如 enabled 或 disabled"
+        },
+        "reasoning_effort": {
+          "type": "string",
+          "description": "模型支持的思考强度"
+        },
+        "max_context_windows": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "模型上下文容量；缺失或 null 时查询 OpenRouter metadata，只在 config.json 编辑",
+          "minimum": 1,
+          "config_only": true
+        },
+        "auto_compress_ratio": {
+          "type": "number",
+          "description": "按服务端输入 Token 触发自动压缩的容量比例",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "compress_head_turns": {
+          "type": "integer",
+          "description": "压缩时保留的开头用户回合数",
+          "minimum": 0
+        },
+        "compress_tail_turns": {
+          "type": "integer",
+          "description": "压缩时保留的末尾用户回合数",
+          "minimum": 0
+        },
+        "settings": {
+          "$ref": "#/$defs/model_settings"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "context_model": {
+      "$ref": "#/$defs/model",
+      "required": [
+        "name",
+        "auto_compress_ratio",
+        "compress_head_turns",
+        "compress_tail_turns"
+      ]
+    },
+    "model_settings": {
+      "$ref": "#/$defs/model",
+      "type": "object",
+      "required": [],
+      "description": "模型设置的可选嵌套写法，共用模型字段类型"
+    },
+    "input_limits": {
+      "type": "object",
+      "description": "发送前的文件与请求边界",
+      "properties": {
+        "max_files": {
+          "type": "integer",
+          "description": "单次输入最多文件数",
+          "minimum": 1
+        },
+        "max_file_bytes": {
+          "type": "integer",
+          "description": "单个文件最大字节数",
+          "minimum": 1
+        },
+        "max_request_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "编码后请求最大字节数，null 表示未声明",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "max_files",
+        "max_file_bytes"
+      ]
+    }
+  }
+}
