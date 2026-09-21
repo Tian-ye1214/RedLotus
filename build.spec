@@ -79,8 +79,6 @@ if bundle_mode == "onefile":
         upx=False,
         console=True,
         disable_windowed_traceback=False,
-        # Relative to the selected project; avoid needless Windows path depth.
-        runtime_tmpdir="WorkDatabase",
     )
 else:
     exe = EXE(
