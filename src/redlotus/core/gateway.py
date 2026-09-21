@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import asdict
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -35,9 +34,9 @@ from redlotus.runtime.network import (
     InputLimitError,
     ModelInputPolicy,
     ModelTarget,
-    close_all_clients,
     create_model,
 )
+from redlotus.sessions.context import agent_context, current_agent_id, current_usage_recorder
 
 
 class RequestPolicy(AbstractCapability):
@@ -56,7 +55,7 @@ class RequestPolicy(AbstractCapability):
         parameters = request_context.model_request_parameters
         tool_definitions = [*parameters.function_tools, *parameters.output_tools]
         candidate = request_context.messages
-        if self.role in ("coordinator", "manager", "worker"):
+        if "auto_compress_ratio" in target.context:
             from redlotus.core.history import compact_request_messages
 
             candidate = await compact_request_messages(
@@ -87,11 +86,15 @@ class RequestPolicy(AbstractCapability):
     async def after_model_request(self, ctx, *, request_context, response):
         response.metadata = {
             **(response.metadata or {}),
+            "usage_category": "main" if self.role == "coordinator" else "agent" if "auto_compress_ratio" in self.target.context else "auxiliary",
             "model_target": {
                 "name": self.target.name,
                 "protocol": self.target.protocol,
             },
         }
+        if record := current_usage_recorder():
+            await record([response], role=self.role, invocation=ctx.run_id,
+                         agent_id=current_agent_id(), cancelling=bool(asyncio.current_task().cancelling()))
         return response
 
     async def on_model_request_error(self, ctx, *, request_context, error):
@@ -359,40 +362,28 @@ async def create_coordinator_agent(
 
 
 async def complete_text(
-    role: str, system_prompt: str, user_text: str, *, output_validator=None
-) -> str:
+    role: str, system_prompt: str, user_text: str, *, output_validator=None, output_type=str
+):
     """Auxiliary calls use the foreground Agent's provider routing."""
     target = ModelTarget.for_role(role)
-    agent = create_agent(target, instructions=system_prompt, role=role)
+    agent = create_agent(target, instructions=system_prompt, role=role, output_type=output_type)
     if output_validator is not None:
         agent.output_validator(output_validator)
-    result = await agent.run(
-        with_runtime_context(user_text), usage_limits=get_agent_usage_limits()
-    )
-    logger.info_file_only(
-        "[model_usage] %s",
-        json.dumps(
-            {"role": role, "model": target.name, **asdict(result.usage)},
-            ensure_ascii=False,
-        ),
-    )
-    return str(result.output or "")
 
+    async def save_usage(run):
+        if record := current_usage_recorder():
+            for message in run.all_messages():
+                if isinstance(message, ModelResponse):
+                    message.metadata = {"usage_category": "auxiliary", **(message.metadata or {})}
+            await record(run.all_messages(), role=role, invocation=run.ctx.state.run_id,
+                         cancelling=bool(asyncio.current_task().cancelling()))
 
-def complete_text_sync(
-    role: str, system_prompt: str, user_text: str, *, output_validator=None
-) -> str:
-    """Compression workers own and close their event-loop resources."""
-
-    async def run() -> str:
-        try:
-            return await complete_text(
-                role, system_prompt, user_text, output_validator=output_validator
-            )
-        finally:
-            await close_all_clients()
-
-    return asyncio.run(run())
+    with agent_context(None):
+        result = await AgentRunner().run(
+            agent=agent, prompt=with_runtime_context(user_text), message_history=[],
+            usage_limits=get_agent_usage_limits(), on_node=save_usage,
+        )
+    return result.output
 
 
 class TaskTitle(BaseModel):
@@ -409,12 +400,6 @@ class TaskTitle(BaseModel):
         return value
 
 
-def _title_from_output(output: object) -> str:
-    if not isinstance(output, TaskTitle):
-        raise ValueError("title response did not match the structured output")
-    return output.title
-
-
 async def generate_task_title(user_text: str) -> str:
     """Generate a short task title with the dedicated configured title role."""
     fallback = next(
@@ -422,25 +407,11 @@ async def generate_task_title(user_text: str) -> str:
         "",
     )
     try:
-        target = ModelTarget.for_role("title")
-        agent = create_agent(
-            target,
-            instructions=load_prompt("title_system.md"),
+        result = await complete_text(
+            "title", load_prompt("title_system.md"), user_text,
             output_type=PromptedOutput(TaskTitle),
-            role="title",
         )
-        result = await agent.run(
-            with_runtime_context(user_text),
-            usage_limits=get_agent_usage_limits(),
-        )
-        logger.info_file_only(
-            "[model_usage] %s",
-            json.dumps(
-                {"role": "title", "model": target.name, **asdict(result.usage)},
-                ensure_ascii=False,
-            ),
-        )
-        return _title_from_output(result.output)
+        return result.title
     except Exception as exc:
         logger.warning("LLM 标题生成失败，使用用户输入命名: %s", exc)
         return fallback

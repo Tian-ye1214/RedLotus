@@ -302,12 +302,13 @@ class AgentCliController:
             )
 
         if state.is_first_input:
-            task_name = await generate_task_title(raw_input)
+            await system.bind_session(uuid4().hex)
+            with system._session.usage(system._session_file):
+                task_name = await generate_task_title(raw_input)
             if not system._session.accepts(admission):
                 return "continue"
             logger.setup_task_logger(task_name)
             system.toolkit.set_task_directory(task_name)
-            await system.bind_session(uuid4().hex)
             await system._durable_write(
                 lambda: system._session_file.update(
                     metadata={"task_name": task_name, "title": task_name}

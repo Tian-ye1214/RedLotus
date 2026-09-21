@@ -27,8 +27,12 @@ from uuid import uuid4
 from redlotus.runtime import logging as logger
 from redlotus.runtime.resources import (
     WorkspaceContext,
+    bind_context,
+    bind_to_loop,
     finish_file_io,
+    workspace_context,
 )
+from redlotus.sessions.context import _USAGE_RECORDER, make_agent_id
 
 
 @dataclass(frozen=True)
@@ -219,6 +223,21 @@ class SessionController:
         self._urgent.clear()
         self._notices.clear()
 
+
+    def usage(self, storage):
+        """Bind model receipts to their original session and its existing durable writer."""
+        generation, owner = self.generation, asyncio.current_task()
+
+        async def record(messages, *, role, invocation, agent_id=None, cancelling=False):
+            with workspace_context(storage.workspace):
+                await self.write(
+                    lambda: storage.record_usage(messages, role=role, invocation=invocation,
+                                                 agent_id=agent_id or make_agent_id(storage.session_id, role)),
+                    storage=storage,
+                    cancelling=cancelling or owner.cancelling() or generation != self.generation,
+                )
+
+        return bind_context(_USAGE_RECORDER, bind_to_loop(record, asyncio.get_running_loop()) if storage else None)
 
     async def write(self, operation, *, storage=None, cancelling=False):
         """Hold failed checkpoints until new input, but never wait during cancellation."""

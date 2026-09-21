@@ -88,10 +88,6 @@ def get_effective_max_context(
     )
 
 
-def _build_compress_user_body(summary_md: str) -> str:
-    return summary_md.strip()
-
-
 def _lint_compression_summary(summary_md: str) -> str:
     body = (summary_md or "").strip()
     errors: list[dict] = []
@@ -119,14 +115,14 @@ def _lint_compression_summary(summary_md: str) -> str:
     return body
 
 
-def _call_compressor_llm(
+async def _call_compressor_llm(
     *,
     system_prompt: str,
     user_content: str,
 ) -> str:
     from pydantic_ai import ModelRetry
 
-    from redlotus.core.gateway import complete_text_sync
+    from redlotus.core.gateway import complete_text
 
     def validate(output):
         try:
@@ -134,7 +130,7 @@ def _call_compressor_llm(
         except CompressionValidationError as exc:
             raise ModelRetry(str(exc)) from exc
 
-    return complete_text_sync(
+    return await complete_text(
         "compressor", system_prompt, user_content, output_validator=validate
     )
 
@@ -164,9 +160,8 @@ def _compression_bounds(messages, context, *, retain_tail=True):
     return head_end, tail_start
 
 
-def _compression_candidate(
-    messages: list,
-    summary_state: str | None,
+async def prepare_compression(
+    history: ChatHistory,
     *,
     role: str,
     force: bool,
@@ -174,11 +169,13 @@ def _compression_candidate(
     retain_tail: bool = True,
     context: dict | None = None,
 ) -> ChatHistory | None:
+    """Build a detached candidate; native async model I/O shares cancellation and usage."""
+    messages, summary_state = list(history.messages), history.compress_summary_state
     if len(messages) < 2:
         return None
 
     ctx = get_context_config(role) if context is None else context
-    max_ctx = get_effective_max_context(role=role, context=ctx)
+    max_ctx = await get_effective_max_context_async(role=role, context=ctx)
     used = latest_usage_input_tokens(messages)
     threshold = max_ctx * float(ctx["auto_compress_ratio"])
 
@@ -212,11 +209,10 @@ def _compression_candidate(
         user_parts["task_state"] = task_state.strip()
     user_content = json.dumps(user_parts, ensure_ascii=False)
 
-    summary_md = _call_compressor_llm(
+    summary_md = await _call_compressor_llm(
         system_prompt=system_prompt, user_content=user_content
     )
     summary_md = _lint_compression_summary(summary_md)
-    new_body = _build_compress_user_body(summary_md)
     retained = messages[:head_end] + messages[tail_start:]
     metadata = {
         "origin": "context_summary", "summary": summary_md,
@@ -229,7 +225,7 @@ def _compression_candidate(
             UserPromptPart(
                 content=[
                     TextContent(
-                        new_body,
+                        summary_md,
                         metadata=metadata,
                     )
                 ]
@@ -303,55 +299,6 @@ async def get_effective_max_context_async(
     )
 
 
-async def prepare_compression(
-    history: ChatHistory,
-    *,
-    role: str,
-    force: bool,
-    task_state: str | None = None,
-    retain_tail: bool = True,
-    context: dict | None = None,
-) -> ChatHistory | None:
-    """Build a detached compression candidate without changing ``history``."""
-    messages = list(history.messages)
-    summary_state = history.compress_summary_state
-    context = dict(context) if context is not None else None
-    return await asyncio.to_thread(
-        _compression_candidate,
-        messages,
-        summary_state,
-        role=role,
-        force=force,
-        task_state=task_state,
-        retain_tail=retain_tail,
-        context=context,
-    )
-
-
-async def compress_history_async(
-    history: ChatHistory,
-    *,
-    role: str,
-    force: bool,
-    task_state: str | None = None,
-    retain_tail: bool = True,
-    context: dict | None = None,
-) -> bool:
-    revision = history.revision
-    candidate = await prepare_compression(
-        history,
-        role=role,
-        force=force,
-        task_state=task_state,
-        retain_tail=retain_tail,
-        context=context,
-    )
-    if candidate is None or history.revision != revision:
-        return False
-    history.set_messages(candidate.messages)
-    return True
-
-
 def _closed_boundaries(messages: list) -> list[int]:
     pending: set[str] = set()
     boundaries = [0]
@@ -385,24 +332,25 @@ async def compact_request_messages(
         return combined
     history = ChatHistory()
     history.set_messages(combined)
-    changed = await compress_history_async(
+    candidate = await prepare_compression(
         history,
         role=role,
         force=True,
         task_state=task_state,
         context={**context, "max_context_windows": limit},
     )
-    if not changed:
+    if candidate is None:
         raise CompressionValidationError(
             "Context has no safe compaction boundary; original messages are retained."
         )
-    compacted = history.messages
+    compacted = candidate.messages
     if request.instructions is not None:
         compacted[-1].instructions = request.instructions
     return compacted
 
 
 MODEL_MESSAGES_GLOB = "model_messages.json"
+USAGE_CATEGORY_LABELS = {"main": "主 Agent", "agent": "普通子 Agent", "auxiliary": "辅助角色", "unknown": "旧记录／身份未分类"}
 
 
 @dataclass(frozen=True)
@@ -531,6 +479,7 @@ class UsageFileSummary:
     totals: UsageTotals = field(default_factory=UsageTotals)
     by_model: dict[str, ModelUsageSummary] = field(default_factory=dict)
     by_agent: dict[str, UsageTotals] = field(default_factory=dict)
+    by_category: dict[str, UsageTotals] = field(default_factory=dict)
     content: ContentTokenStats = field(default_factory=ContentTokenStats)
 
 
@@ -539,6 +488,8 @@ class UsageReport:
     files: list[UsageFileSummary] = field(default_factory=list)
     totals: UsageTotals = field(default_factory=UsageTotals)
     by_model: dict[str, ModelUsageSummary] = field(default_factory=dict)
+    by_agent: dict[str, UsageTotals] = field(default_factory=dict)
+    by_category: dict[str, UsageTotals] = field(default_factory=dict)
 
 
 PriceResolver = Callable[[str], ResolvedTokenPrice | None]
@@ -563,9 +514,8 @@ def read_usage_messages(path: Path):
     rows = []
     for row in session.usage_responses():
         row = dict(row)
-        role = row.pop("role", "coordinator")
-        row.pop("turn_id", None)
-        rows.append({**row, "kind": "response", "parts": [], "metadata": {"role": role}})
+        metadata = {key: row.pop(key, None) for key in ("role", "category", "turn_id", "agent_id", "invocation")}
+        rows.append({**row, "kind": "response", "parts": [], "metadata": metadata})
     return ModelMessagesTypeAdapter.validate_python(rows), session.info()
 
 
@@ -615,11 +565,15 @@ def summarize_messages(
         summary.totals.responses += 1
         role = (message.metadata or {}).get("role", "coordinator")
         agent_totals = summary.by_agent.setdefault(role, UsageTotals())
-        agent_totals.responses += 1
+        category = (message.metadata or {}).get("category") or "unknown"
+        category_totals = summary.by_category.setdefault(category, UsageTotals())
+        for totals in (agent_totals, category_totals):
+            totals.responses += 1
         usage = message.usage
         if not usage.has_values():
             summary.totals.missing_usage_responses += 1
-            agent_totals.missing_usage_responses += 1
+            for totals in (agent_totals, category_totals):
+                totals.missing_usage_responses += 1
             summary.content.missing_usage_responses += 1
             summary.content.missing_reasoning_responses += 1
             continue
@@ -633,6 +587,7 @@ def summarize_messages(
         billable = billable_tokens_from_usage(usage)
         summary.totals.add_usage(usage, billable)
         agent_totals.add_usage(usage, billable)
+        category_totals.add_usage(usage, billable)
         model_summary = summary.by_model.setdefault(
             model_name, ModelUsageSummary(model_name=model_name)
         )
@@ -651,7 +606,8 @@ def summarize_usage_files(paths: Iterable[Path], *, price_resolver=None) -> Usag
         )
         messages.extend(batch)
     total = summarize_messages(messages, price_resolver=price_resolver)
-    return UsageReport(files=files, totals=total.totals, by_model=total.by_model)
+    return UsageReport(files=files, totals=total.totals, by_model=total.by_model,
+                       by_agent=total.by_agent, by_category=total.by_category)
 
 
 def resolve_token_price(model_name: str) -> ResolvedTokenPrice | None:

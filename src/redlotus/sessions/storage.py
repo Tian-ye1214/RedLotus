@@ -27,7 +27,7 @@ from redlotus.sessions.journal import SessionJournal, _json
 
 
 def _response_id(message):
-    """Use request identity for accounting even when a response's displayed text changes."""
+    """Keep the message identity used by existing compression checkpoints."""
     return ":".join(str(value or "") for value in (
         message.provider_name, message.model_name, message.provider_response_id, message.timestamp.isoformat()
     ))
@@ -50,6 +50,8 @@ def _response_usage(message, **metadata):
     ):
         return None
     return dict(metadata, model_name=message.model_name, provider_name=message.provider_name,
+                provider_response_id=message.provider_response_id,
+                category=(message.metadata or {}).get("usage_category", "unknown"),
                 timestamp=message.timestamp.isoformat(), usage=asdict(message.usage))
 
 
@@ -353,12 +355,10 @@ class SessionFile(SessionJournal):
                     if invocation:
                         additions[key]["invocation"] = invocation
                     pending_digests[digest] = key
-                if summary := _response_usage(message):
-                    usage_id = _response_id(message)
-                    usage_id = next((key for key in self._usage if key.endswith(":" + usage_id)), usage_id)
-                    summary["turn_id"] = self._usage.get(usage_id, {}).get("turn_id", self._records.get(key, {}).get("turn_id", turn_id))
-                    if summary != self._usage.get(usage_id):
-                        usage[usage_id] = summary
+                usage.update(self._usage_updates([message],
+                    turn_id=self._records.get(key, {}).get("turn_id", turn_id),
+                    agent_id=agent_id, invocation=invocation,
+                ))
                 view.append((message, key))
             changed_meta = {key: value for key, value in (metadata or {}).items() if value != self._metadata.get(key)}
             context = [key for _, key in view]
@@ -480,32 +480,27 @@ class SessionFile(SessionJournal):
         with self._locked_state():
             return sorted(self._pending_jobs, key=lambda key: self._jobs[key]["created_at"])
 
-    def record_usage(self, messages, *, role, invocation):
+    def _usage_updates(self, messages, **metadata):
+        """Share response identity between checkpoints, auxiliary calls and save retries."""
+        changes = {}
+        for message in messages:
+            if row := _response_usage(message):
+                identity = ":".join(str(value or "") for value in (
+                    message.provider_name, message.model_name, message.provider_response_id or message.timestamp.isoformat(),
+                ))
+                legacy = _response_id(message)
+                key = next((key for key in self._usage if key == legacy or key.endswith(":" + legacy)), identity)
+                row = {**metadata, **self._usage.get(key, {}), **row}
+                if row != self._usage.get(key):
+                    changes[key] = row
+        return changes
+
+    def record_usage(self, messages, *, role, invocation, agent_id=None):
         """Keep per-response counters without saving child or perception transcripts."""
         if role != self.role:
-            return self.role_file(role).record_usage(messages, role=role, invocation=invocation)
+            return self.role_file(role).record_usage(messages, role=role, invocation=invocation, agent_id=agent_id)
         with self._locked_state():
-            usage = {}
-            for message in messages:
-                if row := _response_usage(message):
-                    if not message.model_name or not message.provider_name:
-                        origin = (message.metadata or {}).get("origin")
-                        origin = origin if isinstance(origin, str) and origin.isidentifier() else None
-                        part_kinds = [
-                            getattr(part, "tool_kind", None)
-                            or getattr(part, "part_kind", type(part).__name__)
-                            for part in message.parts
-                        ]
-                        from redlotus.runtime import logging as logger
-                        logger.debug(
-                            "[usage_identity_missing] role=%s invocation=%s timestamp=%s "
-                            "model=%r provider=%r finish_reason=%r parts=%s origin=%r",
-                            role, invocation, message.timestamp.isoformat(), message.model_name,
-                            message.provider_name, message.finish_reason, part_kinds, origin,
-                        )
-                    key = f"{invocation}:{_response_id(message)}"
-                    if self._usage.get(key) != row:
-                        usage[key] = row
+            usage = self._usage_updates(messages, invocation=invocation, agent_id=agent_id)
             if usage:
                 self._append(dict(usage=usage))
 

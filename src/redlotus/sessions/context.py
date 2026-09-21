@@ -166,6 +166,8 @@ def execution_role(role: str):
 
 _CURRENT_TURN_ID: ContextVar[str | None] = ContextVar("agent_turn_id", default=None)
 _CURRENT_AGENT_ID: ContextVar[str | None] = ContextVar("agent_id", default=None)
+_USAGE_RECORDER: ContextVar[Any] = ContextVar("usage_recorder", default=None)
+current_usage_recorder = _USAGE_RECORDER.get
 
 
 def current_turn_id() -> str | None:

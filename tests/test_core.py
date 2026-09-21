@@ -212,6 +212,138 @@ def test_provider_missing_usage_is_still_unknown():
     assert summarize_messages(messages, price_resolver=lambda model: None).totals.missing_usage_responses == 1
 
 
+def test_usage_deduplicates_response_identity_across_retries_and_pruning(tmp_path):
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from redlotus.core.history import read_usage_messages, summarize_messages
+    from redlotus.sessions.storage import SessionFile
+
+    storage = SessionFile.create(tmp_path, "usage-project")
+    known = ModelResponse([TextPart("answer")], model_name="fixture", provider_name="fixture",
+                          provider_response_id="charged-once", usage=RequestUsage(input_tokens=11, output_tokens=2))
+    storage.record_usage([known], role="title", invocation="first")
+    retry = replace(known, timestamp=known.timestamp + timedelta(seconds=1))
+    storage.record_usage([retry], role="title", invocation="retried-save")
+    missing = ModelResponse([TextPart("unknown")], model_name="fixture", provider_name="fixture",
+                            provider_response_id="usage-unreported")
+    storage.record_usage([missing], role="compressor", invocation="compress")
+    storage.compact(keep_turn_ids=set())
+    messages, meta = read_usage_messages(storage.path)
+    summary = summarize_messages(messages, meta=meta, price_resolver=lambda model: None)
+    assert summary.totals.responses == 2
+    assert summary.totals.input_tokens == 11 and summary.totals.missing_usage_responses == 1
+    assert set(summary.by_agent) == {"title", "compressor"}
+
+
+async def test_response_accounting_survives_validation_retry_and_cancellation(tmp_path):
+    from pydantic_ai import Agent, ModelRetry
+    from pydantic_ai.models.function import FunctionModel
+
+    from redlotus.core.gateway import RequestPolicy
+    from redlotus.sessions.control import SessionController
+    from redlotus.sessions.storage import SessionFile
+
+    storage = SessionFile.create(tmp_path, "usage-project")
+    controller, waiting = SessionController(), asyncio.Event()
+    responses = []
+
+    async def respond(messages, info):
+        if responses:
+            waiting.set()
+            await asyncio.Future()
+        response = ModelResponse([TextPart("invalid")], model_name="fixture", provider_name="fixture",
+                                 provider_response_id="billed-before-cancel", usage=RequestUsage(input_tokens=17, output_tokens=3))
+        responses.append(response)
+        return response
+
+    model = FunctionModel(respond)
+    target = SimpleNamespace(name="fixture", protocol="fixture", context={},
+                             limits={"max_files": 1, "max_file_bytes": 1000})
+    agent = Agent(model, capabilities=[RequestPolicy("compressor", target, model)])
+
+    @agent.output_validator
+    def reject(output):
+        raise ModelRetry("Required summary missing")
+
+    with controller.usage(storage):
+        task = asyncio.create_task(agent.run("isolated accounting request"))
+        await asyncio.wait_for(waiting.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    rows = SessionFile.load(storage.path).usage_responses()
+    assert len(rows) == 1 and rows[0]["role"] == "compressor"
+    assert rows[0]["usage"]["input_tokens"] == 17
+    assert rows[0]["agent_id"] == f"{storage.session_id}:compressor"
+    assert rows[0]["invocation"]
+    assert rows[0]["category"] == "auxiliary"
+
+
+async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(monkeypatch):
+    from pydantic_ai.messages import UserPromptPart
+
+    from redlotus.core import history as module
+    from redlotus.sessions.context import ChatHistory
+
+    inputs, entered, release = [], asyncio.Event(), asyncio.Event()
+    config = {"max_context_windows": 100, "auto_compress_ratio": .9,
+              "compress_head_turns": 0, "compress_tail_turns": 0}
+    monkeypatch.setattr(module, "get_context_config", lambda role: config)
+    monkeypatch.setattr(module, "load_prompt", lambda name: "## Facts\n## Next")
+    monkeypatch.setattr(module.logger, "info", lambda *args: None)
+
+    async def compress(**kwargs):
+        inputs.append(json.loads(kwargs["user_content"]))
+        return "## Facts\nThe answer is 42.\n## Next\nRead the file."
+
+    monkeypatch.setattr(module, "_call_compressor_llm", compress)
+    sources = {role: ChatHistory() for role in ("coordinator", "manager")}
+    for source in sources.values():
+        source.set_messages([ModelRequest([UserPromptPart("calculate 19+23")], instructions="SYSTEM_FIXED"),
+                             ModelResponse([TextPart("42")])])
+    original = {role: list(source.messages) for role, source in sources.items()}
+
+    async def failed_save(candidates):
+        assert all(candidate.messages[0].instructions == "SYSTEM_FIXED" for candidate in candidates.values())
+        entered.set()
+        await release.wait()
+        raise OSError("injected checkpoint failure")
+
+    task = asyncio.create_task(module.compress_histories(sources, task_state="pending", persist=failed_save, is_current=lambda: True))
+    await asyncio.wait_for(entered.wait(), 5)
+    assert all(source.messages == original[role] for role, source in sources.items())
+    assert len(inputs) == 2 and all("SYSTEM_FIXED" not in json.dumps(item) for item in inputs)
+    release.set()
+    with pytest.raises(OSError, match="checkpoint"):
+        await task
+    assert all(source.messages == original[role] for role, source in sources.items())
+
+
+async def test_late_usage_keeps_original_session_and_does_not_wait_after_clear(tmp_path, monkeypatch):
+    from redlotus.sessions.context import current_usage_recorder
+    from redlotus.sessions.control import SessionController
+    from redlotus.sessions.storage import SessionFile
+
+    old = SessionFile.create(tmp_path, "usage-project", session_id="old")
+    new = SessionFile.create(tmp_path, "usage-project", session_id="new")
+    controller = SessionController()
+    with controller.usage(old):
+        record = current_usage_recorder()
+    controller.reset(discard=True)
+    response = ModelResponse([TextPart("late")], usage=RequestUsage(input_tokens=9))
+    with controller.usage(new):
+        await record([response], role="title", invocation="old-title")
+    assert len(old.usage_responses()) == 1 and not new.usage_responses()
+
+    def failed_save(*args, **kwargs):
+        raise OSError("old-session disk failure")
+
+    monkeypatch.setattr(old, "record_usage", failed_save)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(record([response], role="title", invocation="old-title"), 1)
+
+
 async def test_cancelled_child_checkpoint_releases_thread_capacity(tmp_path, monkeypatch):
     from redlotus.core import system as system_module
     from redlotus.core.agents import SubagentFactory
@@ -516,7 +648,7 @@ async def test_native_sdk_restoration_does_not_duplicate_deferred_catalog():
         return ModelResponse([TextPart("fixture")])
 
     model = FunctionModel(respond)
-    target = SimpleNamespace(name="fixture", protocol="fixture", limits={"max_files": 1, "max_file_bytes": 1000})
+    target = SimpleNamespace(name="fixture", protocol="fixture", context={}, limits={"max_files": 1, "max_file_bytes": 1000})
 
     def agent(instructions):
         return Agent(model, instructions=instructions, capabilities=[

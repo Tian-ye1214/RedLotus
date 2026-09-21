@@ -14,6 +14,7 @@ from typing import Any
 from redlotus.api.base import configure_api
 from redlotus.core.agents import AgentInvocationState
 from redlotus.core.history import (
+    USAGE_CATEGORY_LABELS,
     UsageReport,
     context_usage_breakdown,
     model_message_files_for_path,
@@ -226,6 +227,10 @@ def _format_usage_report(report: UsageReport) -> str:
         lines.append(
             f"Reported cache hit rate: {totals.cache_hit_tokens / reported:.2%}"
         )
+    for kind, buckets in (("类别", report.by_category), ("身份", report.by_agent)):
+        for name, usage in sorted(buckets.items()):
+            lines.append(f"{kind} {USAGE_CATEGORY_LABELS.get(name, name) if kind == '类别' else name}: input={usage.input_tokens}, output={usage.output_tokens}, "
+                         f"cache={usage.cache_hit_tokens}/{usage.cache_miss_tokens}, missing usage={usage.missing_usage_responses}")
     costs = [summary.price for summary in report.by_model.values() if summary.price]
     missing = sum(
         summary.price_unavailable_responses for summary in report.by_model.values()

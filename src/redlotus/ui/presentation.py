@@ -23,6 +23,7 @@ from rich.text import Text
 
 from redlotus.core.history import (
     MODEL_MESSAGES_GLOB,
+    USAGE_CATEGORY_LABELS,
     ContentTokenStats,
     UsageTotals,
     latest_usage_input_tokens,
@@ -463,6 +464,7 @@ class PanelHistoryStats(UsageTotals):
     file_count: int = 0
     conversation_count: int = 0
     by_agent: dict[str, UsageTotals] = field(default_factory=dict)
+    by_category: dict[str, UsageTotals] = field(default_factory=dict)
     by_model: dict[str, UsageTotals] = field(default_factory=dict)
     skipped_count: int = 0
     skipped_files: list[str] = field(default_factory=list)
@@ -585,6 +587,8 @@ def _collect_history(
         history.content.add(summary.content)
         for role, totals in summary.by_agent.items():
             history.by_agent.setdefault(role, UsageTotals()).add_totals(totals)
+        for category, totals in summary.by_category.items():
+            history.by_category.setdefault(category, UsageTotals()).add_totals(totals)
         for model, usage in summary.by_model.items():
             history.by_model.setdefault(model, UsageTotals()).add_totals(usage.totals)
         session = sessions.setdefault(
@@ -694,6 +698,7 @@ def _render_distribution(history: PanelHistoryStats) -> Table:
         right_columns=("Responses", "Tokens"),
     )
     rows: list[tuple[str, str, UsageTotals]] = []
+    rows.extend(("类别", USAGE_CATEGORY_LABELS.get(name, name), bucket) for name, bucket in history.by_category.items())
     rows.extend(("Agent", name, bucket) for name, bucket in history.by_agent.items())
     rows.extend(("Model", name, bucket) for name, bucket in history.by_model.items())
     rows.sort(
@@ -707,12 +712,11 @@ def _render_distribution(history: PanelHistoryStats) -> Table:
     if not rows:
         table.add_row("-", "暂无分布数据", "0", "0", "")
         return table
-    top = rows[:12]
     max_tokens = max(
-        (_session_total_tokens(b) for _, _, b in top),
+        (_session_total_tokens(b) for _, _, b in rows),
         default=0,
     )
-    for kind, name, bucket in top:
+    for kind, name, bucket in rows:
         tokens = _session_total_tokens(bucket)
         bar = Text(
             _block_bar(tokens, max_tokens),
@@ -759,13 +763,10 @@ def _render_sessions(
 
 
 def _render_skipped(history: PanelHistoryStats) -> Text:
-    text = Text()
-    text.append(
-        f"Skipped corrupt model_messages: {history.skipped_count}\n", style="yellow"
+    return Text.assemble(
+        (f"Skipped corrupt model_messages: {history.skipped_count}\n", "yellow"),
+        ("".join(f"- {item}\n" for item in history.skipped_files), "dim yellow"),
     )
-    for item in history.skipped_files:
-        text.append(f"- {item}\n", style="dim yellow")
-    return text
 
 
 _BLOCK_EIGHTHS = " ▏▎▍▌▋▊▉█"

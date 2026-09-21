@@ -617,7 +617,8 @@ class AgentSystem:
                 ]
                 try:
                     await self._sync_skills_for_user_turn()
-                    yield
+                    with self._session.usage(self._session_file):
+                        yield
                 except asyncio.CancelledError:
                     status, error = (
                         "cancelled",
@@ -856,7 +857,8 @@ class AgentSystem:
             return await self._session.write(operation, storage=self._session_file, cancelling=cancelling)
 
     async def compress_context(self, history):
-        return await self._session.compress(lambda: self._compress_context(history), busy=self.has_current_turn)
+        with self._session.usage(self._session_file):
+            return await self._session.compress(lambda: self._compress_context(history), busy=self.has_current_turn)
 
     def _handle_turn_error(self, error):
         self.last_turn_error = error
