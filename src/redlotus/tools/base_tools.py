@@ -12,22 +12,19 @@ import threading
 import mimetypes
 import shlex
 import platform as _platform
-from redlotus.core import config as logger
-from redlotus.core.config import (
-    get_env,
-    get_agent_run_policy,
+from redlotus.runtime import logging as logger
+from redlotus.runtime.config import get_env, get_agent_run_policy
+from redlotus.runtime.resources import (
     runtime_dir,
     user_skills_dir,
+    WorkspaceContext,
+    current_workspace,
 )
 from pathlib import Path
 from ddgs import DDGS
 from pydantic_ai import BinaryContent, ToolReturn
 from redlotus.tools.registry import SkillsManager, resolve_readable_path
-from redlotus.core.agents import (
-    WorkspaceContext,
-    bind_to_loop,
-)
-from redlotus.core.session import current_workspace
+from redlotus.core.agents import bind_to_loop
 from redlotus.tools.execution import describe_execution_environment, run_subprocess
 from redlotus.tools.references import PlaywrightBrowserSession, ReferenceStore
 from redlotus.core.presentation import show_file_diff
@@ -333,7 +330,7 @@ class BasicToolkit:
         Returns:
             The registered reference identity, parsed text and original media, or an error.
         """
-        from redlotus.core.gateway import ModelInputPolicy
+        from redlotus.runtime.network import ModelInputPolicy
 
         try:
             reference = await self._references.import_file(

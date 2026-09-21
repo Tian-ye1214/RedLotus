@@ -8,7 +8,7 @@ import os
 import platform
 from typing import TYPE_CHECKING
 
-from redlotus.core.config import project_data_dir, prompts_dir
+from redlotus.runtime.resources import project_data_dir, prompts_dir
 
 if TYPE_CHECKING:
     from redlotus.tools.registry import SkillsManager
@@ -106,7 +106,7 @@ def get_common_conduct() -> str:
 
 
 def project_agent_snapshot() -> str:
-    from redlotus.core.agents import WorkspaceContext, current_workspace
+    from redlotus.runtime.resources import WorkspaceContext, current_workspace
 
     workspace = WorkspaceContext.from_path(current_workspace())
     path = project_data_dir(workspace) / "AGENT.md"
@@ -121,7 +121,7 @@ def _build_role_prompt(
     skills_manager: SkillsManager,
     memory_injection: str = "",
 ) -> str:
-    from redlotus.core.session import current_workspace
+    from redlotus.runtime.resources import current_workspace
 
     template = load_prompt(template_name)
     values = {

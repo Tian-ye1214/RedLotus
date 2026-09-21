@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 @pytest.mark.parametrize("state", ["active", "deleted"])
 def test_stale_candidate_cannot_replace_a_newer_record(tmp_path, monkeypatch, state):
-    from redlotus.core.agents import WorkspaceContext
+    from redlotus.runtime.resources import WorkspaceContext
     from redlotus.memory.perception import MemoryJob
     from redlotus.memory.records import MemoryDraft, MemoryRecord, ObservedTurn
     from redlotus.memory.store import MemoryStore

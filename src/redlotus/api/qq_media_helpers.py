@@ -15,8 +15,8 @@ from typing import Any, TYPE_CHECKING
 import httpx
 from pydantic_ai import BinaryContent, ImageUrl
 
-from redlotus.core import config as logger
-from redlotus.core.gateway import ModelInputPolicy
+from redlotus.runtime import logging as logger
+from redlotus.runtime.network import ModelInputPolicy
 
 if TYPE_CHECKING:
     from ncatbot.core import BaseMessageEvent

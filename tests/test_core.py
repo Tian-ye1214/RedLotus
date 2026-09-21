@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -9,8 +11,93 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolSear
 from pydantic_ai.usage import RequestUsage
 
 
+def test_runtime_configuration_does_not_load_application_layers():
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys; from redlotus.runtime import config, resources, logging, network; "
+         "assert not config.settings(); assert not any(name.startswith(('redlotus.core.', 'redlotus.api.', "
+         "'redlotus.tools.', 'redlotus.memory.')) for name in sys.modules)"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_config_layers_dynamic_roles_and_minimal_writeback(tmp_path):
+    from redlotus.runtime.config import (
+        get_agent_roles,
+        get_model_and_params,
+        settings,
+        update_config,
+    )
+
+    global_file = tmp_path / "global" / "config.json"
+    global_file.parent.mkdir()
+    lower = {"models": {"researcher": "shared"}, "model_presets": {
+        "shared": {"name": "openai:fixture", "temperature": 0.4},
+    }, "API_KEY": "isolated-fixture", "request_limit": 17}
+    global_file.write_text(json.dumps(lower), encoding="utf-8")
+    (tmp_path / ".env").write_text("request_limit=11\nmodel_presets__shared__temperature=0.2\n", encoding="utf-8")
+    local = tmp_path / "config.json"
+    local.write_text('{"API_KEY":"", "request_limit":0}', encoding="utf-8")
+    values = settings()
+    assert values["API_KEY"] == "isolated-fixture" and values["request_limit"] == 0
+    assert get_agent_roles() == ("researcher",)
+    assert get_model_and_params("researcher") == ("openai:fixture", {"temperature": 0.2})
+    values["models"]["researcher"] = "changed copy"
+    assert settings()["models"]["researcher"] == "shared"
+    update_config(lambda cfg: cfg.__setitem__("request_limit", 9))
+    assert json.loads(local.read_text(encoding="utf-8")) == {"API_KEY": "", "request_limit": 9}
+    assert json.loads(global_file.read_text(encoding="utf-8")) == lower
+
+
+async def test_http_pools_release_only_their_own_loop():
+    import httpx
+    from redlotus.runtime.network import close_all_clients, get_client
+
+    parent = get_client("isolated", httpx.AsyncClient)
+    assert get_client("isolated", httpx.AsyncClient) is parent
+
+    async def child():
+        client = get_client("isolated", httpx.AsyncClient)
+        assert client is not parent
+        await close_all_clients()
+        assert client.is_closed and not parent.is_closed
+
+    try:
+        await asyncio.to_thread(asyncio.run, child())
+    finally:
+        await close_all_clients()
+    assert parent.is_closed
+
+
+def test_space_recovery_preserves_active_and_current_sessions(tmp_path):
+    import errno
+    import os
+    from redlotus.core.session import SessionFile, retry_after_storage_cleanup
+    from redlotus.runtime.resources import WorkspaceContext, workspace_context
+
+    (tmp_path / "config.json").write_text(json.dumps({"storage": {
+        "sessions_dir": "sessions", "cleanup": {
+            "enabled": True, "execution_cache": False, "session_retention_days": 1,
+        },
+    }}), encoding="utf-8")
+    workspace = WorkspaceContext.from_path(tmp_path)
+    sessions = {name: SessionFile.create(tmp_path / "sessions", workspace.project_id, session_id=name)
+                for name in ("old", "active", "current")}
+    sessions["active"].update(metadata={"active_turn": "running"})
+    for session in sessions.values():
+        os.utime(session.path, (0, 0))
+    retried = []
+    with workspace_context(workspace):
+        retry_after_storage_cleanup(
+            sessions["current"].path, OSError(errno.ENOSPC, "isolated disk fault"),
+            lambda: retried.append(True),
+        )
+    assert retried == [True] and not sessions["old"].path.exists()
+    assert sessions["active"].path.is_file() and sessions["current"].path.is_file()
+
+
 def test_turn_counts_survive_replay_and_reload(tmp_path):
-    from redlotus.core.agents import WorkspaceContext
+    from redlotus.runtime.resources import WorkspaceContext
     from redlotus.core.cli_commands import list_workspace_snapshots
     from redlotus.core.session import SessionFile
     from redlotus.memory import records
@@ -66,7 +153,8 @@ def test_provider_missing_usage_is_still_unknown():
 
 async def test_cancelled_child_checkpoint_releases_thread_capacity(tmp_path, monkeypatch):
     from redlotus.core import system as system_module
-    from redlotus.core.agents import SubagentFactory, SubagentSpec, WorkspaceContext, bind_to_loop
+    from redlotus.core.agents import SubagentFactory, SubagentSpec, bind_to_loop
+    from redlotus.runtime.resources import WorkspaceContext
 
     system = object.__new__(system_module.AgentSystem)
     system.workspace = WorkspaceContext.from_path(tmp_path)
@@ -260,8 +348,9 @@ def test_release_keeps_blocked_worker_context(tmp_path):
 
 @pytest.fixture
 async def child_executor(tmp_path, monkeypatch):
-    from redlotus.core import config
-    from redlotus.core.agents import AgentRegistry, SubagentFactory, WorkspaceContext
+    from redlotus.runtime import logging as logger
+    from redlotus.core.agents import AgentRegistry, SubagentFactory
+    from redlotus.runtime.resources import WorkspaceContext
     from redlotus.core.history import ChatHistory
     from redlotus.core.session import SessionFile
     from redlotus.tools import worker_tools as module
@@ -291,7 +380,7 @@ async def child_executor(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "create_worker_toolsets", lambda *args, **kwargs: ([], []))
     monkeypatch.setattr(module, "create_function_toolset", lambda *args, **kwargs: object())
     monkeypatch.setattr(module, "get_agent_usage_limits", lambda: None)
-    monkeypatch.setattr(config, "debug", lambda *args, **kwargs: None)
+    monkeypatch.setattr(logger, "debug", lambda *args, **kwargs: None)
     monkeypatch.setattr(module, "create_agent", create)
     for role in ("worker", "manager"):
         monkeypatch.setattr(module, f"get_{role}_system_prompt", lambda *args: "rebuilt")

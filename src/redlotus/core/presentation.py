@@ -14,12 +14,12 @@ from rich.text import Text
 from enum import StrEnum
 from rich.panel import Panel
 from redlotus.tools.interaction import UserMessage
-from redlotus.core import config as logger
+from redlotus.runtime import logging as logger
 from rich.markdown import Markdown
 from rich.align import Align
 from pathlib import Path
 from rich.table import Table
-from redlotus.core.session import conversations_root
+from redlotus.runtime.resources import conversations_root
 from redlotus.core.history import (
     MODEL_MESSAGES_GLOB,
     UsageTotals,
@@ -76,6 +76,9 @@ def supports_model_stream() -> bool:
 
 def emit_renderable(renderable: Any) -> None:
     _sink.emit(renderable)
+
+
+logger.console_sink = emit_renderable
 
 
 def update_output(action: str, *args) -> None:

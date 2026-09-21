@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import threading
-import httpx
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from pydantic_ai.messages import (
@@ -17,13 +15,19 @@ from pydantic_ai.messages import (
     UserPromptPart,
     ModelMessagesTypeAdapter,
 )
-from redlotus.core.config import (
+from redlotus.runtime.config import (
     get_context_config,
     get_context_profile_roles,
     get_model_and_params,
     settings,
+    ConfigError,
 )
-from redlotus.core import config as logger
+from redlotus.runtime import logging as logger
+from redlotus.runtime.network import (
+    _lookup_openrouter_meta,
+    lookup_model_context,
+    lookup_model_max_output_tokens,
+)
 from redlotus.prompts.prompt import load_prompt
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -161,22 +165,6 @@ class ChatHistory:
         return self._revision
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def compression_summary_headings() -> list[str]:
     """Validate the same section names the compressor actually receives."""
     return re.findall(r"(?m)^## .+$", load_prompt("context_compress_structured_system.md"))
@@ -207,62 +195,6 @@ def context_usage_breakdown(
     }
 
 
-_OPENROUTER_LOCK = threading.Lock()
-_OPENROUTER_META_MAP = None
-
-
-def _openrouter_cache_path() -> Path:
-    return logger.get_log_dir() / "cache/openrouter_models.json"
-
-
-def _ensure_openrouter_maps() -> None:
-    global _OPENROUTER_META_MAP
-    with _OPENROUTER_LOCK:
-        if _OPENROUTER_META_MAP is not None:
-            return
-        path = _openrouter_cache_path()
-        try:
-            if path.exists():
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            else:
-                metadata = settings()["model_metadata"]
-                with httpx.Client(timeout=metadata["timeout"]) as client:
-                    response = client.get(metadata["url"])
-                    response.raise_for_status()
-                    raw = response.json()
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
-            _OPENROUTER_META_MAP = {}
-            for row in raw["data"]:
-                name = row["id"].lower()
-                _OPENROUTER_META_MAP[name] = row
-                _OPENROUTER_META_MAP.setdefault(name.rsplit("/", 1)[-1], row)
-        except (OSError, ValueError, httpx.HTTPError) as exc:
-            _OPENROUTER_META_MAP = {}
-            logger.warning("模型元数据不可用；未配置容量的角色将报告缺项：%s", exc)
-
-
-def _lookup_openrouter_meta(name: str) -> dict | None:
-    from pydantic_ai.models import parse_model_id
-
-    _, name = parse_model_id(name)
-    _ensure_openrouter_maps()
-    rows = _OPENROUTER_META_MAP or {}
-    return rows.get(name.lower()) or rows.get(name.lower().rsplit("/", 1)[-1])
-
-
-def lookup_model_context(model_name: str) -> int | None:
-    row = _lookup_openrouter_meta(model_name) or {}
-    return row.get("top_provider", {}).get("context_length") or row.get(
-        "context_length"
-    )
-
-
-def lookup_model_max_output_tokens(model_name: str) -> int | None:
-    row = _lookup_openrouter_meta(model_name) or {}
-    return row.get("top_provider", {}).get("max_completion_tokens")
-
-
 def get_effective_max_context(
     model_name: str | None = None,
     *,
@@ -276,13 +208,13 @@ def get_effective_max_context(
     if raw_max is not None:
         if isinstance(raw_max, int) and not isinstance(raw_max, bool) and raw_max > 0:
             return raw_max
-        raise logger.ConfigError(f"无效配置 models.{r}.max_context_windows；应为正整数或 null。")
+        raise ConfigError(f"无效配置 models.{r}.max_context_windows；应为正整数或 null。")
 
     mid = model_name if model_name is not None else get_model_and_params(r)[0]
     looked = lookup_model_context(mid)
     if looked:
         return looked
-    raise logger.ConfigError(
+    raise ConfigError(
         f"无法获取模型 {mid} 的上下文容量；请配置 models.{r}.max_context_windows。"
     )
 
@@ -444,8 +376,6 @@ def _compression_candidate(
     return candidate
 
 
-
-
 async def get_effective_max_contexts_by_role_async(*, roles=None) -> dict[str, int]:
     roles = tuple(roles) if roles is not None else get_context_profile_roles()
     limits = await asyncio.gather(
@@ -548,10 +478,6 @@ def _estimate_text_tokens(text):
     # Dense decimal data can tokenize digit by digit. Keep the prose estimate
     # for ASCII punctuation/spacing so ordinary documents are not overcounted.
     return sum(1 if ord(char) > 127 or char.isdigit() else 0.3 for char in text)
-
-
-
-
 
 
 async def compact_request_messages(

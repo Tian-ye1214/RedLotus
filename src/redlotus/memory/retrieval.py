@@ -5,14 +5,10 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
-from redlotus.core import config as logger, config as app_config
-from redlotus.core.config import (
-    user_data_dir,
-    get_env,
-    settings,
-    get_client,
-    openai_base_url,
-)
+from redlotus.runtime import logging as logger, config as app_config
+from redlotus.runtime.resources import user_data_dir
+from redlotus.runtime.config import get_env, settings
+from redlotus.runtime.network import get_client, openai_base_url
 from typing import Any
 import httpx
 from datetime import timedelta

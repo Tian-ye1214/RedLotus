@@ -16,10 +16,11 @@ import inspect
 import time
 from decimal import Decimal
 from pathlib import Path
-from redlotus.core.session import SessionFile, current_workspace, conversations_root
+from redlotus.core.session import SessionFile
+from redlotus.runtime.resources import current_workspace, conversations_root
 from typing import Any
 
-from redlotus.core.config import (
+from redlotus.runtime.config import (
     get_agent_roles,
     get_env,
     get_model_and_params,
@@ -29,15 +30,17 @@ from redlotus.core.config import (
     settings,
     config_file,
     config_sources,
-    configure_api,
 )
+from redlotus.api.base import configure_api
 from redlotus.core.agents import AgentInvocationState, TRACE_STORE
-from redlotus.core.gateway import ModelTarget
-from redlotus.core.history import (
+from redlotus.runtime.network import (
+    ModelTarget,
     _lookup_openrouter_meta,
-    context_usage_breakdown,
     lookup_model_context,
     lookup_model_max_output_tokens,
+)
+from redlotus.core.history import (
+    context_usage_breakdown,
     UsageReport,
     model_message_files_for_path,
     session_model_message_files,

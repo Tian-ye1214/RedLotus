@@ -11,16 +11,18 @@ from enum import Enum
 from typing import Literal
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from redlotus.tools.interaction import iter_reference_spans, quote_reference_path, user_message_from_cli_input, load_file_refs
-from redlotus.core.session import current_workspace
+from redlotus.runtime.resources import (
+    current_workspace,
+    user_data_dir,
+    project_data_dir,
+    session_data_dir,
+)
 from redlotus.core.cli_commands import WorkspaceSnapshot, list_workspace_snapshots
-from redlotus.core.config import (
+from redlotus.runtime.config import (
     settings,
     get_agent_roles,
     role_supported_thinking_efforts,
     supported_thinking_efforts,
-    user_data_dir,
-    project_data_dir,
-    session_data_dir,
 )
 from pathlib import Path
 from prompt_toolkit.completion import Completer, Completion
@@ -31,7 +33,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from redlotus.core.presentation import print_success, print_warning, print_error, print_panel, ContextUsageItem, update_output, print_repl_welcome, print_startup_logo
 from uuid import uuid4
-from redlotus.core import config as app_config, config as logger
+from redlotus.runtime import config as app_config, logging as logger
 from redlotus.core.history import (
     context_usage_breakdown,
     prewarm_effective_max_contexts_by_role_async,

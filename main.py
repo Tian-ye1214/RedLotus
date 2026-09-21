@@ -20,7 +20,7 @@ def main():
         ]]
     os.environ.setdefault("REDLOTUS_CONFIG_FILE", str(root / "src/redlotus/config.json"))
     os.environ.setdefault("REDLOTUS_DOTENV_FILE", str(root / ".env"))
-    from redlotus.core.config import main as run
+    from redlotus.api.base import main as run
 
     run()
 

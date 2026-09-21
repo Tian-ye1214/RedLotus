@@ -46,7 +46,7 @@ from redlotus.core.presentation import (
     build_panel_snapshot,
     render_panel,
 )
-from redlotus.core import config as logger
+from redlotus.runtime import logging as logger
 from redlotus.core.agents import current_short_agent_id
 from redlotus.core.cli_commands import WorkspaceSnapshot
 
@@ -101,10 +101,6 @@ class AgentInput(Input):
         else:
             await super().action_submit()
         self.value = ""
-
-
-
-
 
 
 class SnapshotPickScreen(ModalScreen[SnapshotSelection]):
@@ -567,7 +563,7 @@ class RedLotusTui(App[None]):
         if not self._panel_mode:
             return
         try:
-            from redlotus.core.session import conversations_root
+            from redlotus.runtime.resources import conversations_root
 
             identity = (self.system.workspace, self.system.session_key)
             snapshot = await build_panel_snapshot(

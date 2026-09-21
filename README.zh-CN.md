@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/assets/icon.svg" alt="RedLotus icon" width="112" height="112">
-</p>
-
 <h1 align="center">RedLotus · 红莲极意</h1>
 
 <p align="center">
@@ -26,10 +22,6 @@ RedLotus 是一个运行在终端中的 AI Agent。它会根据任务复杂度�
 python -m pip install --upgrade redlotus
 redlotus
 ```
-
-<p align="center">
-  <img src="docs/assets/terminal.png" alt="RedLotus 终端任务示例" width="760">
-</p>
 
 ## 主要功能
 
@@ -103,7 +95,7 @@ pip install "redlotus[all]"      # 全部可选依赖
 浏览器能力首次使用前还需要安装 Chromium：
 
 ```bash
-playwright install chromium
+python -m playwright install chromium
 ```
 
 ## 首次配置
@@ -123,7 +115,7 @@ playwright install chromium
 
 网关复用 Pydantic AI 的 OpenAI Chat、OpenAI Responses、Anthropic Messages 和 Google 适配。Manager、Worker、Coordinator、Compressor 可以分别配置或选择命名预设。感知通过 `memory_perception.model_role` 选择子 Agent 配置，默认使用 Worker，与上下文压缩独立。RAG 连接、模型及请求策略由 `SILICONFLOW_BASE`、`SILICONFLOW_KEY`、`RAG_models` 和 `rag_service` 提供。
 
-凭据可以使用命名环境引用或用户配置目录的 `.env`；只有开发入口显式选择仓库 `.env`，安装入口不搜索当前项目。不要将真实密钥提交到 Git。详细结构见 [全局配置、网关预设与安装说明](docs/gateway-installation.md)。
+命名凭据引用（如 `api_key_env`）从同一份三层配置读取，包含本地 `.env`；不读取宿主环境变量或全局 `.env`。直接密钥与命名引用遵守相同的来源优先级。不要将真实密钥提交到 Git。配置与模型路由见 [现行设计](docs/design.md)。
 
 ## 终端使用
 
@@ -147,7 +139,7 @@ playwright install chromium
 | `Ctrl+Q` | 退出 |
 | `@路径` | 引用文档、图片或视频，支持 Tab 补全；每次最多 20 个文件 |
 
-加急消息以正常亮度和“加急”标记显示，不再使用文字 `/urgent` 命令。Windows Terminal 的 LF 编码和支持扩展键盘协议的终端共用这一入口。部分 PyCharm 经典终端会把 `Ctrl+Enter` 与普通回车发送成相同字符，应用无法区分；终端需保留组合键编码。具体支持边界与验证记录见 [按键输入说明](docs/keyboard-input.md)。
+加急消息以正常亮度和“加急”标记显示，终端使用 `Ctrl+Enter` 补充当前回合。如果终端把它与普通回车发送成相同编码，Python 无法区分，需要终端保留组合键信息；`Shift+Tab` 有单独编码，因此仍可能正常工作。按键检测只用于测试，不进入发布界面。具体支持边界与验证记录见 [按键输入说明](docs/design.md#请求执行)。
 
 引用之间不必加空格，例如 `@审稿意见.md解读这个文档，@图片.png分析这张图`。Tab 补全当前引用，遇到含空格或分隔符的路径会自动加引号，也可以手写 `@"路径"`、`@'路径'` 或 `@{路径}`。文件按首次出现顺序去重；超过 20 个不同文件会提示错误，不会只上传其中一部分。
 
@@ -168,7 +160,6 @@ playwright install chromium
 | `/compress` | 压缩 Manager / Coordinator 上下文 |
 | `/status` · `/trace` · `/tasks` | 查看生命周期、调用追踪和任务状态 |
 | `/stop` · `/cancel` | 中断当前回合或 invocation |
-| `/urgent <内容>` | 加入当前内循环，与工具结果一起处理；普通消息仍逐条排队 |
 
 </details>
 
@@ -194,14 +185,14 @@ npx clawhub --dir skills install <slug>
 
 ## 文件与数据位置
 
-- 会话轨迹、引用快照和感知任务保存在全局用户数据目录，项目事件按 `project_id` 分区；压缩只改变模型视图，完整原文保留。
+- 会话轨迹和感知任务保存在项目 `.redlotus`，不可变引用快照保存在项目 `WorkDatabase`；压缩只改变模型视图，完整原文保留。
 - 项目情景与全局长期记录保存在 LanceDB `memory_records_v3`，按 scope 和项目隔离，通过向量检索与重排召回，服务不可用时保留文本检索。
 - `MEMORY.md` 保存用户画像、环境、行为约束与通用经验，不设固定字符上限。它与 system prompt 在会话开始时完整形成快照，写入记忆不重写本会话前缀；新信息通过工具结果和检索消费，新会话读取最新版本。
 - 文件和命令工具默认操作当前项目，生成产物保存在 `WorkDatabase/`。`/cd` 先取消旧会话，再切换运行上下文。
 
 Enter 将输入排入 FIFO 队列；Ctrl+Enter 将加急补充加入当前回合，在下一请求边界与本批工具结果一起送给模型。子 Agent 各自拥有线程、事件循环和客户端，遵守配置中的会话线程上限。感知只处理当前会话每 20 个新增用户回合，附带前 3 回合衔接；新建、加载和退出不额外产生短窗口。主动记忆通过 remember 即时处理，失败和取消不会自动成为成功经验。
 
-向量模型、重排、分块、相似度阈值、候选数量和索引参数继续保留。完整的保留项、替代项与迁移行为见 [重构及 RAG 参数说明](docs/refactor.md)。
+向量模型、重排、分块、相似度阈值、候选数量和索引参数继续保留。完整的保留项、替代项与迁移行为见 [重构及 RAG 参数说明](docs/design.md)。
 
 ## QQ 与微信机器人
 
@@ -214,13 +205,13 @@ pip install "redlotus[bots] @ git+https://github.com/Tian-ye1214/RedLotus.git"
 启动方式：
 
 ```bash
-python -m redlotus.API.QQ
-python -m redlotus.API.WeChat
+python -m redlotus.api.QQ
+python -m redlotus.api.WeChat
 ```
 
 QQ 接入需要先运行 [NapCat](https://github.com/NapNeko/NapCatQQ)，并配置 OneBot WebSocket、机器人 QQ 号和 WebUI token。微信接入在启动后按提示扫码登录。
 
-个人聊天渠道需要配置 `bot.owner_channels.qq`（本人私聊 QQ 号）或 `bot.owner_channels.wechat`（本人 wxid）。未绑定渠道提供文本对话，不开放个人记忆和执行工具。`/stop`、`/clear`、`/urgent` 与终端使用同一回合语义。配置示例见 [渠道绑定](docs/refactor.md#工作区渠道与迁移)。
+个人聊天渠道需要配置 `bot.owner_channels.qq`（本人私聊 QQ 号）或 `bot.owner_channels.wechat`（本人 wxid）。未绑定渠道提供文本对话，不开放个人记忆和执行工具。机器人支持 `/stop`、`/clear`、`/urgent`；真实账号及附件顺序验收仍待完成。配置示例见 [渠道绑定](docs/design.md#agent-与工具边界)。
 
 ## 本地开发
 
@@ -246,4 +237,6 @@ pip install ".[build]"
 pyinstaller build.spec
 ```
 
-项目主要代码位于 `src/redlotus/`，分为 `core`、`tools`、`api`、`prompts`、`memory` 五个板块；命令入口为 `redlotus.core.config:main`。
+项目主要代码位于 `src/redlotus/`，分为 `core`、`tools`、`api`、`prompts`、`memory`、`runtime` 六个模块；命令入口为 `redlotus.api.base:main`。
+
+当前结构整改与发布验收尚未完成。测试必须包含源码、日常 pip 和实际打包入口的真实 API 调用；隔离故障回归不能单独作为通过依据。详见 [开发与验收约定](docs/development.md)。

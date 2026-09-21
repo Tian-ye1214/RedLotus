@@ -1,15 +1,42 @@
+from __future__ import annotations
+
+import os
+import sys
+import signal
+import shutil
+import threading
+from pathlib import Path
+from copy import deepcopy
+from urllib.parse import urlsplit
+from redlotus.runtime.config import (
+    ConfigError,
+    settings,
+    load_config,
+    update_config,
+    config_file,
+    config_source_summary,
+    get_model_and_params,
+    _frozen,
+    _model_selection_field,
+    _validate_config,
+    _model_roles,
+    _selected_model_name_path,
+    get_env,
+)
+
 import re
 import time
 import asyncio
 import contextvars
 import mimetypes
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
-from redlotus.core import config as app_config, config as logger
-from redlotus.core.config import get_env, settings, close_all_clients
+from redlotus.runtime import config as app_config, logging as logger
+from redlotus.runtime.network import close_all_clients
 from redlotus.tools.interaction import UserMessage
-from redlotus.core.system import AgentSystem
+if TYPE_CHECKING:
+    from redlotus.core.system import AgentSystem
 from redlotus.core.history import ChatHistory
 from redlotus.core.session import TurnQueue
 from redlotus.tools import registry as tool_telemetry
@@ -96,6 +123,8 @@ class BotBase:
         )
 
     def _agent_for_session(self, session_id):
+        from redlotus.core.system import AgentSystem
+
         state = self._session(session_id)
         if state.agent is None:
             state.agent = AgentSystem(
@@ -311,3 +340,258 @@ class BotBase:
 
     def clean_text(self, raw):
         return re.sub(r"\s+", " ", (raw or "").strip())
+
+
+def initialize_user_configuration() -> Path:
+    """Validate user-selected sources without copying or creating configuration files."""
+    path = config_file()
+    values = load_config()
+    if not values:
+        raise ConfigError(f"缺少配置 models；请填写 {path}。检查来源: {config_source_summary()}")
+    return path
+
+async def ask_configuration(question: str, *, secret=False):
+    """Read a startup answer with the same hidden-key contract as the TUI dialog."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyBindings
+
+    bindings = KeyBindings()
+
+    @bindings.add("escape", eager=True)
+    def cancel(event):
+        event.app.exit(result=None)
+
+    return await PromptSession(key_bindings=bindings).prompt_async(question, is_password=secret)
+
+def configuration_prompt_available() -> bool:
+    """Return whether the default first-use dialog can safely open a terminal prompt."""
+    return bool(
+        getattr(sys.stdin, "isatty", lambda: False)()
+        and getattr(sys.stdout, "isatty", lambda: False)()
+    )
+
+class ConfigurationSetup:
+    """Collect explicit configuration edits and commit them as a single atomic change."""
+
+    def __init__(self, ask=None, emit=print):
+        self.values = settings()
+        self.changes = {}
+        self.ask, self.emit = ask or ask_configuration, emit
+
+    def value(self, path):
+        node = self.values
+        for key in path:
+            if not isinstance(node, dict) or key not in node:
+                return None
+            node = node[key]
+        return node
+
+    @staticmethod
+    def assign(values, path, value):
+        node = values
+        for key in path[:-1]:
+            node = node.setdefault(key, {})
+        node[path[-1]] = deepcopy(value)
+
+    def connection_paths(self, role="coordinator"):
+        """Use the selected role's credential reference, not an unrelated global API key."""
+        _, parameters = get_model_and_params(role, cfg=self.values)
+        gateway = parameters.get("gateway")
+        if not gateway:
+            return [("BASE_URL",), ("API_KEY",)]
+        selected = self.values["gateways"][gateway]
+        # Edit an explicit gateway key when present; otherwise retain its named reference.
+        key = (selected["api_key_env"],) if selected.get("api_key_env") and not selected.get("api_key") else ("gateways", gateway, "api_key")
+        return [("gateways", gateway, "base_url"), key]
+
+    async def fill(self, path):
+        """Validate one field, retaining previous input until the whole dialog succeeds."""
+        key = ".".join(path)
+        current = self.value(path)
+        secret = "key" in path[-1].lower() or "token" in path[-1].lower()
+        shown = ("已填写" if current else "空") if secret else str(current if current is not None else "空")
+        hint = "回车保留"
+        if _model_selection_field(path) and path[0] == "models":
+            hint += "；输入 =角色名 可明确复用其模型"
+        while True:
+            answer = await self.ask(f"{key}（当前 {shown}；{hint}；Esc 取消）：", secret=secret)
+            if answer is None or answer == "\x1b":
+                return False
+            text = answer.strip()
+            if not text and current not in (None, ""):
+                return True
+            try:
+                if not text:
+                    raise ValueError("不能为空")
+                value = get_model_and_params(text[1:], cfg=self.values)[0] if text.startswith("=") and path[0] == "models" else text
+                if "url" in path[-1].lower() or path[-1] == "SILICONFLOW_BASE":
+                    parsed = urlsplit(value)
+                    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                        raise ValueError("请输入完整的 http/https 服务地址")
+                candidate = deepcopy(self.values)
+                self.assign(candidate, path, value)
+                _validate_config(candidate, config_file())
+            except (ValueError, KeyError, TypeError):
+                self.emit(f"{key} 无效：请按字段类型填写；模型复用需指定已配置的角色。")
+                continue
+            self.values = candidate
+            self.changes[path] = value
+            return True
+
+    def commit(self):
+        """Only changed fields are applied to the latest locked configuration."""
+        if self.changes:
+            def apply(values):
+                for path, value in self.changes.items():
+                    self.assign(values, path, value)
+            update_config(apply)
+
+def python_tool_startup_notice(cfg: dict[str, Any]) -> str | None:
+    """Explain an optional frozen-build Python requirement without blocking chat."""
+    if not _frozen():
+        return None
+    if any(shutil.which(name) for name in ("python", "python3", "py")):
+        return None
+    return (
+        "未发现外部 Python：纯聊天仍可使用；Python/pip 工具暂不可用。"
+        "请将现有 Python 加入 PATH 后重启。"
+    )
+
+def rag_configuration_paths():
+    """Connection and model fields exposed by the existing RAG configuration dialog."""
+    return [("SILICONFLOW_BASE",), ("SILICONFLOW_KEY",), ("RAG_models", "embedding"), ("RAG_models", "reranker")]
+
+async def prepare_startup_configuration(*, ask=None, emit=print) -> bool:
+    """Complete first-use configuration before constructing Agents or starting clients."""
+    initialize_user_configuration()
+    setup = ConfigurationSetup(ask, emit)
+    schema = setup.values
+    try:
+        missing_model_names = []
+        roles = _model_roles(schema, setup.values)
+        if "coordinator" not in roles:
+            raise ConfigError(f"缺少配置 models.coordinator；检查来源: {config_source_summary()}")
+        roles.sort(key=lambda role: role != "coordinator")
+        for role in roles:
+            try:
+                get_model_and_params(role, cfg=setup.values)
+            except ConfigError as exc:
+                path = _selected_model_name_path(role, setup.values, schema)
+                missing_role = str(exc).startswith(
+                    f"缺少配置 models.{role}；"
+                ) or str(exc).startswith("缺少配置 models；")
+                if ".".join(path) not in str(exc) and not missing_role:
+                    raise
+                missing_model_names.append(path)
+        interactive = ask is not None or configuration_prompt_available()
+        if not interactive:
+            missing = list(missing_model_names)
+            if not missing:
+                paths = dict.fromkeys(path for role in roles for path in setup.connection_paths(role))
+                missing.extend(path for path in paths if not str(setup.value(path) or "").strip())
+            if missing:
+                fields = "、".join(".".join(path) for path in missing)
+                raise ConfigError(f"非交互启动缺少必填配置 {fields}；请编辑 {config_file()} 后重试")
+            missing_rag = [path for path in rag_configuration_paths() if not str(setup.value(path) or "").strip()]
+            if missing_rag:
+                emit("RAG 尚未配置；可先聊天，使用 /api embedding 补齐向量检索配置。")
+            if notice := python_tool_startup_notice(setup.values):
+                emit(notice)
+            return True
+        emit(f"配置修改目标: {config_file()}\n读取来源: {config_source_summary()}")
+        for path in dict.fromkeys(missing_model_names):
+            if not await setup.fill(path):
+                return False
+        paths = dict.fromkeys(path for role in roles for path in setup.connection_paths(role))
+        for path in paths:
+            if not str(setup.value(path) or "").strip() and not await setup.fill(path):
+                return False
+        missing_rag = [path for path in rag_configuration_paths() if not str(setup.value(path) or "").strip()]
+        if missing_rag:
+            choice = await setup.ask("现在配置 RAG 向量检索吗？y 配置 / n 稍后（回车稍后；Esc 取消）：")
+            if choice is None or choice == "\x1b":
+                return False
+            if choice.strip().lower() in {"y", "yes", "是"}:
+                for path in missing_rag:
+                    if not await setup.fill(path):
+                        return False
+        setup.commit()
+        if notice := python_tool_startup_notice(setup.values):
+            emit(notice)
+        return True
+    except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
+        emit("配置已取消，未保存本次填写内容。")
+        return False
+
+async def configure_api(*, embedding=False, ask=None, emit=print) -> bool:
+    """Edit service fields atomically for both plain CLI and TUI callers."""
+    setup = ConfigurationSetup(ask, emit)
+    paths = rag_configuration_paths() if embedding else setup.connection_paths()
+    try:
+        for path in paths:
+            if not await setup.fill(path):
+                return False
+        setup.commit()
+        return True
+    except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
+        return False
+
+class ExitDeadline:
+    """Bound process exit even when a native call ignores task cancellation."""
+
+    def __init__(self, seconds: float):
+        self._timer = threading.Timer(seconds, os._exit, args=(0,))
+        self._timer.daemon = True
+
+    def start(self):
+        self._timer.start()
+
+    def close(self):
+        self._timer.cancel()
+
+def install_stop_handlers(stop_event: asyncio.Event) -> None:
+    """Map process signals to the interactive runner's stop event."""
+    loop = asyncio.get_running_loop()
+
+    def request_stop(*_args: object) -> None:
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, request_stop)
+        except (NotImplementedError, ValueError):
+            signal.signal(sig, request_stop)
+
+async def run_cli(system=None):
+    """Run the interactive RedLotus CLI/TUI."""
+    from redlotus.core.system import AgentSystem
+
+    if system is None:
+        load_config()
+        system = AgentSystem()
+    stop_event = asyncio.Event()
+    install_stop_handlers(stop_event)
+    try:
+        await system.run_interactive(stop_event=stop_event)
+    finally:
+        await system.shutdown()
+        await close_all_clients()
+    return system
+
+def main() -> None:
+    """CLI entrypoint used by root ``main.py``."""
+    try:
+        load_config()
+        if not asyncio.run(prepare_startup_configuration()):
+            return
+        from redlotus.core.system import AgentSystem
+
+        deadline = ExitDeadline(settings()["lifecycle"]["shutdown_grace_seconds"])
+        try:
+            system = AgentSystem(exit_deadline=deadline)
+            asyncio.run(run_cli(system))
+        finally:
+            deadline.close()
+    except ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from None

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import os
 import time
 import asyncio
 import uuid
@@ -11,37 +9,19 @@ import contextvars
 import functools
 import inspect
 import threading
-from contextlib import contextmanager, AbstractContextManager
+from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from pathlib import Path
-from copy import deepcopy
 from typing import Any, Literal
 from collections import deque
 from enum import Enum
-from redlotus.core import config as logger
+from redlotus.runtime import logging as logger
+from redlotus.runtime.resources import WorkspaceContext, bind_context, workspace_context
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from pydantic import BaseModel, ConfigDict, Field
 
 
-@dataclass(frozen=True)
-class WorkspaceContext:
-    """Immutable project identity carried into every run and child thread."""
-
-    root: Path
-    project_id: str
-
-    @classmethod
-    def from_path(cls, path: Path | str) -> WorkspaceContext:
-        root = Path(path).expanduser().resolve()
-        identity = os.path.normcase(str(root)).encode("utf-8")
-        return cls(root, hashlib.sha256(identity).hexdigest()[:24])
-
-
-_workspace_context: ContextVar[WorkspaceContext | None] = ContextVar(
-    "workspace_context", default=None
-)
 _execution_role: ContextVar[str | None] = ContextVar("execution_role", default=None)
 
 
@@ -49,65 +29,14 @@ def current_execution_role() -> str | None:
     return _execution_role.get()
 
 
-@contextmanager
-def bind_context(variable, value, *, expose=False):
-    """Set one execution context value and restore its parent on every exit path."""
-    token = variable.set(value)
-    try:
-        yield value if expose else None
-    finally:
-        variable.reset(token)
-
-
 def execution_role(role: str):
     """Bind tool permissions to the current Agent's role."""
     return bind_context(_execution_role, role)
 
 
-def active_workspace() -> WorkspaceContext | None:
-    return _workspace_context.get()
-
-
-def workspace_context(workspace: WorkspaceContext):
-    """Bind project identity for tools running in this execution context."""
-    return bind_context(_workspace_context, workspace, expose=True)
-
-
-_workspace = None
-
-
-def current_workspace():
-    active = active_workspace()
-    return active.root if active else _workspace or Path.cwd().resolve()
-
-
-def set_workspace(path):
-    global _workspace
-    _workspace = Path(path).expanduser().resolve()
-    return _workspace
-
-
-def conversations_root():
-    return logger.session_data_dir(WorkspaceContext.from_path(current_workspace()))
-
-
 _CURRENT_TURN_ID: ContextVar[str | None] = ContextVar("agent_turn_id", default=None)
 _CURRENT_AGENT_ID: ContextVar[str | None] = ContextVar("agent_id", default=None)
 
-
-@dataclass(frozen=True)
-class AgentRunPolicy:
-    max_concurrent_threads_per_session: int
-    max_command_timeout_seconds: int
-
-    @classmethod
-    def from_config(cls, cfg: dict[str, Any]) -> "AgentRunPolicy":
-        values = deepcopy(cfg["agent_run_policy"])
-        values.pop("max_tool_output_chars", None)
-        return cls(**values)
-
-    def clamp_command_timeout(self, timeout: int) -> int:
-        return max(1, min(int(timeout), self.max_command_timeout_seconds))
 
 def current_turn_id() -> str | None:
     return _CURRENT_TURN_ID.get()
@@ -219,7 +148,7 @@ def make_agent_id(session_key: str, role: str, suffix: str | None = None) -> str
 
 
 def _invocation_history_limit() -> int:
-    from redlotus.core.config import settings
+    from redlotus.runtime.config import settings
 
     lc = settings().get("lifecycle")
     if not isinstance(lc, dict):
@@ -550,7 +479,7 @@ class SubagentHandle:
                 ):
                     return await self._execute()
             finally:
-                from redlotus.core.config import close_all_clients
+                from redlotus.runtime.network import close_all_clients
 
                 await close_all_clients()
 
@@ -605,7 +534,7 @@ class SubagentFactory:
 
     def __init__(self, max_concurrent: int | None = None) -> None:
         if max_concurrent is None:
-            from redlotus.core.config import settings
+            from redlotus.runtime.config import settings
 
             max_concurrent = settings()["agent_run_policy"]["max_concurrent_threads_per_session"]
         if max_concurrent < 1:
@@ -726,7 +655,6 @@ class SubagentResult(BaseModel):
     @property
     def success(self) -> bool:
         return self.status == "success"
-
 
 
 from redlotus.core.gateway import AgentRunner

@@ -16,9 +16,10 @@ import lancedb
 from copy import deepcopy
 from filelock import AsyncFileLock
 
-from redlotus.core import config as logger
+from redlotus.runtime import logging as logger
 from redlotus.memory.retrieval import RAG, missing_rag_settings
-from redlotus.core.config import missing_rag_api_keys, settings, file_lock, iso_utc_now
+from redlotus.runtime.config import missing_rag_api_keys, settings
+from redlotus.runtime.resources import file_lock, iso_utc_now
 from redlotus.tools.references import ReferenceStore
 
 

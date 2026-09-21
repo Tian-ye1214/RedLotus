@@ -15,13 +15,19 @@ import inspect
 import time
 import json
 from pathlib import Path
-from redlotus.core.config import resource_root, skills_dir, user_skills_dir, skills_dir as shipped_skills_dir
+from redlotus.runtime.resources import (
+    resource_root,
+    skills_dir,
+    user_skills_dir,
+    skills_dir as shipped_skills_dir,
+)
 from dataclasses import dataclass, field
-from redlotus.core import config as logger
+from redlotus.runtime import logging as logger
 from redlotus.tools.execution import run_subprocess
 from contextvars import ContextVar
 from typing import Any, Callable
-from redlotus.core.agents import TRACE_STORE, AgentRunPolicy, current_short_agent_id, current_turn_id
+from redlotus.core.agents import TRACE_STORE, current_short_agent_id, current_turn_id
+from redlotus.runtime.config import AgentRunPolicy
 
 
 def read_script(path: Path) -> str:
@@ -332,8 +338,6 @@ class JavaScriptCommandCheck(PythonCommandCheck):
             return self.literal(ast.parse(expression, mode="eval").body)
         except SyntaxError:
             return None
-
-
 
 
 def readable_roots(*, work_base: Path) -> tuple[Path, ...]:

@@ -15,22 +15,23 @@ from filelock import AsyncFileLock
 from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
 from pydantic_ai.messages import TextContent
 
-from redlotus.core.config import (
-    settings,
+from redlotus.runtime.config import settings
+from redlotus.runtime.resources import (
     file_lock,
     iso_utc_now,
     read_locked_json,
     save_locked_json,
+    WorkspaceContext,
+    current_workspace,
 )
-from redlotus.core import config as logger
-from redlotus.core.gateway import ModelTarget
+from redlotus.runtime import logging as logger
+from redlotus.runtime.network import ModelTarget
 from redlotus.prompts.prompt import load_prompt
 from redlotus.tools.references import ReferenceStore
-from redlotus.core.agents import WorkspaceContext, AgentRegistry, SubagentFactory, SubagentSpec
+from redlotus.core.agents import AgentRegistry, SubagentFactory, SubagentSpec
 from redlotus.memory.records import EvidenceReader, LongTermMemory, ObservationStore
 from redlotus.memory.perception import MemoryPerception, MemoryJob, produce_job
 from redlotus.memory.store import MemoryStore, MemoryReader
-from redlotus.core.session import current_workspace
 
 
 class MemoryService:

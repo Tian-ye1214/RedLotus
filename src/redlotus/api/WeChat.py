@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from pydantic_ai import BinaryContent
 
-from redlotus.core import config as logger
+from redlotus.runtime import logging as logger
 from redlotus.tools.interaction import UserMessage
 from redlotus.api.base import BotBase
 

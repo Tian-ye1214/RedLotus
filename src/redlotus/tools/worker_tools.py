@@ -12,8 +12,9 @@ from pydantic_ai.capabilities import Capability
 from redlotus.core.agents import (
     AgentRegistry, SubagentFactory, SubagentResult, SubagentSpec, bind_to_loop,
 )
-from redlotus.core.config import get_agent_usage_limits
-from redlotus.core.gateway import AgentRunner, ModelTarget, create_agent, create_function_toolset
+from redlotus.runtime.config import get_agent_usage_limits
+from redlotus.core.gateway import AgentRunner, create_agent, create_function_toolset
+from redlotus.runtime.network import ModelTarget
 from redlotus.core.history import ChatHistory, messages_safe_for_new_prompt
 from redlotus.prompts.prompt import (
     get_manager_system_prompt, get_worker_system_prompt, session_prompt_from_history, with_runtime_context,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from redlotus.core.config import atomic_write_text
+from redlotus.runtime.resources import atomic_write_text, WorkspaceContext, current_workspace
 
 import re
 import unicodedata
@@ -15,9 +15,7 @@ from redlotus.tools.references import ReferenceFile, ReferenceStore
 from redlotus.prompts.prompt import with_runtime_context
 from collections.abc import Iterator
 from pathlib import Path
-from redlotus.core.gateway import ModelInputPolicy
-from redlotus.core.agents import WorkspaceContext
-from redlotus.core.session import current_workspace
+from redlotus.runtime.network import ModelInputPolicy
 from typing import Callable
 
 

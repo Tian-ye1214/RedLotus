@@ -79,12 +79,12 @@ class CommandResult:
 
 def _workspace_for(cwd: str | Path | None, workspace=None):
     if workspace is None:
-        from redlotus.core.agents import active_workspace
+        from redlotus.runtime.resources import active_workspace
 
         workspace = active_workspace()
     if workspace is not None:
         return workspace
-    from redlotus.core.agents import WorkspaceContext
+    from redlotus.runtime.resources import WorkspaceContext
 
     return WorkspaceContext.from_path(cwd or Path.cwd())
 
@@ -105,7 +105,7 @@ def existing_python() -> Path:
         if found and not _same_path(found, Path(sys.executable)):
             return Path(found).resolve()
     if launcher := shutil.which("py"):
-        from redlotus.core.config import get_agent_run_policy
+        from redlotus.runtime.config import get_agent_run_policy
 
         result = subprocess.run(
             [launcher, "-3", "-c", "import sys; print(sys.executable)"],
@@ -122,7 +122,7 @@ def existing_python() -> Path:
 
 def execution_cache_dir(workspace) -> Path:
     """Resolve owned, regenerable caches under the configured project runtime."""
-    from redlotus.core.config import runtime_dir
+    from redlotus.runtime.resources import runtime_dir
 
     return runtime_dir(workspace).resolve() / "cache"
 
@@ -132,7 +132,7 @@ def get_execution_environment(
     overrides: dict[str, str] | None = None, python_required: bool = True,
 ) -> ExecutionEnvironment:
     """Describe the existing environment without creating or rebuilding Python."""
-    from redlotus.core.config import runtime_dir
+    from redlotus.runtime.resources import runtime_dir
 
     active = _workspace_for(cwd, workspace)
     runtime = runtime_dir(active).resolve()

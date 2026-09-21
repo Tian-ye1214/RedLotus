@@ -24,8 +24,15 @@ from redlotus.core.history import (
     prepare_compression,
     repair_interrupted_tool_calls,
 )
-from redlotus.core.session import SessionFile, SessionController, current_workspace
-from redlotus.core.config import session_data_dir, get_agent_usage_limits, settings, finish_file_io
+from redlotus.core.session import SessionFile, SessionController
+from redlotus.runtime.resources import (
+    current_workspace,
+    session_data_dir,
+    finish_file_io,
+    WorkspaceContext,
+    workspace_context,
+)
+from redlotus.runtime.config import get_agent_usage_limits, settings
 from redlotus.core.presentation import (
     supports_model_stream,
     TextEventStreamHandler,
@@ -36,16 +43,10 @@ from redlotus.core.presentation import (
     show_model_output,
     format_user_log_text,
 )
-from redlotus.core import config as logger
+from redlotus.runtime import logging as logger
 from contextlib import asynccontextmanager, nullcontext
 from pydantic_ai.exceptions import ModelHTTPError
-from redlotus.core.agents import (
-    AgentRegistry,
-    AgentRunner,
-    WorkspaceContext,
-    workspace_context,
-    SubagentFactory,
-)
+from redlotus.core.agents import AgentRegistry, AgentRunner, SubagentFactory
 from redlotus.core.console import AgentCliController, CliSessionState
 from redlotus.core.cli_commands import (
     GoalSignal, GoalParseResult, parse_goal_output, summarize_last_coordinator_turn,
@@ -408,7 +409,7 @@ class AgentSystem:
 
     def _handle_turn_error(self, e: Exception) -> None:
         self.last_turn_error = e
-        from redlotus.core.gateway import InputLimitError
+        from redlotus.runtime.network import InputLimitError
 
         if isinstance(e, InputLimitError):
             print_warning(str(e))
@@ -515,7 +516,7 @@ class AgentSystem:
 
     def record_control_result(self, command, target, status, *, accepted):
         from pydantic_ai.messages import TextContent
-        from redlotus.core.config import iso_utc_now
+        from redlotus.runtime.resources import iso_utc_now
 
         receipt = dict(
             command=command,
@@ -710,7 +711,7 @@ class AgentSystem:
         await self.reset_session(close_memory=True)
         self.workspace, self._memory, self._toolkit, self._skills_manager = workspace, memory, toolkit, skills
         self._coordinator_agent = None
-        from redlotus.core.session import set_workspace
+        from redlotus.runtime.resources import set_workspace
 
         set_workspace(workspace.root)
         logger.activate_log_dir(log_dir)

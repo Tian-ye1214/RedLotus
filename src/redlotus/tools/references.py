@@ -16,19 +16,19 @@ from urllib.parse import urlsplit
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import BinaryContent, ImageUrl
-from redlotus.core.config import (
+from redlotus.runtime.resources import (
     user_data_dir,
     references_dir,
     runtime_dir,
-    get_env,
     finish_file_io,
     atomic_write_json,
     atomic_write_bytes,
+    WorkspaceContext,
 )
+from redlotus.runtime.config import get_env
 from redlotus.tools.execution import run_subprocess
 from filelock import AsyncFileLock
-from redlotus.core.gateway import ModelInputPolicy
-from redlotus.core.agents import WorkspaceContext
+from redlotus.runtime.network import ModelInputPolicy
 from functools import wraps
 from redlotus.tools.registry import resolve_readable_path
 
@@ -443,8 +443,8 @@ class DocumentReader:
 def reference_message_data(value, *, restore=False, workspace=None):
     """Keep native attachment bytes in immutable snapshots, with links in session JSON."""
     import base64
-    from redlotus.core import config as paths
-    from redlotus.core.config import file_lock
+    from redlotus.runtime import resources as paths
+    from redlotus.runtime.resources import file_lock
 
     if isinstance(value, list):
         return [reference_message_data(item, restore=restore, workspace=workspace) for item in value]
@@ -493,7 +493,7 @@ class ReferenceStore:
         import base64
         import mimetypes
         from pydantic_ai import BinaryContent, ImageUrl, VideoUrl
-        from redlotus.core.gateway import ModelInputPolicy
+        from redlotus.runtime.network import ModelInputPolicy
 
         policy = ModelInputPolicy.for_role("coordinator")
         references = list(message.references)
@@ -560,7 +560,7 @@ class ReferenceStore:
     ) -> ReferenceFile:
         import httpx
         from urllib.parse import urlsplit, unquote
-        from redlotus.core.config import get_client
+        from redlotus.runtime.network import get_client
 
         if urlsplit(url).scheme not in ("https", "http"):
             raise ValueError("Remote references require HTTP(S)")

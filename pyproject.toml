@@ -51,7 +51,7 @@ all = [
 ]
 
 [project.scripts]
-redlotus = "redlotus.core.config:main"
+redlotus = "redlotus.api.base:main"
 
 [tool.setuptools]
 include-package-data = false

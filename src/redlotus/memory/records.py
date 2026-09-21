@@ -5,15 +5,15 @@ import asyncio
 import json
 from dataclasses import asdict
 from pydantic_ai.messages import BinaryContent, ImageUrl, ModelMessagesTypeAdapter, TextContent
-from redlotus.core.config import (
-    settings,
+from redlotus.runtime.config import settings
+from redlotus.runtime.resources import (
     iso_utc_now,
     memory_dir,
     atomic_write_text,
     file_lock,
     project_data_dir,
 )
-from redlotus.core.gateway import ModelInputPolicy
+from redlotus.runtime.network import ModelInputPolicy
 from redlotus.core.agents import Outcome
 from redlotus.tools.references import ReferenceStore
 from redlotus.tools.registry import tool_result_succeeded
