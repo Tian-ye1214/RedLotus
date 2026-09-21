@@ -56,10 +56,6 @@ from redlotus.ui.presentation import (
 )
 
 
-def _out(text: str = "") -> None:
-    console.print(text)
-
-
 def _strip_quotes(text: str) -> str:
     """去除首尾成对的引号（粘贴路径常带引号）。"""
     text = text.strip()
@@ -156,17 +152,13 @@ def print_effort_settings() -> None:
     print_panel("\n".join(lines), title="思考配置")
 
 
-def _effort_values_text(role: str) -> str:
-    return "|".join(role_supported_thinking_efforts(role))
-
-
 def _print_effort_usage(roles: tuple[str, ...]) -> None:
     role_text = "|".join(roles)
-    _out(f"设置思考: /effort <{role_text}> off")
+    console.print(f"设置思考: /effort <{role_text}> off")
     for role in roles:
-        values = _effort_values_text(role)
+        values = "|".join(role_supported_thinking_efforts(role))
         if values:
-            _out(f"设置思考: /effort {role} <{values}>")
+            console.print(f"设置思考: /effort {role} <{values}>")
 
 
 async def interactive_set_api(*, embedding=False, ask=None):
@@ -203,15 +195,11 @@ def _k_tokens(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
 
-def _format_decimal(value: Decimal) -> str:
+def _format_usd(value: Decimal) -> str:
     text = format(value, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
-    return text or "0"
-
-
-def _format_usd(value: Decimal) -> str:
-    return f"${_format_decimal(value)}"
+    return f"${text or '0'}"
 
 
 def _format_usage_report(report: UsageReport) -> str:
@@ -444,7 +432,7 @@ class SlashCommands:
 
     async def stop(self):
         msg = await self.system.stop_current_turn()
-        _out(msg)
+        console.print(msg)
         return None
 
     async def cancel(self):
@@ -546,12 +534,12 @@ class SlashCommands:
             if latest:
                 target = (latest.metadata or {}).get("model_target", {})
                 if target:
-                    _out(f"最近请求使用的配置模型: {target['name']}")
-                _out(f"服务返回的模型标识: {latest.model_name}")
-            _out(f"切换模型: /agent <{role_text}> <预设或模型名称>")
+                    console.print(f"最近请求使用的配置模型: {target['name']}")
+                console.print(f"服务返回的模型标识: {latest.model_name}")
+            console.print(f"切换模型: /agent <{role_text}> <预设或模型名称>")
             presets = settings().get("model_presets", {})
             if presets:
-                _out("可用预设: " + "、".join(presets))
+                console.print("可用预设: " + "、".join(presets))
             return None
         if len(self.parts) < 3:
             print_error(f"用法: /agent <{role_text}> <模型名称>")

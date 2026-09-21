@@ -463,7 +463,7 @@ class ConfigurationSetup:
         return True
 
 
-def python_tool_startup_notice(cfg: dict[str, Any]) -> str | None:
+def python_tool_startup_notice() -> str | None:
     """Explain an optional frozen-build Python requirement without blocking chat."""
     if not _frozen():
         return None
@@ -510,7 +510,7 @@ async def prepare_startup_configuration(*, required=(), ask=None, emit=print) ->
             emit("RAG 尚未配置；可先聊天，使用 /api embedding 补齐向量检索配置。")
         if not await setup.commit():
             return False
-        if notice := python_tool_startup_notice(setup.values):
+        if notice := python_tool_startup_notice():
             emit(notice)
         return True
     except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
