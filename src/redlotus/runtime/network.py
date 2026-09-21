@@ -8,7 +8,6 @@ import threading
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
@@ -94,7 +93,7 @@ class ModelInputPolicy:
 
     @classmethod
     def for_role(cls, role: str = "coordinator") -> "ModelInputPolicy":
-        return cls.from_limits(ModelTarget.for_role(role).limits)
+        return cls.from_limits(ModelTarget.for_role(role).options["limits"])
 
     @classmethod
     def from_limits(cls, values: dict) -> "ModelInputPolicy":
@@ -169,20 +168,8 @@ class ModelTarget:
     timeout: float
 
     @property
-    def settings(self) -> dict:
-        return json.loads(self.options_json)["settings"]
-
-    @property
-    def limits(self) -> dict:
-        return json.loads(self.options_json)["limits"]
-
-    @property
-    def context(self) -> dict:
-        return json.loads(self.options_json)["context"]
-
-    @property
-    def connect_timeout(self) -> float:
-        return json.loads(self.options_json)["connect_timeout"]
+    def options(self) -> dict:
+        return json.loads(self.options_json)
 
     @classmethod
     def for_role(cls, role: str) -> ModelTarget:
@@ -314,9 +301,10 @@ def _adapt_anthropic_message_api(client):
 
 def _create_anthropic_provider(target: ModelTarget, policy: ModelInputPolicy):
     """Bind Anthropic to the HTTP client type supported by its installed SDK."""
+    connect_timeout = target.options["connect_timeout"]
     if not _anthropic_uses_httpx2():
         client = get_client(
-            f"model:anthropic:{target.timeout}:{target.connect_timeout}:{policy.max_request_bytes}",
+            f"model:anthropic:{target.timeout}:{connect_timeout}:{policy.max_request_bytes}",
             lambda: _create_http_client(target, policy),
         )
         return AnthropicProvider(
@@ -326,9 +314,9 @@ def _create_anthropic_provider(target: ModelTarget, policy: ModelInputPolicy):
     from anthropic import AsyncAnthropic
 
     transport = get_client(
-        f"model:anthropic-httpx2:{target.timeout}:{target.connect_timeout}:{policy.max_request_bytes}",
+        f"model:anthropic-httpx2:{target.timeout}:{connect_timeout}:{policy.max_request_bytes}",
         lambda: _create_anthropic_http_client(
-            target.timeout, target.connect_timeout, policy
+            target.timeout, connect_timeout, policy
         ),
     )
     client = AsyncAnthropic(
@@ -340,7 +328,7 @@ def _create_anthropic_provider(target: ModelTarget, policy: ModelInputPolicy):
 
 def _create_http_client(target: ModelTarget, policy: ModelInputPolicy):
     client = create_async_http_client(
-        timeout=target.timeout, connect=target.connect_timeout
+        timeout=target.timeout, connect=target.options["connect_timeout"]
     )
     if policy.max_request_bytes is not None:
         client.event_hooks["request"].append(policy.check_http_request)
@@ -352,7 +340,7 @@ def _create_provider(provider_name: str, target: ModelTarget, policy: ModelInput
     if provider_type is AnthropicProvider:
         return _create_anthropic_provider(target, policy)
     client = get_client(
-        f"model:{provider_name}:{target.timeout}:{target.connect_timeout}:{policy.max_request_bytes}",
+        f"model:{provider_name}:{target.timeout}:{target.options['connect_timeout']}:{policy.max_request_bytes}",
         lambda: _create_http_client(target, policy),
     )
     parameters = inspect.signature(provider_type).parameters
@@ -374,22 +362,23 @@ def create_model(model_name: str | ModelTarget, parameter: dict | None = None):
         if isinstance(model_name, ModelTarget)
         else ModelTarget.from_values(model_name, parameter or {})
     )
-    credential_field = json.loads(target.options_json).get("credential_field", "API_KEY")
+    options = target.options
+    credential_field = options.get("credential_field", "API_KEY")
     address_field = credential_field.removesuffix("api_key") + "base_url" if credential_field.startswith("gateways.") else "BASE_URL"
     missing = credential_field if not target.api_key else (
         address_field if not target.base_url else None
     )
     if missing:
         raise ConfigError(f"缺少配置 {missing}；检查来源: {config_source_summary()}")
-    policy = ModelInputPolicy.from_limits(target.limits)
+    policy = ModelInputPolicy.from_limits(options["limits"])
     model = infer_model(
         f"{target.protocol}:{target.name}",
         provider_factory=lambda provider: _create_provider(provider, target, policy),
     )
-    params = apply_thinking_config(target.settings, model_name=target.name)
+    params = apply_thinking_config(options["settings"], model_name=target.name)
     profile = model.profile.copy()
     if isinstance(model.provider, DeepSeekProvider):
-        requested = str(target.settings.get("reasoning_effort", "")).strip().lower()
+        requested = str(options["settings"].get("reasoning_effort", "")).strip().lower()
         if params.get("thinking") and requested:
             params["openai_reasoning_effort"] = {
                 "minimal": "low",
@@ -407,15 +396,12 @@ def create_model(model_name: str | ModelTarget, parameter: dict | None = None):
         settings=ModelSettings(**params),
     )
 
-def _openrouter_cache_path() -> Path:
-    return logger.get_log_dir() / "cache/openrouter_models.json"
-
 def _ensure_openrouter_maps() -> None:
     global _OPENROUTER_META_MAP
     with _OPENROUTER_LOCK:
         if _OPENROUTER_META_MAP is not None:
             return
-        path = _openrouter_cache_path()
+        path = logger.get_log_dir() / "cache/openrouter_models.json"
         try:
             if path.exists():
                 raw = json.loads(path.read_text(encoding="utf-8"))

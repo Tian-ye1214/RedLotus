@@ -404,7 +404,7 @@ def target_for_job(job, targets):
         same_target = (
             snapshot["name"] == current.name
             and snapshot["timeout"] == current.timeout
-            and json.loads(snapshot["options_json"]) == json.loads(current.options_json)
+            and json.loads(snapshot["options_json"]) == current.options
         )
         previous = ModelTarget(**snapshot, api_key=current.api_key)
         if not same_target or type(create_model(previous)) is not type(create_model(current)):

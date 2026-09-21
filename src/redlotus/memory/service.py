@@ -29,7 +29,7 @@ from redlotus.runtime.config import settings
 from redlotus.runtime.network import ModelTarget
 from redlotus.runtime.resources import (
     WorkspaceContext,
-    atomic_write_text,
+    atomic_write,
     current_workspace,
     file_lock,
     finish_file_io,
@@ -228,7 +228,7 @@ class MemoryService:
                 job.timings["records_committed_at"] = iso_utc_now()
                 self._save_job(job)
             if updated != original:
-                atomic_write_text(self.long_term.path, updated)
+                atomic_write(self.long_term.path, updated)
 
     async def _apply(self, job):
         async with self.long_term.publication_lock():

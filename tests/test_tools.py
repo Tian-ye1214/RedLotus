@@ -107,6 +107,30 @@ def test_rejecting_new_file_removes_only_the_reviewed_version(tmp_path):
     assert store.decide(entry, 0, True)
     assert not path.exists()
     assert store.decide(entry, 0, True)
+
+
+@pytest.mark.parametrize("content,encoding", [("line\n雪\r\n", "utf-8"), ("line\n雪\r\n", "utf-16"), (bytes(range(256)), None)],
+                         ids=["utf8-text", "utf16-text", "raw-bytes"])
+def test_atomic_write_preserves_native_encoding_and_original_on_replace_failure(tmp_path, monkeypatch, content, encoding):
+    from redlotus.runtime import resources
+
+    path, native = tmp_path / "owned.bin", tmp_path / "native.bin"
+    if isinstance(content, str):
+        native.write_text(content, encoding=encoding)
+    else:
+        native.write_bytes(content)
+    resources.atomic_write(path, content, encoding=encoding)
+    assert path.read_bytes() == native.read_bytes()
+
+    def denied(*args):
+        raise PermissionError("isolated replace failure")
+
+    monkeypatch.setattr(resources.os, "replace", denied)
+    with pytest.raises(PermissionError, match="replace failure"):
+        resources.atomic_write(path, content[:1], encoding=encoding)
+    assert path.read_bytes() == native.read_bytes()
+
+
 def test_application_structure_keeps_approved_module_and_effective_line_limits():
     import ast
     import io

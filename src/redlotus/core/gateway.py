@@ -56,7 +56,8 @@ class RequestPolicy(AbstractCapability):
         parameters = request_context.model_request_parameters
         tool_definitions = [*parameters.function_tools, *parameters.output_tools]
         candidate = request_context.messages
-        if self.usage_category != "auxiliary" and "auto_compress_ratio" in target.context:
+        options = target.options
+        if self.usage_category != "auxiliary" and "auto_compress_ratio" in options["context"]:
             from redlotus.core.history import compact_request_messages
 
             candidate = await compact_request_messages(
@@ -77,7 +78,7 @@ class RequestPolicy(AbstractCapability):
             await self.persist_context(candidate)
         request_context.messages = candidate
         self.target, self.model = target, model
-        ModelInputPolicy.from_limits(target.limits).check_messages(
+        ModelInputPolicy.from_limits(options["limits"]).check_messages(
             request_context.messages
         )
         request_context.model = model

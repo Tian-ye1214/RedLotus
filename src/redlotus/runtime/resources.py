@@ -234,10 +234,15 @@ async def finish_file_io(operation):
         await asyncio.gather(task, return_exceptions=True)
         raise
 
-def atomic_write_bytes(path: Path, data: bytes) -> None:
+def atomic_write(path: Path, content: str | bytes, *, encoding: str = "utf-8") -> None:
+    """Replace a complete file using native text encoding or unchanged bytes."""
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_bytes(data)
+    if isinstance(content, str):
+        temporary.write_text(content, encoding=encoding)
+    else:
+        temporary.write_bytes(content)
     os.replace(temporary, path)
 
 @contextmanager
@@ -253,15 +258,8 @@ def read_locked_json(path: Path):
     with file_lock(path):
         return json.loads(path.read_text(encoding="utf-8"))
 
-def atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding=encoding)
-    os.replace(tmp, path)
-
 def atomic_write_json(path: Path, data: Any, *, indent: int = 2) -> None:
-    atomic_write_text(
+    atomic_write(
         path,
         json.dumps(data, ensure_ascii=False, indent=indent) + "\n",
     )

@@ -23,7 +23,7 @@ from redlotus.runtime.config import get_env
 from redlotus.runtime.network import ModelInputPolicy
 from redlotus.runtime.resources import (
     WorkspaceContext,
-    atomic_write_bytes,
+    atomic_write,
     atomic_write_json,
     finish_file_io,
     references_dir,
@@ -479,7 +479,7 @@ def reference_message_data(value, *, restore=False, workspace=None):
         snapshot = next(directory.glob("source.*"), directory / "source.bin")
         with file_lock(snapshot):
             if not snapshot.exists():
-                atomic_write_bytes(snapshot, data)
+                atomic_write(snapshot, data)
     return {**value, "data": {"snapshot": str(snapshot), "sha256": digest}}
 
 
@@ -615,7 +615,7 @@ class ReferenceStore:
         async with AsyncFileLock(directory / ".build.lock", run_in_executor=False):
             if not snapshot.exists():
                 await finish_file_io(
-                    asyncio.to_thread(atomic_write_bytes, snapshot, data)
+                    asyncio.to_thread(atomic_write, snapshot, data)
                 )
         return ReferenceFile(
             id=identity,

@@ -322,7 +322,7 @@ async def compact_request_messages(
 ) -> list:
     """Build the bounded model view; original trace persistence belongs to the runner."""
     request = combined[-1]
-    context = target.context if target else get_context_config(role)
+    context = target.options["context"] if target else get_context_config(role)
     limit = await get_effective_max_context_async(
         model_name=target.name if target else None, role=role, context=context
     )

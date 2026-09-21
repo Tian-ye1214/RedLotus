@@ -18,7 +18,7 @@ from pydantic_ai.messages import BinaryContent, ImageUrl, TextContent
 from redlotus.runtime.config import settings
 from redlotus.runtime.network import ModelInputPolicy
 from redlotus.runtime.resources import (
-    atomic_write_text,
+    atomic_write,
     file_lock,
     iso_utc_now,
     memory_dir,
@@ -203,7 +203,7 @@ class LongTermMemory:
                         sections[heading] = re.sub(
                             r"^#.*\n", "", old.read_text(encoding="utf-8"), count=1
                         ).strip()
-                atomic_write_text(
+                atomic_write(
                     self.path,
                     self._render("# MEMORY", sections)
                     if any(sections.values())
@@ -314,7 +314,7 @@ class LongTermMemory:
     async def clear_all(self):
         def clear():
             with file_lock(self.path):
-                atomic_write_text(self.path, EMPTY_MEMORY)
+                atomic_write(self.path, EMPTY_MEMORY)
 
         await asyncio.to_thread(clear)
 

@@ -24,7 +24,7 @@ from redlotus.runtime import logging as logger
 from redlotus.runtime.config import get_env
 from redlotus.runtime.resources import (
     WorkspaceContext,
-    atomic_write_text,
+    atomic_write,
     bind_to_loop,
     current_workspace,
     runtime_dir,
@@ -736,7 +736,7 @@ class PendingReviewStore:
                 {hunk.index for hunk in old.hunks if old.decisions.get(hunk.index) is not False},
             ) if old else previous or ""
             existed = old.existed or False in old.decisions.values() if old else previous is not None
-            atomic_write_text(path, content)
+            atomic_write(path, content)
             if self._on_change is not None and baseline != content:
                 self._entries[str(path)] = ReviewEntry(path, name, baseline, content, existed=existed)
             else:
@@ -764,7 +764,7 @@ class PendingReviewStore:
             if not entry.existed and len(rejected) == len(entry.hunks):
                 entry.path.unlink(missing_ok=True)
             else:
-                atomic_write_text(
+                atomic_write(
                     entry.path,
                     reconstruct(entry.baseline, entry.snapshot, rejected),
                 )
