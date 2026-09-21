@@ -103,95 +103,8 @@ class AgentInput(Input):
         self.value = ""
 
 
-class KeyCapture(Static):
-    """Capture only the two calibration keys, without involving the composer."""
-
-    can_focus = True
-
-    def on_key(self, event: events.Key) -> None:
-        event.stop()
-        event.prevent_default()
-        if event.key in {"escape", "ctrl+c"}:
-            self.screen.action_cancel()
-        elif not event.is_printable:
-            self.screen.capture_key(event.key)
 
 
-class KeyboardTestScreen(ModalScreen[str | None]):
-    """Test actual terminal events; never infer modifiers from the terminal name."""
-
-    BINDINGS = [Binding("escape,ctrl+c", "cancel", "取消", show=False)]
-    DEFAULT_CSS = """
-    KeyboardTestScreen { align: center middle; }
-    #keyboard-dialog { width: 80%; max-width: 100; height: auto;
-        max-height: 90%; border: thick $primary; background: $surface; padding: 1 2; }
-    #key-capture { padding: 1 0; }
-    #keyboard-buttons { height: auto; }
-    #keyboard-settings { display: none; height: auto; max-height: 12; }
-    """
-
-    def __init__(self):
-        super().__init__()
-        self._step = 0
-        self.result = None
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="keyboard-dialog"):
-            yield Static("按键检测", markup=False)
-            yield KeyCapture("尚未验证。检测不会发送消息或更改终端设置。", id="key-capture")
-            with Horizontal(id="keyboard-buttons"):
-                yield Button("开始检测", id="key-start", variant="primary")
-                yield Button("跳过", id="key-close")
-                yield Button("Windows Terminal 配置", id="key-settings")
-            yield Static("", id="keyboard-settings", markup=False)
-
-    def on_mount(self) -> None:
-        self.query_one("#key-start", Button).focus()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        event.stop()
-        if event.button.id == "key-start":
-            self._step, self.result = 1, None
-            capture = self.query_one("#key-capture", KeyCapture)
-            capture.update("第 1 步：请按普通 Enter。")
-            capture.focus()
-        elif event.button.id == "key-close":
-            self.dismiss(self.result)
-        elif event.button.id == "key-settings":
-            panel = self.query_one("#keyboard-settings", Static)
-            panel.update(
-                "仅供手动审查，不会自动写入。此绑定影响 Windows Terminal 中的其他程序。\n"
-                '在 actions 中添加：\n{"id":"User.RedLotusCtrlEnter","command":'
-                '{"action":"sendInput","input":"\\u001b[13;5u"}}\n'
-                '在 keybindings 中添加：\n{"keys":"ctrl+enter","id":"User.RedLotusCtrlEnter"}\n'
-                "保留其他设置；保存后重新检测。PyCharm Classic 同码问题不能由此设置修复。"
-            )
-            panel.display = not panel.display
-
-    def capture_key(self, key: str) -> None:
-        """Verify Enter first, then require an actual ctrl+enter event."""
-        capture = self.query_one("#key-capture", KeyCapture)
-        if self._step == 1:
-            if key != "enter":
-                capture.update("第 1 步尚未完成：请仅按普通 Enter。")
-                return
-            self._step = 2
-            capture.update("第 2 步：请按 Ctrl+Enter。")
-        elif self._step == 2:
-            self.result = "supported" if key == "ctrl+enter" else "unsupported"
-            capture.update(
-                "已验证支持：Enter 排队；Ctrl+Enter 进入当前对话。"
-                if self.result == "supported" else
-                "终端未传递可用的独立 Ctrl+Enter 按键。可使用现有发送按钮；普通 Enter 仍排队。"
-            )
-            self._step = 0
-            self.query_one("#key-start", Button).label = "重新检测"
-            close = self.query_one("#key-close", Button)
-            close.label = "完成"
-            close.focus()
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
 
 
 class SnapshotPickScreen(ModalScreen[SnapshotSelection]):
@@ -372,8 +285,6 @@ class RedLotusTui(App[None]):
         # Mount starts asynchronous preparation before the workspace admission
         # gate exists. Keep the composer closed across that gap.
         self._startup_locked = True
-        self._keyboard_status = "unknown"
-        self._keyboard_screen = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -415,7 +326,6 @@ class RedLotusTui(App[None]):
                     disabled=True,
                 )
                 yield Button("会话 / 加载", id="session-load", disabled=True)
-                yield Button("按键检测", id="keyboard-test", disabled=True)
             yield Footer()
 
     async def on_mount(self) -> None:
@@ -451,7 +361,6 @@ class RedLotusTui(App[None]):
         self.query_one("#input", AgentInput).disabled = True
         self.query_one("#session-load", Button).disabled = True
         try:
-            await self.open_keyboard_test()
             if await controller.enter_current_workspace():
                 self.state.is_first_input = False
         except Exception as exc:
@@ -464,31 +373,6 @@ class RedLotusTui(App[None]):
                 self.refresh_status()
                 self.query_one("#input", AgentInput).focus()
 
-    async def open_keyboard_test(self) -> None:
-        """Run optional calibration without changing the draft or session state."""
-        if self._keyboard_screen is not None:
-            return
-        future = asyncio.get_running_loop().create_future()
-        screen = self._keyboard_screen = KeyboardTestScreen()
-
-        def completed(result):
-            if not future.done():
-                future.set_result(result)
-
-        try:
-            await self.push_screen(screen, callback=completed, wait_for_dismiss=False)
-            result = await future
-            if result is not None:
-                self._keyboard_status = result
-            self.query_one("#keyboard-test", Button).tooltip = {
-                "unknown": "尚未验证", "supported": "已验证支持", "unsupported": "终端未传递区别",
-            }[self._keyboard_status]
-        finally:
-            if self.screen is screen:
-                screen.dismiss(None)
-            self._keyboard_screen = None
-            if not self._startup_locked and self.is_running and self.query("#input"):
-                self.query_one("#input", AgentInput).focus()
 
     async def pick_snapshot(
         self,
@@ -861,7 +745,6 @@ class RedLotusTui(App[None]):
             or self._active_line_handlers > 0
             or self.system.has_current_turn
         )
-        self.query_one("#keyboard-test", Button).disabled = self._startup_locked or controller.is_transitioning
         self.query_one("#session-context", Static).update(self._session_context_text())
         if not input_box.disabled and controller.last_rejected_input and self._ask_future is None:
             if not input_box.value:
@@ -1052,10 +935,6 @@ class RedLotusTui(App[None]):
         await inp.action_submit(urgent=True)
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "keyboard-test":
-            if not self._startup_locked and not self.system._cli_controller.is_transitioning:
-                asyncio.create_task(self.open_keyboard_test())
-            return
         if event.button.id != "session-load" or self.system._cli_controller.is_transitioning or self._active_line_handlers:
             return
         if self._panel_mode:

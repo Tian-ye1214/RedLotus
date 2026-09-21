@@ -29,8 +29,7 @@ from redlotus.core.config import session_data_dir, get_agent_usage_limits, setti
 from redlotus.core.presentation import (
     supports_model_stream,
     TextEventStreamHandler,
-    clear_model_stream,
-    end_model_stream,
+    update_output,
     finish_model_stream,
     print_phase,
     print_warning,
@@ -178,7 +177,7 @@ class AgentSystem:
     async def reset_session(self, *, close_memory=False) -> None:
         """Release resources before discarding a conversation's recoverable state."""
         self._session.reset(discard=True)
-        clear_model_stream()
+        update_output("clear_model_stream")
         self._session.queue.discard()
         await self.cancel_current_turn()
         await self._factory.cancel_all()
@@ -573,7 +572,7 @@ class AgentSystem:
             await self.bind_session(storage.session_id, storage=storage, generation=generation, task_title=title)
             self._session.reset(discard=True)
             self._session.queue.discard()
-            clear_model_stream()
+            update_output("clear_model_stream")
             state.history, state.is_first_input = history, False
             self._manager_history = manager_history
             self._task_manager.tasks = tasks.tasks
@@ -951,7 +950,7 @@ class AgentSystem:
             except BaseException as exc:
                 self._session.close_inbox()
                 if stream_handler is not None and stream_handler._is_current():
-                    end_model_stream("已停止" if isinstance(exc, asyncio.CancelledError) else "执行失败")
+                    update_output("end_model_stream", "已停止" if isinstance(exc, asyncio.CancelledError) else "执行失败")
                 raise
             if stream_handler is not None and not stream_handler._is_current():
                 raise asyncio.CancelledError("The reply belongs to a previous session.")

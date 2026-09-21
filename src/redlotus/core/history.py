@@ -27,7 +27,7 @@ from redlotus.core import config as logger
 from redlotus.prompts.prompt import load_prompt
 from dataclasses import dataclass, field
 from decimal import Decimal
-from redlotus.core.session import SessionFile, _response_id
+from redlotus.core.session import SessionFile, _response_id, _response_usage
 
 
 def _part_kind(part) -> str:
@@ -772,7 +772,7 @@ def session_model_message_files(
 
 def latest_usage_input_tokens(messages: Iterable[Any]) -> int | None:
     recent = list(reversed(list(messages)))
-    response = next((message for message in recent if isinstance(message, ModelResponse)), None)
+    response = next((message for message in recent if _response_usage(message) is not None), None)
     if response is None:
         return None
     checkpoint = next((info for message in recent if (info := _context_summary_metadata(message))), {})
@@ -794,10 +794,7 @@ def summarize_messages(
     )
     summary.content = ContentTokenStats(**summary.meta.get("input_usage", {"incomplete_sessions": 1}))
     for message in messages:
-        if (
-            not isinstance(message, ModelResponse)
-            or (message.metadata or {}).get("origin") == "execution_status"
-        ):
+        if _response_usage(message) is None:
             continue
         summary.totals.responses += 1
         role = (message.metadata or {}).get("role", "coordinator")

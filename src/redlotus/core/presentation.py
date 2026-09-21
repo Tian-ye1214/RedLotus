@@ -78,34 +78,8 @@ def emit_renderable(renderable: Any) -> None:
     _sink.emit(renderable)
 
 
-def emit_rule(title: str) -> None:
-    _sink.update("rule", title)
-
-
-def set_context_usage(items: list[ContextUsageItem]) -> None:
-    _sink.update("set_context_usage", items)
-
-
-def clear_context_usage() -> None:
-    _sink.update("clear_context_usage")
-
-
-def begin_model_stream(title: str) -> None:
-    _sink.update("begin_model_stream", title)
-
-
-def append_model_stream_delta(text: str, kind: str = "text") -> None:
-    _sink.update("append_model_stream_delta", text, kind)
-
-
-def end_model_stream(status: str) -> None:
-    _sink.update("end_model_stream", status)
-
-
-def clear_model_stream() -> None:
-    _sink.update("clear_model_stream")
-
-
+def update_output(action: str, *args) -> None:
+    _sink.update(action, *args)
 
 
 class DiffKind(StrEnum):
@@ -412,7 +386,7 @@ def show_model_output(text: str, *, title: str = "模型", markdown: bool = True
 
 
 def finish_model_stream(text: str, *, title: str = "模型", markdown: bool = True) -> None:
-    end_model_stream("已完成")
+    update_output("end_model_stream", "已完成")
     show_model_output(text, title=title, markdown=markdown)
 
 
@@ -444,16 +418,16 @@ class TextEventStreamHandler:
             if not text or not self._is_current():
                 continue
             if not self._started:
-                begin_model_stream(f"{self.title} 正在回复")
+                update_output("begin_model_stream", f"{self.title} 正在回复")
                 self._started = True
             if not response_started:
-                _sink.update("begin_model_response")
+                update_output("begin_model_response")
                 response_started = True
-            append_model_stream_delta(text, kind)
+            update_output("append_model_stream_delta", text, kind)
 
 
 def print_phase(title: str) -> None:
-    emit_rule(f"[dim]{title}[/dim]")
+    update_output("rule", f"[dim]{title}[/dim]")
     logger.info_file_only(title)
 
 

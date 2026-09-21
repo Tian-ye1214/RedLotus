@@ -29,7 +29,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
-from redlotus.core.presentation import print_success, print_warning, print_error, print_panel, ContextUsageItem, clear_context_usage, set_context_usage, print_repl_welcome, print_startup_logo
+from redlotus.core.presentation import print_success, print_warning, print_error, print_panel, ContextUsageItem, update_output, print_repl_welcome, print_startup_logo
 from uuid import uuid4
 from redlotus.core import config as app_config, config as logger
 from redlotus.core.history import (
@@ -600,7 +600,7 @@ class AgentCliController:
                 else:
                     await self.system.switch_workspace(workspace)
                 history.reset()
-            clear_context_usage()
+            update_output("clear_context_usage")
             self.last_rejected_input = None
         except Exception as exc:
             print_warning(f"会话切换失败，已保留原会话: {exc}")
@@ -630,7 +630,7 @@ class AgentCliController:
 
     async def _publish_context_usage(self, history: ChatHistory) -> None:
         if not history.messages and not self.system._manager_history.messages:
-            clear_context_usage()
+            update_output("clear_context_usage")
             return
         items = []
         for role, source in (
@@ -645,7 +645,7 @@ class AgentCliController:
                     role.title(), usage["input"], usage["max"], usage["percent"]
                 )
             )
-        set_context_usage(items)
+        update_output("set_context_usage", items)
 
     async def _handle_slash_command(
         self, raw_input: str, state: CliSessionState

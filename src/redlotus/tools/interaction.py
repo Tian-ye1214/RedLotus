@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from redlotus.core.config import atomic_write_text
+
 import re
 import unicodedata
 import asyncio
@@ -316,6 +318,15 @@ class ReviewEntry:
     def hunks(self):
         return compute_hunks(self.baseline, self.snapshot)
 
+    def check_current(self, current):
+        rejected = {key for key, value in self.decisions.items() if value}
+        expected = (
+            None if not self.existed and len(rejected) == len(self.hunks)
+            else reconstruct(self.baseline, self.snapshot, rejected)
+        )
+        if current != expected:
+            raise ValueError("文件已在审查界面之外被修改；为保留这些改动，本次操作未应用。")
+
 
 class PendingReviewStore:
     """跨线程共享的待审查暂存区。复用 toolkit 的 file_lock，避免与 agent 写盘竞争。"""
@@ -341,32 +352,24 @@ class PendingReviewStore:
             cb = self._on_change
         self._notify(cb)
 
-    def _register_locked(self, path, name, baseline, snapshot):
-        if baseline == snapshot or self._on_change is None:
-            return
-        old = self._entries.get(str(path))
-        self._entries[str(path)] = ReviewEntry(
-            path,
-            name,
-            old.baseline if old else baseline or "",
-            snapshot,
-            existed=old.existed if old else baseline is not None,
-        )
-
-    def register(self, path: Path, *, name: str, baseline: str, snapshot: str) -> None:
-        with self._lock:
-            self._register_locked(path, name, baseline, snapshot)
-            callback = self._on_change
-        self._notify(callback)
-
     def write(self, path: Path, name: str, update):
         """Publish file contents and their review snapshot as one locked operation."""
         with self._lock:
             previous = path.read_text(encoding="utf-8") if path.exists() else None
+            old = self._entries.get(str(path))
+            if old:
+                old.check_current(previous)
             content = update(previous)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
-            self._register_locked(path, name, previous, content)
+            baseline = reconstruct(
+                old.baseline, old.snapshot,
+                {hunk.index for hunk in old.hunks if old.decisions.get(hunk.index) is not False},
+            ) if old else previous or ""
+            existed = old.existed or False in old.decisions.values() if old else previous is not None
+            atomic_write_text(path, content)
+            if self._on_change is not None and baseline != content:
+                self._entries[str(path)] = ReviewEntry(path, name, baseline, content, existed=existed)
+            else:
+                self._entries.pop(str(path), None)
             callback = self._on_change
         self._notify(callback)
         return previous or "", content
@@ -384,25 +387,15 @@ class PendingReviewStore:
         with self._lock:
             if self._entries.get(str(entry.path)) is not entry:
                 return False
-            previous_rejections = {
-                key for key, value in entry.decisions.items() if value
-            }
-            expected = reconstruct(entry.baseline, entry.snapshot, previous_rejections)
-            current = (
-                entry.path.read_text(encoding="utf-8") if entry.path.exists() else ""
-            )
-            if current != expected:
-                raise ValueError(
-                    "文件已在审查界面之外被修改；为保留这些改动，本次决定未应用。"
-                )
+            entry.check_current(entry.path.read_text(encoding="utf-8") if entry.path.exists() else None)
             decisions = {**entry.decisions, index: reject}
             rejected = {key for key, value in decisions.items() if value}
             if not entry.existed and len(rejected) == len(entry.hunks):
                 entry.path.unlink(missing_ok=True)
             else:
-                entry.path.write_text(
+                atomic_write_text(
+                    entry.path,
                     reconstruct(entry.baseline, entry.snapshot, rejected),
-                    encoding="utf-8",
                 )
             entry.decisions = decisions
         return True
