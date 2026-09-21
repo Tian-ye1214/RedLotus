@@ -65,10 +65,10 @@ class WeChatAgentBot(BotBase):
 
         self._released = False
         kwargs: dict = {
-            "on_qr_url": lambda url: logger.info(f"[WeChat] 请扫码登录: {url}"),
-            "on_scanned": lambda: logger.info("[WeChat] 已扫码，确认登录中..."),
-            "on_expired": lambda: logger.warning("[WeChat] 登录二维码已过期"),
-            "on_error": lambda err: logger.error(f"[WeChat] SDK 错误: {err}"),
+            "on_qr_url": partial(logger.info, "[WeChat] 请扫码登录: %s"),
+            "on_scanned": partial(logger.info, "[WeChat] 已扫码，确认登录中..."),
+            "on_expired": partial(logger.warning, "[WeChat] 登录二维码已过期"),
+            "on_error": partial(logger.error, "[WeChat] SDK 错误: %s"),
         }
 
         bot = WeChatBot(**kwargs)

@@ -657,8 +657,6 @@ def _render_kpis(snapshot: PanelSnapshot) -> Table:
     history = snapshot.history
     runtime = snapshot.runtime
     table = Table.grid(expand=True)
-    for _ in range(4):
-        table.add_column(justify="left")
     table.add_row(
         f"历史对话 {history.conversation_count}",
         f"model_messages {history.file_count}",
