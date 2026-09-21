@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
-import re
-
 import datetime
+import json
 import os
 import platform
 from typing import TYPE_CHECKING
@@ -74,7 +72,9 @@ def session_prompt_from_history(messages) -> str | None:
             if length is not None:
                 return instructions[:length]
             # Legacy SDK requests combined role text and the native deferred catalog.
-            from pydantic_ai.capabilities._deferred_capability_loader import DEFERRED_CAPABILITY_CATALOG_PREFIX
+            from pydantic_ai.capabilities._deferred_capability_loader import (
+                DEFERRED_CAPABILITY_CATALOG_PREFIX,
+            )
             return instructions.partition("\n\n" + DEFERRED_CAPABILITY_CATALOG_PREFIX)[0]
     return None
 

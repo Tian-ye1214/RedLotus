@@ -3,31 +3,38 @@
 from __future__ import annotations
 
 import ast
+import functools
+import inspect
 import io
+import json
 import re
-import tokenize
 import shlex
 import subprocess
 import threading
-import yaml
-import functools
-import inspect
 import time
-import json
+import tokenize
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable
+
+import yaml
+
+from redlotus.runtime import logging as logger
+from redlotus.runtime.config import AgentRunPolicy
 from redlotus.runtime.resources import (
-    resource_root,
     skills_dir,
     user_skills_dir,
+)
+from redlotus.runtime.resources import (
     skills_dir as shipped_skills_dir,
 )
-from dataclasses import dataclass, field
-from redlotus.runtime import logging as logger
+from redlotus.sessions.context import (
+    TRACE_STORE,
+    current_short_agent_id,
+    current_turn_id,
+)
 from redlotus.tools.execution import run_subprocess
-from contextvars import ContextVar
-from typing import Any, Callable
-from redlotus.core.agents import TRACE_STORE, current_short_agent_id, current_turn_id
-from redlotus.runtime.config import AgentRunPolicy
 
 
 def read_script(path: Path) -> str:

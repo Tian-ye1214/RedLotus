@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
-from pathlib import Path
-from redlotus.runtime import logging as logger, config as app_config
-from redlotus.runtime.resources import user_data_dir
-from redlotus.runtime.config import get_env, settings
-from redlotus.runtime.network import get_client, openai_base_url
-from typing import Any
-import httpx
-from datetime import timedelta
 from copy import deepcopy
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+
+import httpx
 import lancedb
 import pyarrow as pa
 from filelock import AsyncFileLock
 from lancedb.index import IvfPq
-import json
+
+from redlotus.runtime import config as app_config
+from redlotus.runtime import logging as logger
+from redlotus.runtime.config import get_env, settings
+from redlotus.runtime.network import get_client, openai_base_url
+from redlotus.runtime.resources import user_data_dir
 
 
 def resolve_lancedb_dir(configured_path: str, *, table_name: str = "") -> str:

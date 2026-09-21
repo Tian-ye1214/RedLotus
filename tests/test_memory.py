@@ -1,15 +1,17 @@
 """Version/publication fault checks; live memory acceptance is separate."""
 
-import pytest
 from types import SimpleNamespace
+
+import pytest
 
 
 async def test_non_owner_turns_count_without_reading_or_producing_personal_memory(tmp_path):
     import json
-    from redlotus.core.session import SessionFile
+
     from redlotus.memory.records import ObservationStore
     from redlotus.memory.service import MemoryService
     from redlotus.runtime.resources import WorkspaceContext
+    from redlotus.sessions.storage import SessionFile
 
     (tmp_path / "config.json").write_text(json.dumps({
         "memory_perception": {"window_turns": 20, "overlap_turns": 3},
@@ -31,9 +33,10 @@ async def test_non_owner_turns_count_without_reading_or_producing_personal_memor
 
 @pytest.fixture
 def publication(tmp_path, monkeypatch):
-    from redlotus.core.session import SessionFile
-    from redlotus.memory import records, service as module
+    from redlotus.memory import records
+    from redlotus.memory import service as module
     from redlotus.memory.perception import MemoryJob
+    from redlotus.sessions.storage import SessionFile
 
     memory = records.LongTermMemory(tmp_path / "core-memory")
     original = memory.read()
@@ -171,10 +174,10 @@ async def test_projection_failure_receipt_reports_formal_commit(publication, mon
 
 @pytest.mark.parametrize("state", ["active", "deleted"])
 def test_stale_candidate_cannot_replace_a_newer_record(tmp_path, monkeypatch, state):
-    from redlotus.runtime.resources import WorkspaceContext
     from redlotus.memory.perception import MemoryJob
     from redlotus.memory.records import MemoryDraft, MemoryRecord, ObservedTurn
     from redlotus.memory.store import MemoryStore
+    from redlotus.runtime.resources import WorkspaceContext
 
     (tmp_path / "config.json").write_text(
         '{"storage":{"references_dir":"WorkDatabase/references"}}', encoding="utf-8",

@@ -3,218 +3,48 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
-from textual import events
-from textual.binding import Binding
-from rich.ansi import AnsiDecoder
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
-from textual.suggester import Suggester
 from textual.widgets import (
     Button,
     Collapsible,
     Footer,
     Input,
-    Label,
     OptionList,
-    ProgressBar,
     RichLog,
     Static,
 )
 from textual.widgets.option_list import Option
 
-from redlotus.core.console import (
-    SnapshotAction,
-    SnapshotSelection,
-    input_completions,
-    visible_conversation_entries,
-)
-from redlotus.core.presentation import (
+from redlotus.runtime import logging as logger
+from redlotus.sessions.context import current_short_agent_id
+from redlotus.ui.cli_commands import WorkspaceSnapshot
+from redlotus.ui.presentation import (
     ContextUsageItem,
-    OutputSink,
-    set_output_sink,
+    PanelSnapshotCache,
+    build_panel_snapshot,
     context_usage_renderable,
     model_stream_visible_text,
     render_review_hunk,
+    set_output_sink,
     user_text_panel,
-    PanelSnapshotCache,
-    build_panel_snapshot,
-    render_panel,
 )
-from redlotus.runtime import logging as logger
-from redlotus.core.agents import current_short_agent_id
-from redlotus.core.cli_commands import WorkspaceSnapshot
-
-READY_LABEL = "就绪"
-PREPARING_LABEL = "正在准备会话…"
-WORKING_LABEL = "工作中"
-WORKING_FRAMES = ("", ".", "..", "...")
-
-
-class TuiRunMode(str, Enum):
-    REVIEW = "review"
-    PASS = "pass"
-    GOAL = "goal"
-
-    def next(self) -> "TuiRunMode":
-        return list(TuiRunMode)[(list(TuiRunMode).index(self) + 1) % len(TuiRunMode)]
-
-
-class AgentInputSuggester(Suggester):
-    async def get_suggestion(self, value: str) -> str | None:
-        for completion in input_completions(value):
-            candidate = value[: len(value) + completion.start_position] + completion.text
-            if candidate != value:
-                return candidate
-        return None
-
-
-class AgentInput(Input):
-    @dataclass
-    class Submitted(Input.Submitted, namespace="input"):
-        urgent: bool = False
-
-    BINDINGS = [
-        *Input.BINDINGS,
-        Binding("tab", "cursor_right", "Complete", show=False),
-        Binding("ctrl+enter", "app.submit_urgent", "发送", key_display="Ctrl+Enter"),
-    ]
-
-    async def on_key(self, event: events.Key) -> None:
-        """Capture submission in the same queue that applies typed characters."""
-        if event.key in {"enter", "ctrl+enter"}:
-            event.stop()
-            event.prevent_default()
-            await self.action_submit(urgent=event.key == "ctrl+enter")
-
-    async def action_submit(self, *, urgent=False) -> None:
-        """Consume this draft before another key can submit or replace it."""
-        if self.disabled:
-            return
-        if urgent:
-            self.post_message(self.Submitted(self, self.value, urgent=True))
-        else:
-            await super().action_submit()
-        self.value = ""
-
-
-class SnapshotPickScreen(ModalScreen[SnapshotSelection]):
-    BINDINGS = [
-        Binding("escape", "cancel", "取消", show=False),
-        Binding("ctrl+c", "cancel", "取消", show=False),
-    ]
-
-    DEFAULT_CSS = """
-    SnapshotPickScreen {
-        align: center middle;
-    }
-    #snapshot-dialog {
-        width: 90%;
-        max-width: 120;
-        height: auto;
-        max-height: 80%;
-        border: thick $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-    #snapshot-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    .snapshot-hint {
-        color: $text-muted;
-        margin-bottom: 1;
-    }
-    #snapshot-list {
-        height: auto;
-        max-height: 24;
-        min-height: 5;
-    }
-    """
-
-    def __init__(
-        self,
-        snapshots: list[WorkspaceSnapshot],
-        *,
-        project_name: str = "",
-        current_session_id: str | None = None,
-    ) -> None:
-        super().__init__()
-        self._snapshots = snapshots
-        self._project_name = project_name
-        self._current_session_id = current_session_id
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="snapshot-dialog"):
-            context = "新建会话或恢复原会话"
-            if self._project_name:
-                session = self._current_session_id or "新会话"
-                context = f"项目：{self._project_name} · 当前会话：{session}\n{context}"
-            yield Static(context, id="snapshot-title")
-            yield Static("↑↓ 选择 · Enter 确认 · Esc 取消", classes="snapshot-hint")
-            yield OptionList(
-                Option("新建会话", id="new"),
-                *[
-                    Option(
-                        snapshot.label,
-                        id=str(index),
-                        disabled=not snapshot.is_loadable,
-                    )
-                    for index, snapshot in enumerate(self._snapshots)
-                ],
-                Option("取消", id="cancel"),
-                id="snapshot-list",
-            )
-
-    def on_mount(self) -> None:
-        self.query_one("#snapshot-list", OptionList).focus()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        option_id = event.option.id
-        if option_id == "new":
-            self.dismiss(SnapshotSelection(SnapshotAction.NEW))
-        elif option_id is None or option_id == "cancel":
-            self.dismiss(SnapshotSelection(SnapshotAction.CANCEL))
-        else:
-            self.dismiss(
-                SnapshotSelection(SnapshotAction.RESTORE, self._snapshots[int(option_id)])
-            )
-
-    def action_cancel(self) -> None:
-        self.dismiss(SnapshotSelection(SnapshotAction.CANCEL))
-
-
-class TextualOutputSink(OutputSink):
-    def __init__(self, app: "RedLotusTui", log: RichLog) -> None:
-        self._app = app
-        self._log = log
-        self._ansi_decoder = AnsiDecoder()
-
-    supports_model_stream = True
-
-    def emit(self, renderable: Any) -> None:
-        parts = (
-            list(self._ansi_decoder.decode(renderable))
-            if isinstance(renderable, str) and "\x1b[" in renderable
-            else [renderable]
-        )
-
-        def write():
-            for part in parts:
-                self._log.write(part, scroll_end=True)
-
-        self._app.call_ui(write)
-
-    def update(self, action: str, *args) -> None:
-        if action == "rule":
-            self.emit(Text(args[0], style="dim"))
-        else:
-            self._app.call_ui(lambda: getattr(self._app, action)(*args))
+from redlotus.ui.widgets import (
+    AgentInput,
+    AgentInputSuggester,
+    RunStatus,
+    SnapshotAction,
+    SnapshotPickScreen,
+    SnapshotSelection,
+    TextualOutputSink,
+    TuiRunMode,
+    UsagePanel,
+    visible_conversation_entries,
+)
 
 
 class RedLotusTui(App[None]):
@@ -253,11 +83,12 @@ class RedLotusTui(App[None]):
         Binding("escape", "escape", "退出面板/审查", show=False),
     ]
 
-    def __init__(self, system: Any, stop_event: asyncio.Event | None = None) -> None:
+    def __init__(self, controller: Any, stop_event: asyncio.Event | None = None) -> None:
         super().__init__()
-        self.system = system
+        self.controller = controller
+        self.system = controller.system
         self.stop_event = stop_event
-        self.state = system.new_cli_session_state()
+        self.state = controller.new_session_state()
         self._ask_future: asyncio.Future[str] | None = None
         self._ask_lock = asyncio.Lock()
         self._record_reply = True
@@ -286,33 +117,13 @@ class RedLotusTui(App[None]):
         with Vertical():
             yield RichLog(id="output", wrap=True, markup=False, highlight=False)
             yield OptionList(id="review-view")
-            with VerticalScroll(id="panel-view"):
-                yield Static("", id="panel-content")
-                yield Label(
-                    "新增内容 Token 占比（当前项目全部会话）",
-                    classes="panel-chart-title",
-                )
-                for key, label in (("input", "用户输入（估算）"), ("output", "模型输出（非推理）"), ("reasoning", "推理输出")):
-                    with Horizontal(classes="panel-bar-row"):
-                        yield Label(label, classes="panel-bar-label")
-                        yield ProgressBar(
-                            id="panel-comp-" + key, show_eta=False, show_percentage=False
-                        )
-                        yield Static("", id="panel-value-" + key, classes="panel-token-value")
-                yield Static("", id="panel-content-note")
-                yield Label("API 实际用量（包含历史重发）", classes="panel-chart-title")
-                yield Static("", id="panel-api-usage")
-                yield Label("当前会话 Agent", classes="panel-chart-title")
-                yield Static("", id="panel-agent-counts")
-                yield Label("计划任务进度", classes="panel-chart-title")
-                yield ProgressBar(id="panel-task-progress", show_eta=False)
-                yield Static("", id="panel-task-counts")
+            yield UsagePanel(id="panel-view")
             yield Static("", id="context-usage")
             with Collapsible(title="思考", collapsed=False, id="thinking-preview"):
                 with VerticalScroll(id="thinking-scroll"):
                     yield Static("", id="thinking-content")
             yield Static("", id="stream-preview")
-            yield Static(PREPARING_LABEL, id="status")
+            yield RunStatus(id="status")
             yield Static(self._session_context_text(), id="session-context")
             with Horizontal(id="input-row"):
                 yield AgentInput(
@@ -330,10 +141,10 @@ class RedLotusTui(App[None]):
         set_output_sink(TextualOutputSink(self, log))
         self.system.set_ask_user_handler(self._make_ask_user_bridge())
         if self._run_mode == TuiRunMode.REVIEW:
-            self.system.review_store.activate(self._on_reviews_changed)
+            self.system.toolkit.review_store.activate(self._on_reviews_changed)
         self.set_interval(0.5, self.refresh_status)
         await self._prepare_cli_session()
-        controller = self.system._cli_controller
+        controller = self.controller
         controller._active_session_state = self.state
         controller.set_snapshot_picker(self.pick_snapshot)
         controller.set_snapshot_loaded_callback(self._show_loaded_conversation)
@@ -346,21 +157,21 @@ class RedLotusTui(App[None]):
         self.run_worker(self._enter_workspace_after_mount, exclusive=True)
 
     async def _prepare_cli_session(self) -> None:
-        missing = await self.system.prepare_cli_session()
+        missing = await self.controller.prepare_session()
         if missing:
-            from redlotus.core.cli_commands import interactive_set_api
+            from redlotus.ui.cli_commands import interactive_set_api
 
             await interactive_set_api(ask=self.ask_config)
 
     async def _enter_workspace_after_mount(self) -> None:
-        controller = self.system._cli_controller
+        controller = self.controller
         self.query_one("#input", AgentInput).disabled = True
         self.query_one("#session-load", Button).disabled = True
         try:
             if await controller.enter_current_workspace():
                 self.state.is_first_input = False
         except Exception as exc:
-            from redlotus.core.presentation import print_warning
+            from redlotus.ui.presentation import print_warning
 
             print_warning(f"启动时加载会话失败: {exc}")
         finally:
@@ -463,7 +274,7 @@ class RedLotusTui(App[None]):
     def _pending_hunks(self) -> list:
         return [
             (entry, hunk)
-            for entry in self.system.review_store.entries()
+            for entry in self.system.toolkit.review_store.entries()
             for hunk in entry.hunks
             if hunk.index not in entry.decisions
         ]
@@ -500,9 +311,9 @@ class RedLotusTui(App[None]):
             return
         entry, hunk = self._review_items[index]
         try:
-            applied = self.system.review_store.decide(entry, hunk.index, reject)
+            applied = self.system.toolkit.review_store.decide(entry, hunk.index, reject)
         except (OSError, ValueError) as exc:
-            from redlotus.core.presentation import print_warning
+            from redlotus.ui.presentation import print_warning
 
             print_warning(str(exc))
             return
@@ -534,7 +345,7 @@ class RedLotusTui(App[None]):
         self.refresh_status()
 
     def _exit_review(self) -> None:
-        self.system.review_store.finish_decided()
+        self.system.toolkit.review_store.finish_decided()
         self._review_mode = False
         self._review_items = []
         view = self.query_one("#review-view", OptionList)
@@ -576,78 +387,12 @@ class RedLotusTui(App[None]):
             )
             if not self._panel_mode or identity != (self.system.workspace, self.system.session_key):
                 return
-            self.query_one("#panel-content", Static).update(render_panel(snapshot))
-            self._update_panel_charts(snapshot)
+            self.query_one(UsagePanel).update_snapshot(snapshot)
         except Exception as e:
             logger.error(f"刷新工作区面板失败: {type(e).__name__}: {e}", exc_info=True)
 
-    def _update_panel_charts(self, snapshot: Any) -> None:
-        """Render independent content, API, Agent and plan counters without rebuilding widgets."""
-        self._update_content_chart(snapshot)
-        self._update_api_usage(snapshot.history)
-        self._update_agent_counts(snapshot.runtime)
 
-    def _update_content_chart(self, snapshot) -> None:
-        """Show once-counted content and mark measurements with incomplete coverage."""
-        content = snapshot.content
-        complete = content.complete and not snapshot.history.skipped_count
-        total = content.input_tokens + content.output_tokens
-        for key, value in (
-            ("input", content.input_tokens),
-            ("output", content.output_tokens - content.reasoning_tokens),
-            ("reasoning", content.reasoning_tokens),
-        ):
-            bar = self.query_one("#panel-comp-" + key, ProgressBar)
-            bar.display = complete and total > 0
-            bar.update(total=total or 1, progress=value)
-            text = f"{value:,} tokens"
-            if key == "input":
-                text += "（估算）"
-            if key != "input" and content.missing_reasoning_responses:
-                text = (f"未知（总输出 {content.output_tokens:,} tokens）" if key == "output"
-                        else f"已报告 {content.reasoning_tokens:,} tokens；其余未知")
-            elif complete:
-                text += f"  {value / total * 100 if total else 0:.1f}%"
-            self.query_one("#panel-value-" + key, Static).update(text)
-        notes = ["用户输入及引用文本只计一次；不含系统提示词、旧回复和工具结果。"]
-        if not complete:
-            notes.append("统计不完整，暂不展示完整占比。")
-        if content.incomplete_sessions:
-            notes.append(f"{content.incomplete_sessions} 个旧会话输入统计不完整；输入仅为已统计部分。")
-        if content.unmetered_attachments:
-            notes.append(f"未计量附件 {content.unmetered_attachments} 个。")
-        if content.missing_reasoning_responses:
-            notes.append(f"{content.missing_reasoning_responses} 次响应推理明细未知。")
-        if content.missing_usage_responses:
-            notes.append(f"{content.missing_usage_responses} 次响应未报告用量。")
-        self.query_one("#panel-content-note", Static).update("\n".join(notes))
 
-    def _update_api_usage(self, history) -> None:
-        """Keep provider request accounting separate from unique input estimates."""
-        self.query_one("#panel-api-usage", Static).update(
-            f"输入 {history.input_tokens:,} tokens · 输出 {history.output_tokens:,} tokens（含推理）\n"
-            f"输入缓存：命中 {history.cache_hit_tokens:,} · 未命中 {history.cache_miss_tokens:,} · "
-            f"未报告 {max(0, history.input_tokens - history.cache_hit_tokens - history.cache_miss_tokens):,} tokens"
-        )
-    def _update_agent_counts(self, runtime) -> None:
-        """Display live Agents separately from the optional planning checklist."""
-        self.query_one("#panel-agent-counts", Static).update(
-            "暂不可用" if runtime.active_invocations_error else
-            Text.assemble((f"Running {runtime.running_agents}", "cyan"), "   ",
-                          (f"Queued {runtime.queued_agents}", "yellow"))
-        )
-        tasks = runtime.tasks
-        task_total = tasks.total or 0
-        self.query_one("#panel-task-progress", ProgressBar).display = task_total > 0
-        self.query_one("#panel-task-progress", ProgressBar).update(
-            total=task_total or 1, progress=tasks.completed or 0
-        )
-        self.query_one("#panel-task-counts", Static).update(Text.assemble(
-            (f"✓ Completed {tasks.completed}/{task_total}", "green"), "   ",
-            (f"⟳ Running {tasks.running}", "cyan"), "   ",
-            (f"✗ Failed {tasks.failed}", "red"), "   ",
-            (f"… Pending {tasks.pending}", "yellow"),
-        ) if task_total else "暂无计划任务")
 
     def _schedule_panel_refresh(self) -> None:
         if not self._panel_mode:
@@ -705,9 +450,9 @@ class RedLotusTui(App[None]):
             return
         self._run_mode = self._run_mode.next()
         if self._run_mode == TuiRunMode.REVIEW:
-            self.system.review_store.activate(self._on_reviews_changed)
+            self.system.toolkit.review_store.activate(self._on_reviews_changed)
         else:
-            self.system.review_store.deactivate()  # 清空待审查；后续写入直接放行
+            self.system.toolkit.review_store.deactivate()  # 清空待审查；后续写入直接放行
         self._update_pending()
 
     def set_context_usage(self, items: list[ContextUsageItem]) -> None:
@@ -725,8 +470,8 @@ class RedLotusTui(App[None]):
     def refresh_status(self) -> None:
         if not self.is_running:
             return
-        self.query_one("#status", Static).update(self._status_text())
-        controller = self.system._cli_controller
+        self.query_one(RunStatus).refresh()
+        controller = self.controller
         input_box = self.query_one("#input", AgentInput)
         was_disabled = input_box.disabled
         asking = self._ask_future is not None and not self._ask_future.done()
@@ -742,60 +487,13 @@ class RedLotusTui(App[None]):
             or self.system.has_current_turn
         )
         self.query_one("#session-context", Static).update(self._session_context_text())
-        if not input_box.disabled and controller.last_rejected_input and self._ask_future is None:
+        if not input_box.disabled and self.system.last_rejected_input and self._ask_future is None:
             if not input_box.value:
-                input_box.value = controller.last_rejected_input
-                controller.last_rejected_input = None
+                input_box.value = self.system.last_rejected_input
+                self.system.last_rejected_input = None
 
-    def _is_working(self) -> bool:
-        return bool(
-            (self._ask_future is not None and not self._ask_future.done())
-            or self._active_line_handlers > 0
-            or self.system.has_current_turn
-            or self.system._session.queue.pending
-        )
 
-    def _mode_chip(self) -> Text:
-        label, color = {
-            TuiRunMode.REVIEW: (" ⏵ 审查模式 ", "cyan"),
-            TuiRunMode.PASS: (" ⏵⏵ 放行模式 ", "green"),
-            TuiRunMode.GOAL: (" ◎ 目标模式 ", "yellow"),
-        }[self._run_mode]
-        return Text(label, style=f"bold black on {color}")
 
-    def _status_text(self) -> Any:
-        if self._panel_mode:
-            return Text("Panel 总览    ·    每 3 秒刷新    ·    Esc 退出", style="bold")
-        if self._review_mode:
-            return Text(
-                "审查改动中    ·    y 保留    ·    n 撤销    ·    ↑↓ 切换    ·    Esc 退出",
-                style="bold",
-            )
-        text = Text.assemble(self._mode_chip(), "  ")
-        if self._startup_locked and not (
-            self._ask_future is not None and not self._ask_future.done()
-        ):
-            text.append(PREPARING_LABEL, style="dim")
-            return text
-        if not self._is_working():
-            self._working_frame = 0
-            text.append(READY_LABEL, style="dim")
-            if self._run_mode == TuiRunMode.REVIEW and self._pending_count > 0:
-                text.append("       ")
-                text.append(
-                    f" ⚑ 待审查 {self._pending_count} 处 · 按 Ctrl+R 审查 ",
-                    style="bold black on yellow",
-                )
-            return text
-        suffix = WORKING_FRAMES[self._working_frame % len(WORKING_FRAMES)]
-        self._working_frame += 1
-        if self.system.has_current_goal_turn:
-            iteration = self.system.current_goal_iteration
-            label = f"目标循环第 {iteration} 轮" if iteration else "目标循环"
-            text.append(f"{label}{suffix}")
-        else:
-            text.append(f"{WORKING_LABEL}{suffix}")
-        return text
 
     def _write_user_input(self, value: str, *, title="用户", **style) -> None:
         """Echo an admitted user message or question reply with the same panel style."""
@@ -926,12 +624,12 @@ class RedLotusTui(App[None]):
     async def action_submit_urgent(self) -> None:
         """Submit Ctrl+Enter through the same input path with explicit priority."""
         inp = self.query_one("#input", AgentInput)
-        if inp.disabled or self.system._cli_controller.is_transitioning:
+        if inp.disabled or self.controller.is_transitioning:
             return
         await inp.action_submit(urgent=True)
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id != "session-load" or self.system._cli_controller.is_transitioning or self._active_line_handlers:
+        if event.button.id != "session-load" or self.controller.is_transitioning or self._active_line_handlers:
             return
         if self._panel_mode:
             self._exit_panel()
@@ -942,7 +640,7 @@ class RedLotusTui(App[None]):
 
     async def on_input_submitted(self, event: Input.Submitted, *, urgent=False) -> None:
         value = event.value.strip()
-        if self.system._cli_controller.is_transitioning:
+        if self.controller.is_transitioning:
             return
         urgent = urgent or isinstance(event, AgentInput.Submitted) and event.urgent
         if (
@@ -964,7 +662,7 @@ class RedLotusTui(App[None]):
             return
         if self._panel_mode:
             self._exit_panel()
-        if not value.startswith("/") and value.lower() not in self.system._cli_controller.EXIT_COMMANDS:
+        if not value.startswith("/") and value.lower() not in self.controller.EXIT_COMMANDS:
             inner = (
                 urgent and self.system._session.active and self.system._session.accepting_urgent
             )
@@ -984,7 +682,7 @@ class RedLotusTui(App[None]):
 
     async def _handle_line(self, value: str, *, urgent=False) -> None:
         try:
-            action = await self.system.process_cli_line(
+            action = await self.controller.process_line(
                 value,
                 self.state,
                 wait_for_turn=False,
@@ -1001,7 +699,7 @@ class RedLotusTui(App[None]):
         ask_cancelled = self._cancel_pending_ask()
         if self.system.has_current_turn:
             msg = await self.system.stop_current_turn()
-            from redlotus.core.presentation import print_warning
+            from redlotus.ui.presentation import print_warning
 
             print_warning(msg)
         elif not ask_cancelled:
@@ -1009,19 +707,20 @@ class RedLotusTui(App[None]):
 
 
 async def run_textual_tui(
-    system: Any, *, stop_event: asyncio.Event | None = None
+    controller: Any, *, stop_event: asyncio.Event | None = None
 ) -> None:
-    app = RedLotusTui(system, stop_event=stop_event)
+    system = controller.system
+    app = RedLotusTui(controller, stop_event=stop_event)
     try:
         await app.run_async()
     finally:
         app._stop_panel_timer()
         app._cancel_pending_ask()
-        system._cli_controller.set_snapshot_loaded_callback(None)
+        controller.set_snapshot_loaded_callback(None)
         set_output_sink(None)
         system.set_ask_user_handler(None)
         try:
-            system.review_store.deactivate()
+            system.toolkit.review_store.deactivate()
         except Exception:
             pass
         await system.shutdown()

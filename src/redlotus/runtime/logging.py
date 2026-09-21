@@ -1,17 +1,19 @@
 """Project-aware log routing with an injected terminal renderer."""
 from __future__ import annotations
 
-import time
 import threading
-from pathlib import Path
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from functools import partial
+from pathlib import Path
 from typing import Any
+
 from loguru import logger as _lg
 from rich.console import Console
 from rich.text import Text
+
 from redlotus.runtime.resources import active_workspace, logs_dir, safe_name
 
 console_sink = Console().print

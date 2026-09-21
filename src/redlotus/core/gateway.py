@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
-import json
 import asyncio
-from dataclasses import dataclass, asdict
-from pydantic_ai import Agent, FunctionToolset, ModelRequestNode, PromptedOutput, RunContext
-from redlotus.runtime.config import get_agent_run_policy, get_agent_usage_limits
-from pydantic_ai.capabilities import AbstractCapability
-from typing import Any
+import json
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import asdict
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator
+from pydantic_ai import (
+    Agent,
+    FunctionToolset,
+    ModelRequestNode,
+    PromptedOutput,
+    RunContext,
+)
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     FunctionToolResultEvent,
@@ -20,16 +27,17 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
+
+from redlotus.prompts.prompt import load_prompt, with_runtime_context
 from redlotus.runtime import logging as logger
+from redlotus.runtime.config import get_agent_run_policy, get_agent_usage_limits
 from redlotus.runtime.network import (
     InputLimitError,
     ModelInputPolicy,
     ModelTarget,
-    create_model,
     close_all_clients,
+    create_model,
 )
-from redlotus.prompts.prompt import with_runtime_context, load_prompt
-from pydantic import BaseModel, Field, field_validator
 
 
 class RequestPolicy(AbstractCapability):

@@ -1,31 +1,32 @@
 """Memory records, core Markdown and current-session observations."""
 
 from __future__ import annotations
+
 import asyncio
+import hashlib
 import json
-from dataclasses import asdict
-from pydantic_ai.messages import BinaryContent, ImageUrl, ModelMessagesTypeAdapter, TextContent
-from redlotus.runtime.config import settings
-from redlotus.runtime.resources import (
-    iso_utc_now,
-    memory_dir,
-    atomic_write_text,
-    file_lock,
-    project_data_dir,
-)
-from redlotus.runtime.network import ModelInputPolicy
-from redlotus.core.agents import Outcome
-from redlotus.tools.references import ReferenceStore
-from redlotus.tools.registry import tool_result_succeeded
-
-
-from typing import Literal
-from pydantic import BaseModel, Field, computed_field
 import re
 import shutil
+from dataclasses import asdict
 from pathlib import Path
-import hashlib
+from typing import Literal
+
 from filelock import AsyncFileLock
+from pydantic import BaseModel, Field, computed_field
+from pydantic_ai.messages import BinaryContent, ImageUrl, TextContent
+
+from redlotus.runtime.config import settings
+from redlotus.runtime.network import ModelInputPolicy
+from redlotus.runtime.resources import (
+    atomic_write_text,
+    file_lock,
+    iso_utc_now,
+    memory_dir,
+    project_data_dir,
+)
+from redlotus.sessions.context import Outcome
+from redlotus.tools.references import ReferenceStore
+from redlotus.tools.registry import tool_result_succeeded
 
 
 class MemoryConflict(ValueError):

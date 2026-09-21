@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from functools import partial
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 from pydantic_ai import BinaryContent
 
-from redlotus.runtime import logging as logger
-from redlotus.tools.interaction import UserMessage
 from redlotus.api.base import BotBase
+from redlotus.runtime import logging as logger
+from redlotus.sessions.control import UserMessage
 
 if TYPE_CHECKING:
     from wechatbot import WeChatBot

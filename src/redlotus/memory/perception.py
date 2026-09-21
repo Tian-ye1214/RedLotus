@@ -1,35 +1,37 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-from redlotus.memory.records import (
-    ObservedTurn,
-    WindowManifest,
-    PerceptionResult,
-    CREDENTIAL_PATTERN,
-    MemoryRecord,
-)
-from redlotus.prompts.prompt import window_prompt_content, load_prompt, with_runtime_context
-
 import asyncio
-import json
 import hashlib
+import json
 import time
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict
 from typing import Literal
 
+from pydantic import BaseModel, Field
 from pydantic_ai import ImageUrl, ModelRetry, ToolReturn, capture_run_messages
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.toolsets import FunctionToolset
 
-from redlotus.runtime.config import get_agent_usage_limits, settings
-from redlotus.runtime.resources import iso_utc_now, WorkspaceContext
-from redlotus.core.gateway import create_agent
-from redlotus.runtime.network import create_model, ModelTarget
-from redlotus.tools.references import ReferenceFile, ReferenceStore
-from redlotus.core.agents import AgentRegistry, SubagentFactory, SubagentSpec
+from redlotus.memory.records import (
+    CREDENTIAL_PATTERN,
+    MemoryRecord,
+    ObservedTurn,
+    PerceptionResult,
+    WindowManifest,
+)
 from redlotus.memory.store import MemoryStore
+from redlotus.prompts.prompt import (
+    load_prompt,
+    window_prompt_content,
+    with_runtime_context,
+)
+from redlotus.runtime.config import get_agent_usage_limits, settings
+from redlotus.runtime.network import ModelTarget, create_model
+from redlotus.runtime.resources import WorkspaceContext, iso_utc_now
+from redlotus.sessions.context import SubagentSpec
+from redlotus.tools.references import ReferenceFile, ReferenceStore
 
 
 class PerceptionTiming(AbstractCapability):
@@ -60,9 +62,11 @@ class MemoryPerception:
     def __init__(
         self,
         workspace: WorkspaceContext,
-        factory: SubagentFactory,
-        registry: AgentRegistry,
+        factory,
+        registry,
+        *, create_agent,
     ):
+        self.create_agent = create_agent
         self.workspace, self.factory, self.registry = (
             workspace,
             factory,
@@ -310,7 +314,7 @@ class MemoryPerception:
 
             async def run():
                 tools = [search_memory, read_evidence, read_reference]
-                agent = create_agent(
+                agent = self.create_agent(
                     target,
                     instructions=instructions,
                     output_type=PerceptionResult,

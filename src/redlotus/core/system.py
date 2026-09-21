@@ -3,70 +3,53 @@
 from __future__ import annotations
 
 import asyncio
-import traceback
+import inspect
 import json
 import time
 import uuid
-import inspect
 from collections.abc import Callable
+from contextlib import asynccontextmanager, nullcontext
 from typing import Any, Tuple
-from redlotus.tools.interaction import UserMessage
-from redlotus.tools.manager_tools import TaskManager, TaskStatus, manager_tools
-from redlotus.prompts.prompt import load_prompt
-from redlotus.core.gateway import create_coordinator_agent
-from redlotus.tools.registry import SkillsManager
-from redlotus.tools.base_tools import BasicToolkit
-from redlotus.tools.worker_tools import WorkerOrchestrator, worker_tools
+
+from redlotus.core.agents import AgentRegistry, SubagentFactory
+from redlotus.core.gateway import AgentRunner, create_coordinator_agent
 from redlotus.core.history import (
-    ChatHistory,
-    messages_safe_for_new_prompt,
+    compress_histories,
     prewarm_effective_max_contexts_by_role_async,
-    prepare_compression,
-    repair_interrupted_tool_calls,
 )
-from redlotus.core.session import SessionFile, SessionController
+from redlotus.core.tasks import TaskManager, TaskStatus, run_goal_loop
+from redlotus.memory.service import MemoryService
+from redlotus.runtime import logging as logger
+from redlotus.runtime.config import get_agent_usage_limits
 from redlotus.runtime.resources import (
-    current_workspace,
-    session_data_dir,
-    finish_file_io,
     WorkspaceContext,
+    current_workspace,
+    finish_file_io,
+    session_data_dir,
     workspace_context,
 )
-from redlotus.runtime.config import get_agent_usage_limits, settings
-from redlotus.core.presentation import (
-    supports_model_stream,
-    TextEventStreamHandler,
-    update_output,
-    finish_model_stream,
-    print_phase,
-    print_warning,
-    show_model_output,
-    format_user_log_text,
+from redlotus.sessions.context import (
+    ChatHistory,
+    messages_safe_for_new_prompt,
+    repair_interrupted_tool_calls,
 )
-from redlotus.runtime import logging as logger
-from contextlib import asynccontextmanager, nullcontext
-from pydantic_ai.exceptions import ModelHTTPError
-from redlotus.core.agents import AgentRegistry, AgentRunner, SubagentFactory
-from redlotus.core.console import AgentCliController, CliSessionState
-from redlotus.core.cli_commands import (
-    GoalSignal, GoalParseResult, parse_goal_output, summarize_last_coordinator_turn,
-    build_goal_iteration_prompt, run_goal_loop,
-)
-from redlotus.memory.service import MemoryService
+from redlotus.sessions.control import SessionController, UserMessage
+from redlotus.sessions.storage import SessionFile
+from redlotus.tools.base_tools import BasicToolkit
+from redlotus.tools.registry import SkillsManager
+from redlotus.tools.worker_tools import WorkerOrchestrator, manager_tools, worker_tools
 
 
-def _make_coordinator_stream_handler(system) -> TextEventStreamHandler | None:
-    if not supports_model_stream():
+def _make_coordinator_stream_handler(system) :
+    if not system.presentation.supports_model_stream():
         return None
     session, generation = system.session_key, system._session.generation
-    return TextEventStreamHandler(
+    return system.presentation.TextEventStreamHandler(
         title="Coordinator",
         is_current=lambda: (system.session_key, system._session.generation) == (session, generation),
     )
 
 
-def _prompt_for_role(text: str, attachments: list):
-    return [text, *attachments] if attachments else text
 
 
 class AgentSystem:
@@ -75,16 +58,19 @@ class AgentSystem:
     def __init__(
         self,
         *,
+        presentation,
         workspace: WorkspaceContext | None = None,
         owner_memory_allowed: bool = True,
         exit_deadline=None,
         input_controller: SessionController | None = None,
     ):
+        self.presentation = presentation
+        self.last_rejected_input = None
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
         logger.activate_log_dir(logger.prepare_log_dir(self.workspace))
         self._owner_memory_allowed = owner_memory_allowed
         self._session = input_controller or SessionController()
-        self._registry = AgentRegistry()
+        self.registry = AgentRegistry()
         self._shutdown_done = False
         self._shutdown_task: asyncio.Task | None = None
         self._exit_deadline = exit_deadline
@@ -99,9 +85,9 @@ class AgentSystem:
             owner_memory_allowed=owner_memory_allowed,
             factory=self._factory,
         )
-        self._toolkit = BasicToolkit(
+        self.toolkit = BasicToolkit(
             self._skills_manager,
-            workspace=self.workspace,
+            workspace=self.workspace, show_diff=presentation.show_file_diff,
         )
         self._task_manager = TaskManager(
             persist=self._save_tasks,
@@ -109,27 +95,23 @@ class AgentSystem:
         )
         self._planning_lock = asyncio.Lock()
         self._orchestrator = WorkerOrchestrator(
-            self._toolkit,
+            self.toolkit,
             self._task_manager,
             memory=self._memory,
             memory_injection_getter=lambda: self._memory.injection_for_session(),
-            registry=self._registry,
+            registry=self.registry,
             persist=self._durable_write,
             factory=self._factory,
         )
         self._memory.bind_runner(
-            self._registry, input_source=lambda: self._session.user_inputs
+            self.registry, input_source=lambda: self._session.user_inputs
         )
         self._session_file = None
         self._context_prewarmed = False
         self._coordinator_agent = None
         self._current_turn: dict[str, Any] | None = None
         self._cli_turn_id: str | None = None
-        self._session_key: str | None = None
-        self._compression_future = None
-        self._storage_retry = asyncio.Event()
-        self._storage_paused = False
-        self._cli_controller = AgentCliController(self)
+        self.session_key: str | None = None
 
     async def bind_session(self, session_key: str, *, storage=None, generation=None, task_title=None) -> None:
         previous = self._session_file
@@ -142,8 +124,8 @@ class AgentSystem:
             raise ValueError("会话身份或项目不匹配")
         storage.acquire_use()
         try:
-            await self._registry.ensure_agent(session_key, "coordinator")
-            await self._registry.ensure_agent(session_key, "manager")
+            await self.registry.ensure_agent(session_key, "coordinator")
+            await self.registry.ensure_agent(session_key, "manager")
             if generation is not None and (generation != self._session.generation or self._shutdown_done):
                 raise ValueError("加载已取消；目标会话未提交")
             if task_title is not None:
@@ -158,7 +140,7 @@ class AgentSystem:
             self._coordinator_agent = None
             self._memory.unbind_session()
             self._memory.reset_injection_snapshot()
-        self._session_key, self._session_file = session_key, storage
+        self.session_key, self._session_file = session_key, storage
         self._memory.bind_session(storage)
         self._orchestrator.session_file = storage
         self._orchestrator.set_session_key(session_key)
@@ -166,48 +148,42 @@ class AgentSystem:
     async def end_session_agents(self, session_key: str) -> None:
         await self._orchestrator.factory.cancel_session(session_key)
         self._session.reset(discard=True)
-        await self._registry.cancel_session(session_key)
-        await self._registry.remove_session(session_key)
-        if self._session_key == session_key:
+        await self.registry.cancel_session(session_key)
+        await self.registry.remove_session(session_key)
+        if self.session_key == session_key:
             self._memory.unbind_session()
             self._session_file.release_use()
-            self._session_key = None
+            self.session_key = None
             self._session_file = None
             self._coordinator_agent = None
             self._memory.reset_injection_snapshot()
             self._orchestrator.set_session_key(None)
             self._orchestrator.session_file = None
-            self._storage_paused = False
+            self._session.storage_paused = False
 
     async def reset_session(self, *, close_memory=False) -> None:
         """Release resources before discarding a conversation's recoverable state."""
         self._session.reset(discard=True)
-        update_output("clear_model_stream")
+        self.presentation.update_output("clear_model_stream")
         self._session.queue.discard()
         await self.cancel_current_turn()
         await self._factory.cancel_all()
-        await self._toolkit.close()
+        await self.toolkit.close()
         if close_memory:
             await self._memory.store.close()
-        if self._session_key:
-            await self.end_session_agents(self._session_key)
+        if self.session_key:
+            await self.end_session_agents(self.session_key)
         self._task_manager.reset()
-        self._toolkit.reset_task_directory()
+        self.toolkit.reset_task_directory()
         self._manager_history.reset()
         self._session_file = None
         self._memory.reset_injection_snapshot()
         self._memory.unbind_session()
-        self._storage_paused = False
+        self._session.storage_paused = False
         self._session.take_notices()
         self._session.queue.discard()
 
-    @property
-    def registry(self) -> AgentRegistry:
-        return self._registry
 
-    @property
-    def session_key(self) -> str | None:
-        return self._session_key
 
     @property
     def has_current_turn(self) -> bool:
@@ -222,102 +198,35 @@ class AgentSystem:
     def has_current_goal_turn(self) -> bool:
         return bool(self._current_turn and self._current_turn.get("mode") == "goal")
 
-    @property
-    def is_compressing(self):
-        return self._compression_future is not None and not self._compression_future.done()
 
-    @property
-    def storage_paused(self):
-        return self._storage_paused
 
-    async def retry_saved_state(self):
-        """A new ordinary input permits a paused disk transaction to retry."""
-        self._storage_retry.set()
 
-    async def _durable_write(self, operation, *, cancelling=False):
-        """Pause failed I/O without repeating model or tool execution."""
-        with workspace_context(self.workspace):
-            storage = self._session_file
-            while True:
-                self._storage_retry.clear()
-                try:
-                    if storage is not None:
-                        await finish_file_io(asyncio.to_thread(storage.retry_pending))
-                    result = await finish_file_io(asyncio.to_thread(operation))
-                    if inspect.isawaitable(result):
-                        result = await result
-                    self._storage_paused = False
-                    return result
-                except OSError as exc:
-                    self._storage_paused = True
-                    if cancelling or asyncio.current_task().cancelling():
-                        raise asyncio.CancelledError() from exc
-                    print_warning(f"保存失败，任务已暂停，输入已保留: {exc}。恢复存储后提交普通输入重试。")
-                    await self._storage_retry.wait()
 
-    async def cancel_compression(self):
-        """Invalidate the queued control operation without cancelling ordinary tasks."""
-        future = self._compression_future
-        if future is not None and not future.done():
-            self._session.reset()
-            future.cancel()
-            await self._session.queue.cancel()
 
-    async def compress_context(self, history):
-        """Serialize detached compression and persist its candidate before publishing it."""
-        if self.is_compressing:
-            return ["上下文压缩正在处理中。"]
-        if self.has_current_turn or self._session.queue.pending:
-            return ["当前任务正在运行，请先停止或等待完成。"]
-        future = self._session.queue.submit(lambda: self._compress_context(history))
-        self._compression_future = future
-        try:
-            return await asyncio.shield(future)
-        except asyncio.CancelledError:
-            return ["上下文压缩已取消，未提交候选不再写回。"]
-        finally:
-            if self._compression_future is future:
-                self._compression_future = None
 
     async def _compress_context(self, history):
-        from redlotus.core.agents import make_agent_id
+        from redlotus.sessions.context import make_agent_id
 
         storage, generation = self._session_file, self._session.generation
-        sources = {"coordinator": history, "manager": self._manager_history}
-        revisions = {role: source.revision for role, source in sources.items()}
-        candidates = {}
-
-        def current():
-            return (storage is self._session_file and generation == self._session.generation
-                    and all(source.revision == revisions[role] for role, source in sources.items()))
-
-        for role, source in sources.items():
-            candidates[role] = await prepare_compression(
-                source, role=role, force=True, retain_tail=False,
-                task_state=self.structured_task_status(),
-            )
-            if not current():
-                return ["会话已改变，压缩候选已丢弃。"]
-        if not any(candidates.values()):
-            return ["当前上下文无需压缩。"]
         if storage is None:
             return ["当前没有可保存的会话，未应用压缩。"]
-        coordinator = candidates["coordinator"] or history
-        manager = candidates["manager"] or self._manager_history
-        if manager.messages:
-            await self._durable_write(lambda: storage.role_file("manager").save_context(
-                manager.messages, turn_id=None,
-                agent_id=make_agent_id(storage.session_id, "manager", "planning"),
-            ))
-        await self._durable_write(lambda: storage.save_context(
-            coordinator.messages, turn_id=None,
-        ))
-        if not current():
-            return ["会话已改变，压缩候选不再应用。"]
-        for role, candidate in candidates.items():
-            if candidate is not None:
-                sources[role].set_messages(candidate.messages)
-        return [f"{role}: {'已压缩并保存' if candidate else '无需压缩'}" for role, candidate in candidates.items()]
+        sources = {"coordinator": history, "manager": self._manager_history}
+
+        async def persist(candidates):
+            for role in reversed(sources):
+                candidate = candidates[role] or sources[role]
+                if role != "coordinator" and not candidate.messages:
+                    continue
+                target = storage if role == "coordinator" else storage.role_file(role)
+                identity = {} if role == "coordinator" else {
+                    "agent_id": make_agent_id(storage.session_id, role, "planning"),
+                }
+                await self._durable_write(lambda: target.save_context(candidate.messages, turn_id=None, **identity))
+
+        return await compress_histories(
+            sources, task_state=self._task_manager.structured_status(), persist=persist,
+            is_current=lambda: storage is self._session_file and generation == self._session.generation,
+        )
 
     @property
     def current_goal_iteration(self) -> int:
@@ -325,8 +234,6 @@ class AgentSystem:
             return 0
         return int(self._current_turn.get("goal_iteration") or 0)
 
-    def new_cli_session_state(self) -> CliSessionState:
-        return self._cli_controller.new_session_state()
 
     async def shutdown(self) -> None:
         if self._shutdown_task is None:
@@ -341,12 +248,12 @@ class AgentSystem:
         self._session.queue.discard()
         self._factory.stop()
         await self.cancel_current_turn()
-        if self._session_key:
-            await self.end_session_agents(self._session_key)
-        await self._registry.cancel_all()
+        if self.session_key:
+            await self.end_session_agents(self.session_key)
+        await self.registry.cancel_all()
         await self._factory.close()
         await self._memory.close()
-        await self._toolkit.close()
+        await self.toolkit.close()
         logger.info("[lifecycle] shutdown complete")
 
     def _on_turn_task_done(self, done_task: asyncio.Task) -> None:
@@ -395,7 +302,6 @@ class AgentSystem:
                 message,
                 history,
                 goal_mode=goal_mode,
-                conversation_log_hint=message.text[:40],
             )
         )
         self._current_turn = {
@@ -408,33 +314,9 @@ class AgentSystem:
         task.add_done_callback(self._on_turn_task_done)
         return task
 
-    def _handle_turn_error(self, e: Exception) -> None:
-        self.last_turn_error = e
-        from redlotus.runtime.network import InputLimitError
-
-        if isinstance(e, InputLimitError):
-            print_warning(str(e))
-            return
-        if isinstance(e, ModelHTTPError):
-            body = e.body or {}
-            code = body.get("code", "") if isinstance(body, dict) else ""
-            if code == "data_inspection_failed":
-                print_warning(
-                    "模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。"
-                    "请尝试换一种表达方式，或 /clear 清空上下文后重试。"
-                )
-            else:
-                message = f"模型请求错误 (HTTP {e.status_code}): {e}"
-                if e.status_code in (401, 403):
-                    message += "\n请检查实际生效的 API 凭据，或使用 /api 配置后重试。"
-                print_warning(message)
-                logger.error("详细信息:\n%s", traceback.format_exc(), file_only=True)
-            return
-        print_warning(f"未预期的系统错误: {e}")
-        logger.error("详细信息:\n%s", traceback.format_exc())
 
     async def _run_user_turn(
-        self, turn_id, message, history, *, goal_mode=False, conversation_log_hint=""
+        self, turn_id, message, history, *, goal_mode=False
     ):
         def set_iteration(iteration):
             if self._current_turn and self._current_turn["turn_id"] == turn_id:
@@ -448,7 +330,6 @@ class AgentSystem:
                         message=message,
                         history=history,
                         turn_id=turn_id,
-                        conversation_log_hint=conversation_log_hint,
                         set_iteration=set_iteration,
                     )
             else:
@@ -456,15 +337,12 @@ class AgentSystem:
                     message,
                     history,
                     turn_id=turn_id,
-                    conversation_log_hint=conversation_log_hint,
                 )
         except asyncio.CancelledError:
             logger.info("用户回合已取消 turn_id=%s", turn_id)
         except Exception as exc:
             self._handle_turn_error(exc)
 
-    async def ask_user(self, question: str) -> str:
-        return await self._toolkit.ask_user(question)
 
     async def wait_for_memory_quiescent(self, timeout: float = 15.0) -> bool:
         async def drain():
@@ -495,7 +373,7 @@ class AgentSystem:
                 await self.record_user_input(uuid.uuid4().hex, UserMessage(answer))
             return answer
 
-        self._toolkit.set_ask_user_handler(recorded_answer if handler else None)
+        self.toolkit.set_ask_user_handler(recorded_answer if handler else None)
 
     async def record_user_input(self, identity, message):
         """Persist a consumed input against its bound session, including tool questions."""
@@ -503,20 +381,12 @@ class AgentSystem:
         if storage is not None and self._session.active:
             await self._durable_write(lambda: storage.record_input(identity, message))
 
-    @property
-    def review_store(self):
-        return self._toolkit.review_store
 
-    def set_task_directory(self, task_name: str):
-        self._toolkit.set_task_directory(task_name)
 
-    async def generate_task_title(self, user_text: str) -> str:
-        from redlotus.core.gateway import generate_task_title
-
-        return await generate_task_title(user_text)
 
     def record_control_result(self, command, target, status, *, accepted):
         from pydantic_ai.messages import TextContent
+
         from redlotus.runtime.resources import iso_utc_now
 
         receipt = dict(
@@ -524,7 +394,7 @@ class AgentSystem:
             target=target,
             status=status,
             accepted=accepted,
-            session_id=self._session_key,
+            session_id=self.session_key,
             observed_at=iso_utc_now(),
         )
         encoded = json.dumps(receipt, ensure_ascii=False)
@@ -532,7 +402,7 @@ class AgentSystem:
             try:
                 self._session_file.update(metadata={"last_control_result": receipt})
             except OSError as exc:
-                print_warning(f"控制回执尚未保存: {exc}")
+                self.presentation.print_warning(f"控制回执尚未保存: {exc}")
         self._session.add_notice(
             [
                 TextContent(
@@ -558,7 +428,7 @@ class AgentSystem:
             tasks.restore(metadata.get("tasks", []))
             messages = storage.model_messages()
             repaired = repair_interrupted_tool_calls(messages)
-            from redlotus.core.agents import make_agent_id
+            from redlotus.sessions.context import make_agent_id
             for task in tasks.tasks.values():
                 task.worker_chat_history.set_messages(repair_interrupted_tool_calls(storage.role_messages(
                     "worker", agent_id=make_agent_id(storage.session_id, "worker", task.id),
@@ -578,27 +448,27 @@ class AgentSystem:
                 )))
             if generation != self._session.generation or self._shutdown_done:
                 raise ValueError("加载已取消；目标会话未提交")
-            previous_key = self._session_key
+            previous_key = self.session_key
             await self.bind_session(storage.session_id, storage=storage, generation=generation, task_title=title)
             self._session.reset(discard=True)
             self._session.queue.discard()
-            update_output("clear_model_stream")
+            self.presentation.update_output("clear_model_stream")
             state.history, state.is_first_input = history, False
             self._manager_history = manager_history
             self._task_manager.tasks = tasks.tasks
-            self._toolkit.reset_task_directory()
+            self.toolkit.reset_task_directory()
             if task_name:
-                self._toolkit.set_task_directory(task_name)
+                self.toolkit.set_task_directory(task_name)
             self._current_attachments = []
-            self._storage_paused = False
+            self._session.storage_paused = False
             async def release_previous():
                 results = await asyncio.gather(
-                    self._factory.cancel_all(), self._toolkit.close(), return_exceptions=True,
+                    self._factory.cancel_all(), self.toolkit.close(), return_exceptions=True,
                 )
                 if previous_key and previous_key != storage.session_id:
                     try:
-                        await self._registry.cancel_session(previous_key)
-                        await self._registry.remove_session(previous_key)
+                        await self.registry.cancel_session(previous_key)
+                        await self.registry.remove_session(previous_key)
                     except Exception as exc:
                         results.append(exc)
                 return results
@@ -610,14 +480,12 @@ class AgentSystem:
                 results = await cleanup
             for result in results:
                 if isinstance(result, BaseException):
-                    print_warning(f"会话已加载，但旧资源释放未完成: {result}")
+                    self.presentation.print_warning(f"会话已加载，但旧资源释放未完成: {result}")
             return repaired
         finally:
             if self._session_file is not storage:
                 storage.release_use()
 
-    def structured_task_status(self) -> str:
-        return self._task_manager.structured_status()
 
     def add_urgent(self, text: str) -> bool:
         if not self._session.accepting_urgent:
@@ -631,7 +499,7 @@ class AgentSystem:
         admission = admission or self._session.admit(self.workspace, urgent=True)
         if not admission.urgent or not self._session.accepts(admission):
             return False
-        store = self._toolkit._references
+        store = self.toolkit._references
 
         async def prepare():
             try:
@@ -643,10 +511,10 @@ class AgentSystem:
                 return message if self._session.accepts(admission) else None
             except (OSError, ValueError) as exc:
                 if self._session.accepts(admission):
-                    self._cli_controller.last_rejected_input = (
+                    self.last_rejected_input = (
                         message.original_text or message.text
                     )
-                    print_warning(str(exc))
+                    self.presentation.print_warning(str(exc))
                 return None
 
         self._session.queue_urgent(admission, prepare())
@@ -701,16 +569,16 @@ class AgentSystem:
             factory=self._factory,
         )
         memory.bind_runner(
-            self._registry, input_source=lambda: self._session.user_inputs
+            self.registry, input_source=lambda: self._session.user_inputs
         )
         toolkit = BasicToolkit(
-            skills, workspace=workspace,
+            skills, workspace=workspace, show_diff=self.presentation.show_file_diff,
         )
-        toolkit.set_ask_user_handler(self._toolkit._ask_user_handler)
-        review_store = self.review_store
+        toolkit.set_ask_user_handler(self.toolkit._ask_user_handler)
+        review_store = self.toolkit.review_store
         toolkit._review_store, toolkit._file_lock = review_store, review_store._lock
         await self.reset_session(close_memory=True)
-        self.workspace, self._memory, self._toolkit, self._skills_manager = workspace, memory, toolkit, skills
+        self.workspace, self._memory, self.toolkit, self._skills_manager = workspace, memory, toolkit, skills
         self._coordinator_agent = None
         from redlotus.runtime.resources import set_workspace
 
@@ -729,14 +597,14 @@ class AgentSystem:
             turn_id=turn_id,
         ):
             with workspace_context(self.workspace):
-                await self._toolkit._references.prepare_message(message)
-                if self._session_key is None:
+                await self.toolkit._references.prepare_message(message)
+                if self.session_key is None:
                     await self.bind_session(uuid.uuid4().hex)
                 await self.record_user_input(turn_id, message)
                 if not self._session_file.metadata.get("title"):
                     await self._durable_write(lambda: self._session_file.update(metadata={"title": message.text or "session"}))
                 job = await self._durable_write(lambda: self._memory.begin_turn(
-                    self._session_key,
+                    self.session_key,
                     turn_id,
                     self._session.user_inputs[0],
                     references=message.references,
@@ -771,7 +639,7 @@ class AgentSystem:
                         try:
                             await finish()
                         except OSError as exc:
-                            print_warning(f"取消状态尚未保存，已提交进度保留: {exc}")
+                            self.presentation.print_warning(f"取消状态尚未保存，已提交进度保留: {exc}")
                     else:
                         await self._durable_write(finish)
                     if not self._shutdown_done:
@@ -790,64 +658,12 @@ class AgentSystem:
             The final report or an explicit incomplete-plan error with task results.
         """
         async with self._planning_lock:
-            return await self._execute_plan(user_input, continue_from_previous)
-
-    async def _execute_plan(self, user_input: str, continue_from_previous: bool) -> str:
-        logger.info("[用户]\n%s", user_input)
-        tid = self._cli_turn_id
-
-        planning_tools = manager_tools(self._task_manager, self._toolkit, self._memory)
-        attachments = self._current_attachments
-
-        if not continue_from_previous:
-            self._task_manager.reset()
-            await self._task_manager.save()
-            self._manager_history.reset()
-            print_phase("第一阶段: Manager 规划任务列表")
-            tmpl = await asyncio.to_thread(load_prompt, "manager_planning_new.md")
-            planning_text = tmpl.format(user_input=user_input)
-        else:
-            print_phase("第一阶段: 基于用户反馈调整任务")
-            current_todo = self._task_manager.get_todo_list()
-            tmpl = await asyncio.to_thread(load_prompt, "manager_planning_continue.md")
-            planning_text = tmpl.format(
-                user_input=user_input, current_todo=current_todo
+            return await self._task_manager.execute_plan(
+                user_input, continue_from_previous, orchestrator=self._orchestrator,
+                history=self._manager_history, tools=manager_tools(self._task_manager, self.toolkit, self._memory),
+                attachments=self._current_attachments, turn_id=self._cli_turn_id, presentation=self.presentation,
             )
 
-        planning_prompt = _prompt_for_role(planning_text, attachments)
-        result = await self._orchestrator.plan(
-            planning_prompt, self._manager_history, turn_id=tid, tools=planning_tools
-        )
-        show_model_output(result, title="Manager 规划")
-
-        print_phase("第二阶段: 多Worker并行执行任务")
-
-        final_summary = await self._orchestrator.execute_all_tasks_parallel(
-            user_input, attachments=attachments, turn_id=tid
-        )
-        show_model_output(final_summary, title="任务汇总", markdown=False)
-
-        print_phase("第三阶段: 生成最终报告")
-
-        summary_tmpl = await asyncio.to_thread(load_prompt, "manager_summary.md")
-        summary_text = summary_tmpl.format(
-            user_input=user_input, final_summary=final_summary
-        )
-        summary_prompt = _prompt_for_role(summary_text, attachments)
-        try:
-            final_text = await self._orchestrator.plan(
-                summary_prompt, self._manager_history, turn_id=tid
-            )
-            show_model_output(final_text, title="最终报告")
-            report = final_text.strip() or final_summary.strip()
-        except Exception as exc:
-            logger.warning("Manager summary unavailable: %s", exc)
-            report = final_summary
-        return (
-            report
-            if self._task_manager.completed
-            else "Error: Plan is incomplete.\n" + report
-        )
 
     async def resume_task(self, task_id: str) -> str:
         """Resume a blocked planned task by ID after the user supplies new input.
@@ -863,7 +679,7 @@ class AgentSystem:
             result = await self._task_manager.resume(task_id)
             if result.startswith("Error:"):
                 return result
-            from redlotus.core.agents import make_agent_id
+            from redlotus.sessions.context import make_agent_id
             task = self._task_manager.tasks[task_id]
             task.worker_chat_history.set_messages(repair_interrupted_tool_calls(
                 await asyncio.to_thread(self._session_file.role_messages, "worker",
@@ -899,8 +715,6 @@ class AgentSystem:
         message: "UserMessage",
         history: "ChatHistory",
         *,
-        conversation_log_hint: str = "",
-        conversation_log_extra: dict | None = None,
         turn_id: str | None = None,
         output_transform: Callable[[str], str] | None = None,
         _inside_goal: bool = False,
@@ -917,7 +731,7 @@ class AgentSystem:
 
             self._session.open_inbox()
 
-            logger.info_file_only("[用户]\n%s", format_user_log_text(message))
+            logger.info_file_only("[用户]\n%s", self.presentation.format_user_log_text(message))
 
             routing_tools = [
                 self.execute_task_with_manager,
@@ -925,8 +739,10 @@ class AgentSystem:
                 self.resume_task,
             ]
             if self._coordinator_agent is None:
-                from redlotus.prompts.prompt import session_prompt_from_history
-                from redlotus.prompts.prompt import memory_from_session_prompt
+                from redlotus.prompts.prompt import (
+                    memory_from_session_prompt,
+                    session_prompt_from_history,
+                )
 
                 restored = session_prompt_from_history(history.messages)
                 if restored is not None:
@@ -937,31 +753,24 @@ class AgentSystem:
                     self._skills_manager,
                     self._memory.injection_for_session(),
                     routing_tools if self._owner_memory_allowed else [],
-                    worker_tools(self._toolkit, self._memory)
+                    worker_tools(self.toolkit, self._memory)
                     if self._owner_memory_allowed
                     else [],
-                    self.structured_task_status,
+                    self._task_manager.structured_status,
                     instructions=restored,
                     persist_context=self._commit_request_context,
                 )
             agent = self._coordinator_agent
 
             start_time = time.time()
-            coord_aid = await self._registry.ensure_agent(
-                self._session_key, "coordinator"
+            coord_aid = await self.registry.ensure_agent(
+                self.session_key, "coordinator"
             )
             stream_handler = (
                 None
                 if output_transform is not None
                 else _make_coordinator_stream_handler(self)
             )
-            extra = {
-                **(conversation_log_extra or {}),
-                "kind": "coordinator",
-                "turn_id": turn_id,
-                "origin": "goal_instruction" if _inside_goal else "user",
-            }
-
             async def _save_coordinator_node(run: Any) -> None:
                 candidate = ChatHistory()
                 candidate.set_messages(list(run.all_messages()))
@@ -969,7 +778,7 @@ class AgentSystem:
                 history.set_messages(candidate.messages)
 
             try:
-                result = await self._registry.run(
+                result = await self.registry.run(
                     lambda: AgentRunner().run(
                         agent=agent,
                         prompt=message.to_prompt(),
@@ -986,7 +795,7 @@ class AgentSystem:
             except BaseException as exc:
                 self._session.close_inbox()
                 if stream_handler is not None and stream_handler._is_current():
-                    update_output("end_model_stream", "已停止" if isinstance(exc, asyncio.CancelledError) else "执行失败")
+                    self.presentation.update_output("end_model_stream", "已停止" if isinstance(exc, asyncio.CancelledError) else "执行失败")
                 raise
             if stream_handler is not None and not stream_handler._is_current():
                 raise asyncio.CancelledError("The reply belongs to a previous session.")
@@ -997,9 +806,9 @@ class AgentSystem:
                 else raw_output
             )
             if stream_handler is not None:
-                finish_model_stream(output, title="Coordinator")
+                self.presentation.finish_model_stream(output, title="Coordinator")
             else:
-                show_model_output(output, title="Coordinator")
+                self.presentation.show_model_output(output, title="Coordinator")
             history.update(result)
             elapsed = time.time() - start_time
 
@@ -1007,7 +816,7 @@ class AgentSystem:
             await self._checkpoint(history, turn_id)
             worker_storage = self._session_file.role_file("worker", create=False)
             if worker_storage is not None:
-                from redlotus.core.agents import make_agent_id
+                from redlotus.sessions.context import make_agent_id
                 retained = {
                     make_agent_id(self.session_key, "worker", task.id)
                     for task in self._task_manager.tasks.values() if task.status != TaskStatus.COMPLETED
@@ -1020,11 +829,11 @@ class AgentSystem:
     async def _commit_request_context(self, messages):
         """Commit an automatic checkpoint before the SDK can send or adopt it."""
         storage = self._session_file
-        session_id = self._session_key
+        session_id = self.session_key
         candidate = ChatHistory()
         candidate.set_messages(messages)
         await self._checkpoint(candidate, self._cli_turn_id)
-        if storage is not self._session_file or session_id != self._session_key:
+        if storage is not self._session_file or session_id != self.session_key:
             raise asyncio.CancelledError("Session changed during checkpoint persistence.")
 
     async def _save_tasks(self, tasks):
@@ -1039,28 +848,16 @@ class AgentSystem:
             turn_id=turn_id,
         ))
 
-    async def prepare_cli_session(self) -> tuple[str, ...]:
-        return await self._cli_controller.prepare_session()
 
-    async def process_cli_line(
-        self,
-        raw_input: str,
-        state: CliSessionState,
-        *,
-        wait_for_turn: bool,
-        goal_mode: bool = False,
-        input_id: str | None = None,
-        urgent: bool = False,
-    ) -> str:
-        return await self._cli_controller.process_line(
-            raw_input,
-            state,
-            wait_for_turn=wait_for_turn,
-            goal_mode=goal_mode,
-            input_id=input_id,
-            urgent=urgent,
-        )
 
-    async def run_interactive(self, *, stop_event: asyncio.Event | None = None) -> None:
-        """Run the interactive CLI/TUI."""
-        await self._cli_controller.run_interactive(stop_event=stop_event)
+
+    async def _durable_write(self, operation, *, cancelling=False):
+        with workspace_context(self.workspace):
+            return await self._session.write(operation, storage=self._session_file, cancelling=cancelling)
+
+    async def compress_context(self, history):
+        return await self._session.compress(lambda: self._compress_context(history), busy=self.has_current_turn)
+
+    def _handle_turn_error(self, error):
+        self.last_turn_error = error
+        self.presentation.handle_turn_error(error)

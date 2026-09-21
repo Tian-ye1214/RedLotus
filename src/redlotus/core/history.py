@@ -5,164 +5,33 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
 from pydantic_ai.messages import (
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     TextContent,
-    ToolReturnPart,
     UserPromptPart,
-    ModelMessagesTypeAdapter,
 )
+
+from redlotus.prompts.prompt import load_prompt
+from redlotus.runtime import logging as logger
 from redlotus.runtime.config import (
+    ConfigError,
     get_context_config,
     get_context_profile_roles,
     get_model_and_params,
-    settings,
-    ConfigError,
 )
-from redlotus.runtime import logging as logger
 from redlotus.runtime.network import (
     _lookup_openrouter_meta,
     lookup_model_context,
-    lookup_model_max_output_tokens,
 )
-from redlotus.prompts.prompt import load_prompt
-from dataclasses import dataclass, field
-from decimal import Decimal
-from redlotus.core.session import SessionFile, _response_id, _response_usage
-
-
-def _part_kind(part) -> str:
-    return str(getattr(part, "part_kind", "") or "")
-
-
-def _tool_key(part) -> str:
-    return str(
-        getattr(part, "tool_call_id", None) or getattr(part, "tool_name", "") or ""
-    )
-
-
-def _has_user_prompt(message) -> bool:
-    return any(
-        _part_kind(part) == "user-prompt"
-        for part in getattr(message, "parts", ()) or ()
-    )
-
-
-def messages_safe_for_new_prompt(messages: list) -> list:
-    pending: dict[str, int] = {}
-    for index, message in enumerate(messages):
-        for part in getattr(message, "parts", ()) or ():
-            kind = _part_kind(part)
-            key = _tool_key(part)
-            if kind in ("tool-return", "retry-prompt"):
-                pending.pop(key, None)
-            elif kind == "tool-call":
-                pending[key] = index
-    if not pending:
-        return list(messages)
-
-    cut = min(pending.values())
-    for index in range(cut, -1, -1):
-        if _has_user_prompt(messages[index]):
-            cut = index
-            break
-    return list(messages[:cut])
-
-
-def repair_interrupted_tool_calls(messages: list) -> list:
-    """Close only persisted tool calls that have no recorded result."""
-    pending: dict[str, Any] = {}
-    for message in messages:
-        for part in getattr(message, "parts", ()) or ():
-            kind, key = _part_kind(part), _tool_key(part)
-            if kind == "tool-call" and key:
-                pending[key] = part
-            elif kind in ("tool-return", "retry-prompt") and key:
-                pending.pop(key, None)
-    if not pending:
-        return list(messages)
-    metadata = {"origin": "runtime_control", "execution_outcome": "unknown"}
-    returns = [
-        ToolReturnPart(
-            str(getattr(part, "tool_name", "")),
-            {
-                "status": "unknown",
-                "result_recorded": False,
-                "replayed": False,
-            },
-            tool_call_id=key,
-            outcome="failed",
-            metadata={**metadata, "tool_call_id": key},
-        )
-        for key, part in pending.items()
-    ]
-    return [*messages, ModelRequest(parts=returns, metadata=metadata)]
-
-
-def _context_summary_metadata(message):
-    """Return checkpoint metadata from either current or persisted SDK message shape."""
-    candidates = [getattr(message, "metadata", None) or {}]
-    for part in getattr(message, "parts", ()):
-        if isinstance(getattr(part, "content", None), list):
-            candidates.extend(getattr(item, "metadata", None) or {} for item in part.content)
-    return next(
-        (metadata for metadata in candidates if metadata.get("origin") == "context_summary"),
-        None,
-    )
-
-
-class ChatHistory:
-    __slots__ = (
-        "_messages",
-        "_compress_summary_state",
-        "_revision",
-    )
-
-    def __init__(self):
-        self._messages: list = []
-        self._compress_summary_state: str | None = None
-        self._revision = 0
-
-    def update(self, result) -> None:
-        """从 RunResult / StreamedRunResult 提取完整消息列表并保存。"""
-        self._messages = list(result.all_messages())
-        self._revision += 1
-
-    def reset(self) -> None:
-        self._messages = []
-        self._compress_summary_state = None
-        self._revision += 1
-
-    def set_messages(self, messages: list) -> None:
-        """直接替换消息列表（供上下文压缩等使用）。"""
-        self._messages = list(messages)
-        self._compress_summary_state = None
-        self._revision += 1
-        for message in reversed(self._messages):
-            if metadata := _context_summary_metadata(message):
-                self._compress_summary_state = metadata["summary"]
-                return
-
-    @property
-    def compress_summary_state(self) -> str | None:
-        """上一轮压缩模型产出的 Markdown 摘要文本，供下次压缩合并。"""
-        return self._compress_summary_state
-
-    @compress_summary_state.setter
-    def compress_summary_state(self, value: str | None) -> None:
-        self._compress_summary_state = value
-
-    @property
-    def messages(self) -> list:
-        """传入 agent.run(message_history=...) 的只读引用。"""
-        return self._messages
-
-    @property
-    def revision(self) -> int:
-        return self._revision
+from redlotus.sessions.context import ChatHistory, _context_summary_metadata
+from redlotus.sessions.storage import SessionFile, _response_id, _response_usage
 
 
 def compression_summary_headings() -> list[str]:
@@ -376,6 +245,31 @@ def _compression_candidate(
     return candidate
 
 
+async def compress_histories(sources, *, task_state, persist, is_current):
+    """Prepare role candidates together and adopt only after their durable commit."""
+    revisions = {role: source.revision for role, source in sources.items()}
+
+    def current():
+        return is_current() and all(source.revision == revisions[role] for role, source in sources.items())
+
+    candidates = {}
+    for role, source in sources.items():
+        candidates[role] = await prepare_compression(
+            source, role=role, force=True, retain_tail=False, task_state=task_state,
+        )
+        if not current():
+            return ["会话已改变，压缩候选已丢弃。"]
+    if not any(candidates.values()):
+        return ["当前上下文无需压缩。"]
+    await persist(candidates)
+    if not current():
+        return ["会话已改变，压缩候选不再应用。"]
+    for role, candidate in candidates.items():
+        if candidate is not None:
+            sources[role].set_messages(candidate.messages)
+    return [f"{role}: {'已压缩并保存' if candidate else '无需压缩'}" for role, candidate in candidates.items()]
+
+
 async def get_effective_max_contexts_by_role_async(*, roles=None) -> dict[str, int]:
     roles = tuple(roles) if roles is not None else get_context_profile_roles()
     limits = await asyncio.gather(
@@ -474,10 +368,6 @@ def _closed_boundaries(messages: list) -> list[int]:
     return boundaries
 
 
-def _estimate_text_tokens(text):
-    # Dense decimal data can tokenize digit by digit. Keep the prose estimate
-    # for ASCII punctuation/spacing so ordinary documents are not overcounted.
-    return sum(1 if ord(char) > 127 or char.isdigit() else 0.3 for char in text)
 
 
 async def compact_request_messages(

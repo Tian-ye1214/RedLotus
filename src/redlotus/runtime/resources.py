@@ -1,21 +1,31 @@
 """Workspace identity, owned paths, file locks and atomic filesystem operations."""
 from __future__ import annotations
 
+import asyncio
+import errno
+import functools
+import hashlib
+import inspect
+import json
 import os
 import sys
-import errno
-import json
-import hashlib
-from dataclasses import dataclass
-from pathlib import Path
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterator
-from collections.abc import Callable
+
 from filelock import FileLock, Timeout
 from loguru import logger as _lg
-from redlotus.runtime.config import _frozen, settings, ConfigError, config_source_summary
+
+from redlotus.runtime.config import (
+    ConfigError,
+    _frozen,
+    config_source_summary,
+    settings,
+)
 
 _REPARSE_POINT = 0x400
 _workspace_context: ContextVar[WorkspaceContext | None] = ContextVar('workspace_context', default=None)
@@ -289,3 +299,16 @@ def safe_name(
 
 def iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def bind_to_loop(function, loop):
+    """Expose an owner-loop service to child tools without sharing loop-bound resources."""
+    @functools.wraps(function)
+    async def call(*args, **kwargs):
+        async def invoke():
+            result = function(*args, **kwargs)
+            return await result if inspect.isawaitable(result) else result
+
+        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(invoke(), loop))
+
+    return call

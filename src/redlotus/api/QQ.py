@@ -7,11 +7,10 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from redlotus.runtime import logging as logger
-from redlotus.runtime.config import get_env, user_config_dir
-from redlotus.tools.interaction import UserMessage
 from redlotus.api.base import BotBase
 from redlotus.api.qq_media_helpers import extract_media, iter_segments
+from redlotus.runtime.config import get_env, user_config_dir
+from redlotus.sessions.control import UserMessage
 
 if TYPE_CHECKING:
     from ncatbot.core import BaseMessageEvent, MetaEvent

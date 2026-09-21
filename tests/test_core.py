@@ -7,7 +7,12 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolSearchCallPart
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolSearchCallPart,
+)
 from pydantic_ai.usage import RequestUsage
 
 
@@ -19,6 +24,59 @@ def test_runtime_configuration_does_not_load_application_layers():
         capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_agent_core_does_not_construct_terminal_interfaces():
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys; import redlotus.core.system; "
+         "assert not any(name.startswith(('redlotus.api.', 'redlotus.ui.', "
+         "'redlotus.ui.console', 'redlotus.ui.presentation', 'redlotus.ui.tui', "
+         "'prompt_toolkit', 'textual')) for name in sys.modules)"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_session_storage_is_independent_of_agent_or_ui_construction():
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys; from redlotus.sessions.storage import SessionFile; "
+         "from redlotus.sessions.control import SessionController; "
+         "assert not any(name.startswith(('redlotus.core.', 'redlotus.ui.', 'redlotus.api.', "
+         "'redlotus.memory.')) for name in sys.modules)"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_tools_and_memory_receive_orchestration_through_injection():
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys; import redlotus.tools.worker_tools; import redlotus.memory.service; "
+         "assert not any(name.startswith(('redlotus.core.', 'redlotus.ui.', 'redlotus.api.')) for name in sys.modules)"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_session_journal_repairs_only_incomplete_tail(tmp_path):
+    from redlotus.sessions.storage import SessionFile
+
+    storage = SessionFile.create(tmp_path, "isolated-project", session_id="journal")
+    storage.update(metadata={"title": "first"})
+    first = storage.path.read_bytes()
+    storage.update(metadata={"title": "second"})
+    complete = storage.path.read_bytes()
+    # Truncate the final transaction, leaving a valid first commit and JSON prefix.
+    tail = complete.rfind(b'"checksum"')
+    storage.path.write_bytes(complete[:tail + 12])
+    restored = SessionFile.load(storage.path)
+    assert restored.recovered_partial_write and restored.metadata["title"] == "first"
+    restored.update(metadata={"title": "third"})
+    assert SessionFile.load(storage.path).metadata["title"] == "third"
+    damaged = complete.replace(b'"first"', b'"wrong"', 1)
+    storage.path.write_bytes(damaged)
+    with pytest.raises(ValueError, match="校验失败"):
+        SessionFile.load(storage.path)
+    assert storage.path.read_bytes() == damaged and first != complete
 
 
 def test_config_layers_dynamic_roles_and_minimal_writeback(tmp_path):
@@ -51,6 +109,7 @@ def test_config_layers_dynamic_roles_and_minimal_writeback(tmp_path):
 
 async def test_http_pools_release_only_their_own_loop():
     import httpx
+
     from redlotus.runtime.network import close_all_clients, get_client
 
     parent = get_client("isolated", httpx.AsyncClient)
@@ -72,8 +131,10 @@ async def test_http_pools_release_only_their_own_loop():
 def test_space_recovery_preserves_active_and_current_sessions(tmp_path):
     import errno
     import os
-    from redlotus.core.session import SessionFile, retry_after_storage_cleanup
+
     from redlotus.runtime.resources import WorkspaceContext, workspace_context
+    from redlotus.sessions.cleanup import retry_after_storage_cleanup
+    from redlotus.sessions.storage import SessionFile
 
     (tmp_path / "config.json").write_text(json.dumps({"storage": {
         "sessions_dir": "sessions", "cleanup": {
@@ -97,10 +158,10 @@ def test_space_recovery_preserves_active_and_current_sessions(tmp_path):
 
 
 def test_turn_counts_survive_replay_and_reload(tmp_path):
-    from redlotus.runtime.resources import WorkspaceContext
-    from redlotus.core.cli_commands import list_workspace_snapshots
-    from redlotus.core.session import SessionFile
     from redlotus.memory import records
+    from redlotus.runtime.resources import WorkspaceContext
+    from redlotus.sessions.storage import SessionFile
+    from redlotus.ui.cli_commands import list_workspace_snapshots
 
     (tmp_path / "config.json").write_text(
         '{"memory_perception":{"window_turns":20,"overlap_turns":3},'
@@ -153,15 +214,16 @@ def test_provider_missing_usage_is_still_unknown():
 
 async def test_cancelled_child_checkpoint_releases_thread_capacity(tmp_path, monkeypatch):
     from redlotus.core import system as system_module
-    from redlotus.core.agents import SubagentFactory, SubagentSpec, bind_to_loop
-    from redlotus.runtime.resources import WorkspaceContext
+    from redlotus.core.agents import SubagentFactory
+    from redlotus.runtime.resources import WorkspaceContext, bind_to_loop
+    from redlotus.sessions.context import SubagentSpec
+    from redlotus.sessions.control import SessionController
 
     system = object.__new__(system_module.AgentSystem)
     system.workspace = WorkspaceContext.from_path(tmp_path)
     system._session_file = None
-    system._storage_retry = asyncio.Event()
-    system._storage_paused = False
-    monkeypatch.setattr(system_module, "print_warning", lambda text: None)
+    system._session = SessionController()
+    system.presentation = SimpleNamespace(print_warning=lambda text: None)
     owner_loop = asyncio.get_running_loop()
     persist = bind_to_loop(system._durable_write, owner_loop)
     started = asyncio.Event()
@@ -185,14 +247,14 @@ async def test_cancelled_child_checkpoint_releases_thread_capacity(tmp_path, mon
     outcome, = await asyncio.gather(running, return_exceptions=True)
     assert isinstance(outcome, asyncio.CancelledError)
     assert not factory.handles and not factory._slots
-    assert system._storage_paused
+    assert system._session.storage_paused
     await factory.close()
 
 
 @pytest.fixture
 def task_plan(tmp_path):
-    from redlotus.core.session import SessionFile
-    from redlotus.tools.manager_tools import TaskManager
+    from redlotus.core.tasks import TaskManager
+    from redlotus.sessions.storage import SessionFile
 
     storage = SessionFile.create(tmp_path / "plan", "isolated-project")
     inputs = {"turn": "first", "texts": ["Plan A, then B; C is independent."]}
@@ -205,7 +267,7 @@ def task_plan(tmp_path):
 
 
 def test_interrupted_task_restores_unverified_without_replaying_side_effects():
-    from redlotus.tools.manager_tools import TaskManager
+    from redlotus.core.tasks import TaskManager
 
     manager = TaskManager()
     manager.restore([
@@ -219,8 +281,8 @@ def test_interrupted_task_restores_unverified_without_replaying_side_effects():
 
 
 async def test_resume_uses_new_real_input_and_keeps_completed_results(task_plan):
-    from redlotus.core.agents import SubagentResult
-    from redlotus.tools.manager_tools import TaskManager
+    from redlotus.core.tasks import TaskManager
+    from redlotus.sessions.context import SubagentResult
 
     manager, storage, inputs = task_plan
     await manager.create_todo_list(json.dumps([
@@ -251,7 +313,7 @@ async def test_resume_uses_new_real_input_and_keeps_completed_results(task_plan)
 
 @pytest.mark.parametrize("status", ["cancelled", "unverified"])
 async def test_unverified_outcomes_never_enter_automatic_retry(task_plan, status):
-    from redlotus.core.agents import SubagentResult
+    from redlotus.sessions.context import SubagentResult
 
     manager, storage, inputs = task_plan
     await manager.create_todo_list('[{"id":"A","description":"operation with side effects"}]')
@@ -265,7 +327,7 @@ async def test_unverified_outcomes_never_enter_automatic_retry(task_plan, status
 
 
 async def test_cancellation_while_saving_does_not_erase_completed_work(task_plan, monkeypatch):
-    from redlotus.core.agents import SubagentResult
+    from redlotus.sessions.context import SubagentResult
     from redlotus.tools.worker_tools import WorkerOrchestrator
 
     manager, _, _ = task_plan
@@ -296,7 +358,7 @@ async def test_cancellation_while_saving_does_not_erase_completed_work(task_plan
 
 
 async def test_dependency_waits_for_durable_completion(task_plan, monkeypatch):
-    from redlotus.core.agents import SubagentResult
+    from redlotus.sessions.context import SubagentResult
     from redlotus.tools.worker_tools import WorkerOrchestrator
 
     manager, storage, _ = task_plan
@@ -335,7 +397,7 @@ async def test_dependency_waits_for_durable_completion(task_plan, monkeypatch):
 
 
 def test_release_keeps_blocked_worker_context(tmp_path):
-    from redlotus.core.session import SessionFile
+    from redlotus.sessions.storage import SessionFile
 
     storage = SessionFile.create(tmp_path / "roles", "project").role_file("worker")
     for task in ("waiting", "finished"):
@@ -348,11 +410,11 @@ def test_release_keeps_blocked_worker_context(tmp_path):
 
 @pytest.fixture
 async def child_executor(tmp_path, monkeypatch):
-    from redlotus.runtime import logging as logger
     from redlotus.core.agents import AgentRegistry, SubagentFactory
+    from redlotus.runtime import logging as logger
     from redlotus.runtime.resources import WorkspaceContext
-    from redlotus.core.history import ChatHistory
-    from redlotus.core.session import SessionFile
+    from redlotus.sessions.context import ChatHistory
+    from redlotus.sessions.storage import SessionFile
     from redlotus.tools import worker_tools as module
 
     (tmp_path / "config.json").write_text(
@@ -378,10 +440,10 @@ async def child_executor(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module.ModelTarget, "for_role", lambda role: object())
     monkeypatch.setattr(module, "create_worker_toolsets", lambda *args, **kwargs: ([], []))
-    monkeypatch.setattr(module, "create_function_toolset", lambda *args, **kwargs: object())
+    monkeypatch.setattr(factory, "create_toolset", lambda *args, **kwargs: object())
     monkeypatch.setattr(module, "get_agent_usage_limits", lambda: None)
     monkeypatch.setattr(logger, "debug", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module, "create_agent", create)
+    monkeypatch.setattr(factory, "create_agent", create)
     for role in ("worker", "manager"):
         monkeypatch.setattr(module, f"get_{role}_system_prompt", lambda *args: "rebuilt")
     orchestrator = module.WorkerOrchestrator(
@@ -400,7 +462,7 @@ async def child_executor(tmp_path, monkeypatch):
 @pytest.mark.parametrize("role", ["worker", "manager"])
 async def test_child_reuses_prompt_and_commits_compression_before_next_request(child_executor, monkeypatch, role):
     module, orchestrator, history, captured = child_executor
-    from redlotus.core.agents import SubagentResult, make_agent_id
+    from redlotus.sessions.context import SubagentResult, make_agent_id
 
     candidate = [ModelRequest([], instructions="original session instructions")]
     agent_id = make_agent_id(orchestrator._session_key, role, "A")
@@ -411,7 +473,7 @@ async def test_child_reuses_prompt_and_commits_compression_before_next_request(c
         assert orchestrator.session_file.role_messages(role, agent_id=agent_id) == candidate
         return SimpleNamespace(output=SubagentResult(status="success", summary="done"), all_messages=lambda: candidate)
 
-    monkeypatch.setattr(module.AgentRunner, "run", run)
+    monkeypatch.setattr(type(orchestrator.factory.runner), "run", run)
     report = await orchestrator._execute("follow up", history, role=role, task_id="A", turn_id="one")
     assert report.success and captured["closed"]
 
@@ -428,7 +490,7 @@ async def test_child_does_not_send_after_compression_save_failure(child_executor
         await captured["persist_context"]([ModelRequest([], instructions="fixed")])
         sent.append(True)
 
-    monkeypatch.setattr(module.AgentRunner, "run", run)
+    monkeypatch.setattr(type(orchestrator.factory.runner), "run", run)
     orchestrator._persist = disk_full
     if role == "manager":
         with pytest.raises(OSError, match="injected full disk"):
@@ -443,6 +505,7 @@ async def test_native_sdk_restoration_does_not_duplicate_deferred_catalog():
     from pydantic_ai import Agent
     from pydantic_ai.capabilities import Capability
     from pydantic_ai.models.function import FunctionModel
+
     from redlotus.core.gateway import RequestPolicy
     from redlotus.prompts.prompt import session_prompt_from_history
 

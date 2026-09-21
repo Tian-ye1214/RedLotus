@@ -1,10 +1,12 @@
 """Auxiliary UI contracts; product/API acceptance is recorded separately."""
 
 from types import SimpleNamespace
+
 import pytest
 
+
 def test_output_actions_follow_the_selected_sink(monkeypatch):
-    from redlotus.core import presentation as ui
+    from redlotus.ui import presentation as ui
 
     received = []
     first = SimpleNamespace(update=lambda *event: received.append(("first", event)))
@@ -33,8 +35,10 @@ def test_output_actions_follow_the_selected_sink(monkeypatch):
 
 def test_legacy_output_keeps_ansi_and_rule_rendering():
     from io import StringIO
+
     from rich.console import Console
-    from redlotus.core.presentation import LegacyOutputSink
+
+    from redlotus.ui.presentation import LegacyOutputSink
 
     output = StringIO()
     sink = LegacyOutputSink(Console(file=output, width=40, color_system=None))
@@ -44,24 +48,40 @@ def test_legacy_output_keeps_ansi_and_rule_rendering():
     assert "\x1b[" not in output.getvalue()
 
 
+def test_textual_sink_preserves_ansi_and_dispatches_on_ui_thread():
+    from redlotus.ui.widgets import TextualOutputSink
+
+    rendered, updates = [], []
+    app = SimpleNamespace(
+        call_ui=lambda operation: operation(),
+        clear_model_stream=lambda: updates.append("cleared"),
+    )
+    sink = TextualOutputSink(app, SimpleNamespace(write=lambda text, **kw: rendered.append(text.plain)))
+    sink.emit("\x1b[31m正文\x1b[0m")
+    sink.update("rule", "任务")
+    sink.update("clear_model_stream")
+    assert rendered == ["正文", "任务"] and updates == ["cleared"]
+
+
 async def test_release_ui_has_no_keyboard_diagnostics(tmp_path, monkeypatch):
-    from redlotus.core.tui import RedLotusTui
+    from redlotus.ui.tui import RedLotusTui
 
     system = SimpleNamespace(
-        new_cli_session_state=lambda: None,
         workspace=SimpleNamespace(root=tmp_path),
         session_key=None,
     )
     # This check mounts the real layout without starting a model session.
     monkeypatch.setattr(RedLotusTui, "on_mount", lambda self: None)
-    async with RedLotusTui(system).run_test() as pilot:
+    controller = SimpleNamespace(system=system, new_session_state=lambda: None)
+    async with RedLotusTui(controller).run_test() as pilot:
         assert not pilot.app.query("#keyboard-test")
         assert pilot.app.query("#input") and pilot.app.query("#session-load")
 
 
 async def test_composer_consumes_each_enter_once_and_preserves_urgency():
     from textual.app import App, ComposeResult
-    from redlotus.core.tui import AgentInput
+
+    from redlotus.ui.tui import AgentInput
 
     received = []
 
@@ -80,27 +100,25 @@ async def test_composer_consumes_each_enter_once_and_preserves_urgency():
 
 @pytest.fixture
 def channel_probe(tmp_path, monkeypatch):
-    import asyncio
     from contextlib import nullcontext
+
     from redlotus.api import base
     from redlotus.api.WeChat import WeChatAgentBot
     from redlotus.core import system
-    from redlotus.core.session import SessionController
     from redlotus.runtime.resources import WorkspaceContext
+    from redlotus.sessions.control import SessionController
 
     calls, replies = [], []
 
     class Agent:
-        def __init__(self, *, owner_memory_allowed=True, input_controller=None):
+        def __init__(self, *, presentation, owner_memory_allowed=True, input_controller=None):
             self._session = input_controller or SessionController()
             self.workspace = WorkspaceContext.from_path(tmp_path)
             self.session_key = None
+            self.toolkit = SimpleNamespace(set_task_directory=lambda title: None)
 
         def set_ask_user_handler(self, handler):
             self.handler = handler
-
-        def set_task_directory(self, title):
-            self.title = title
 
         async def bind_session(self, identity):
             self.session_key = identity
@@ -135,7 +153,7 @@ def channel_probe(tmp_path, monkeypatch):
 
 
 def channel_message(text, *names):
-    from dataclasses import make_dataclass, field
+    from dataclasses import field, make_dataclass
 
     # The public IncomingMessage media fields from the locked SDK version.
     message = make_dataclass("Message", [("user_id", str), ("text", str)] +
@@ -205,9 +223,11 @@ async def test_channel_attachment_failure_never_executes_partial_request(channel
 
 async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
     import asyncio
+
+    from pydantic_ai import BinaryContent
+
     from redlotus.api import base
     from redlotus.api.QQ import QQBot
-    from pydantic_ai import BinaryContent
 
     p = channel_probe
     bot = object.__new__(QQBot)
@@ -251,6 +271,7 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
 
 def test_qq_second_download_failure_is_not_a_partial_image_request(monkeypatch):
     import httpx
+
     from redlotus.api import qq_media_helpers as media
 
     original = httpx.Client

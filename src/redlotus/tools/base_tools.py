@@ -3,32 +3,40 @@
 from __future__ import annotations
 
 import asyncio
-import requests
-import time
+import difflib
 import inspect
+import mimetypes
+import platform as _platform
 import re
+import shlex
 import subprocess
 import threading
-import mimetypes
-import shlex
-import platform as _platform
-from redlotus.runtime import logging as logger
-from redlotus.runtime.config import get_env, get_agent_run_policy
-from redlotus.runtime.resources import (
-    runtime_dir,
-    user_skills_dir,
-    WorkspaceContext,
-    current_workspace,
-)
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
+
+import requests
 from ddgs import DDGS
 from pydantic_ai import BinaryContent, ToolReturn
+
+from redlotus.runtime import logging as logger
+from redlotus.runtime.config import get_agent_run_policy, get_env
+from redlotus.runtime.resources import (
+    WorkspaceContext,
+    atomic_write_text,
+    bind_to_loop,
+    current_workspace,
+    runtime_dir,
+    user_skills_dir,
+)
+from redlotus.tools.execution import (
+    PlaywrightBrowserSession,
+    describe_execution_environment,
+    run_subprocess,
+)
+from redlotus.tools.references import ReferenceStore
 from redlotus.tools.registry import SkillsManager, resolve_readable_path
-from redlotus.core.agents import bind_to_loop
-from redlotus.tools.execution import describe_execution_environment, run_subprocess
-from redlotus.tools.references import PlaywrightBrowserSession, ReferenceStore
-from redlotus.core.presentation import show_file_diff
-from redlotus.tools.interaction import PendingReviewStore
 
 
 async def generate_image_from_flux(prompt: str, width: int = 1024, height: int = 1024, max_wait_time: int = 300):
@@ -145,6 +153,7 @@ class BasicToolkit:
         skills_manager: SkillsManager,
         *,
         workspace: WorkspaceContext | None = None,
+        show_diff,
     ):
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
         if skills_manager is not None:
@@ -159,6 +168,7 @@ class BasicToolkit:
         self._review_store = PendingReviewStore(self._file_lock)
         self._references = ReferenceStore(self.workspace)
         self._ask_user_handler = None
+        self._show_diff = show_diff
         self._skills_manager = skills_manager
         self._browser_session = PlaywrightBrowserSession(self.workspace)
         self._dangerous_patterns = [
@@ -204,7 +214,7 @@ class BasicToolkit:
 
         child = BasicToolkit(
             SkillsManager(workspace=self.workspace),
-            workspace=self.workspace,
+            workspace=self.workspace, show_diff=self._show_diff,
         )
         child._file_lock = self._file_lock
         child._review_store = self._review_store
@@ -396,7 +406,7 @@ class BasicToolkit:
         try:
             path = self._safe_path(name)
             old, content = self._review_store.write(path, name, update)
-            added, deleted, modified = show_file_diff(old, content, path=name)
+            added, deleted, modified = self._show_diff(old, content, path=name)
             return f"Saved '{name}' ({len(content)} characters; +{added} -{deleted} ~{modified})"
         except (OSError, ValueError) as exc:
             return f"Error updating '{name}': {exc}"
@@ -619,3 +629,164 @@ class BasicToolkit:
                 BinaryContent(data=image_bytes, media_type=mime_type),
             ],
         )
+
+
+def _opcodes(baseline: str, current: str):
+    a = baseline.splitlines(keepends=True)
+    b = current.splitlines(keepends=True)
+    sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+    return a, b, sm.get_opcodes()
+
+
+@dataclass(frozen=True)
+class Hunk:
+    """一处连续改动（baseline→current 中的一个非 equal 区块）。"""
+
+    index: int
+    old_start: int
+    old_lines: list[str]
+    new_start: int
+    new_lines: list[str]
+
+    @property
+    def location(self) -> str:
+        return f"L{self.new_start}" if self.new_lines else f"L{self.old_start}"
+
+
+def compute_hunks(baseline: str, current: str) -> list[Hunk]:
+    """把 baseline→current 的差异切成逐块 Hunk 列表（equal 区块跳过）。"""
+    a, b, ops = _opcodes(baseline, current)
+    hunks: list[Hunk] = []
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            continue
+        hunks.append(Hunk(len(hunks), i1 + 1, a[i1:i2], j1 + 1, b[j1:j2]))
+    return hunks
+
+
+def reconstruct(baseline: str, current: str, rejected: set[int]) -> str:
+    """按逐块决定重建文件内容：rejected 的块取 baseline 侧，其余取 current 侧。
+
+    rejected 为空 → 完全等于 current；rejected 含全部块 → 完全等于 baseline。
+    """
+    a, b, ops = _opcodes(baseline, current)
+    out: list[str] = []
+    idx = 0
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            out.extend(b[j1:j2])
+            continue
+        out.extend(a[i1:i2] if idx in rejected else b[j1:j2])
+        idx += 1
+    return "".join(out)
+
+
+@dataclass
+class ReviewEntry:
+    path: Path
+    name: str
+    baseline: str
+    snapshot: str
+    decisions: dict[int, bool] = field(default_factory=dict)
+    existed: bool = True
+
+    @property
+    def hunks(self):
+        return compute_hunks(self.baseline, self.snapshot)
+
+    def check_current(self, current):
+        rejected = {key for key, value in self.decisions.items() if value}
+        expected = (
+            None if not self.existed and len(rejected) == len(self.hunks)
+            else reconstruct(self.baseline, self.snapshot, rejected)
+        )
+        if current != expected:
+            raise ValueError("文件已在审查界面之外被修改；为保留这些改动，本次操作未应用。")
+
+
+class PendingReviewStore:
+    """跨线程共享的待审查暂存区。复用 toolkit 的 file_lock，避免与 agent 写盘竞争。"""
+
+    def __init__(self, file_lock: threading.Lock) -> None:
+        self._lock = file_lock
+        self._entries: dict[str, ReviewEntry] = {}
+        self._on_change: Callable[[], None] | None = None
+
+    def activate(self, on_change: Callable[[], None]) -> None:
+        with self._lock:
+            self._on_change = on_change
+
+    def deactivate(self) -> None:
+        with self._lock:
+            self._on_change = None
+            self._entries.clear()
+
+    def clear(self) -> None:
+        """Discard the previous project's reviews while retaining the UI subscription."""
+        with self._lock:
+            self._entries.clear()
+            cb = self._on_change
+        self._notify(cb)
+
+    def write(self, path: Path, name: str, update):
+        """Publish file contents and their review snapshot as one locked operation."""
+        with self._lock:
+            previous = path.read_text(encoding="utf-8") if path.exists() else None
+            old = self._entries.get(str(path))
+            if old:
+                old.check_current(previous)
+            content = update(previous)
+            baseline = reconstruct(
+                old.baseline, old.snapshot,
+                {hunk.index for hunk in old.hunks if old.decisions.get(hunk.index) is not False},
+            ) if old else previous or ""
+            existed = old.existed or False in old.decisions.values() if old else previous is not None
+            atomic_write_text(path, content)
+            if self._on_change is not None and baseline != content:
+                self._entries[str(path)] = ReviewEntry(path, name, baseline, content, existed=existed)
+            else:
+                self._entries.pop(str(path), None)
+            callback = self._on_change
+        self._notify(callback)
+        return previous or "", content
+
+    def entries(self) -> list[ReviewEntry]:
+        with self._lock:
+            return list(self._entries.values())
+
+    def get(self, key: str) -> ReviewEntry | None:
+        with self._lock:
+            return self._entries.get(key)
+
+    def decide(self, entry: ReviewEntry, index: int, reject: bool) -> bool:
+        """Apply a decision only to the exact version displayed by the UI."""
+        with self._lock:
+            if self._entries.get(str(entry.path)) is not entry:
+                return False
+            entry.check_current(entry.path.read_text(encoding="utf-8") if entry.path.exists() else None)
+            decisions = {**entry.decisions, index: reject}
+            rejected = {key for key, value in decisions.items() if value}
+            if not entry.existed and len(rejected) == len(entry.hunks):
+                entry.path.unlink(missing_ok=True)
+            else:
+                atomic_write_text(
+                    entry.path,
+                    reconstruct(entry.baseline, entry.snapshot, rejected),
+                )
+            entry.decisions = decisions
+        return True
+
+    def finish_decided(self):
+        for entry in self.entries():
+            if all(hunk.index in entry.decisions for hunk in entry.hunks):
+                self.finish(str(entry.path))
+
+    def finish(self, key: str) -> None:
+        with self._lock:
+            self._entries.pop(key, None)
+            cb = self._on_change
+        self._notify(cb)
+
+    def _notify(self, cb: Callable[[], None] | None) -> None:
+        if cb is not None:
+            cb()

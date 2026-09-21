@@ -9,35 +9,39 @@ import threading
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
-from typing import Literal
 
 from filelock import AsyncFileLock
 from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
 from pydantic_ai.messages import TextContent
 
+from redlotus.memory.perception import MemoryJob, MemoryPerception, produce_job
+from redlotus.memory.records import (
+    EvidenceReader,
+    LongTermMemory,
+    MemoryConflict,
+    ObservationStore,
+)
+from redlotus.memory.store import MemoryReader, MemoryStore
+from redlotus.prompts.prompt import load_prompt
+from redlotus.runtime import logging as logger
 from redlotus.runtime.config import settings
+from redlotus.runtime.network import ModelTarget
 from redlotus.runtime.resources import (
+    WorkspaceContext,
+    atomic_write_text,
+    current_workspace,
     file_lock,
+    finish_file_io,
     iso_utc_now,
     read_locked_json,
     save_locked_json,
-    WorkspaceContext,
-    current_workspace,
-    atomic_write_text,
-    finish_file_io,
 )
-from redlotus.runtime import logging as logger
-from redlotus.runtime.network import ModelTarget
-from redlotus.prompts.prompt import load_prompt
+from redlotus.sessions.context import SubagentSpec
 from redlotus.tools.references import ReferenceStore
-from redlotus.core.agents import AgentRegistry, SubagentFactory, SubagentSpec
-from redlotus.memory.records import EvidenceReader, LongTermMemory, MemoryConflict, ObservationStore
-from redlotus.memory.perception import MemoryPerception, MemoryJob, produce_job
-from redlotus.memory.store import MemoryStore, MemoryReader
 
 
 class MemoryService:
-    def __init__(self, *, workspace=None, owner_memory_allowed=True, factory=None):
+    def __init__(self, *, workspace=None, owner_memory_allowed=True, factory):
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
         self.owner_memory_allowed = owner_memory_allowed
         self.long_term, self.store = LongTermMemory(), MemoryStore(self.workspace)
@@ -45,8 +49,7 @@ class MemoryService:
         self.references = ReferenceStore(self.workspace)
         self.evidence = EvidenceReader(self.references)
         self.reader = MemoryReader(self.store, self.long_term, self.references, owner_memory_allowed)
-        self._owns_factory = factory is None
-        self._perception_factory = factory or SubagentFactory()
+        self._perception_factory = factory
         self.perception, self.current, self.session = None, None, None
         self._input_source = lambda: self.current.user_inputs if self.current else []
         self._injection_snapshot = None
@@ -85,7 +88,7 @@ class MemoryService:
 
     def bind_runner(self, registry, *, input_source):
         # Explicit requests reuse the caller loop, so a full Worker pool cannot deadlock.
-        self.perception = MemoryPerception(self.workspace, None, registry)
+        self.perception = MemoryPerception(self.workspace, None, registry, create_agent=self._perception_factory.create_agent)
         self._input_source = input_source
 
     def injection_for_session(self):
@@ -458,7 +461,7 @@ class MemoryService:
         """Own model/database resources in the admitted thread; never inspect other sessions."""
         producer = MemoryService(workspace=self.workspace, factory=self._perception_factory)
         producer.bind_session(self.session)
-        producer.perception = MemoryPerception(self.workspace, None, AgentRegistry())
+        producer.perception = MemoryPerception(self.workspace, None, self._perception_factory.create_registry(), create_agent=self._perception_factory.create_agent)
         try:
             while True:
                 with self._schedule_lock:
@@ -598,7 +601,5 @@ class MemoryService:
         return True
 
     async def close(self):
-        if self._owns_factory:
-            await self._perception_factory.close()
         self.unbind_session()
         await self.store.close()

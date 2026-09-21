@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import re
-import html
 import base64
+import html
 import ipaddress
 import mimetypes
+import os
+import re
 import socket
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from pydantic_ai import BinaryContent

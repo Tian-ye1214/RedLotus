@@ -2,26 +2,24 @@
 
 from __future__ import annotations
 
-import json
-from pydantic_ai import ToolReturn
-from redlotus.memory.records import CREDENTIAL_PATTERN, MemoryConflict, MemoryRecord
-
 import asyncio
 import hashlib
+import json
 import re
+from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
 
 import lancedb
-from copy import deepcopy
 from filelock import AsyncFileLock
+from pydantic_ai import ToolReturn
 
-from redlotus.runtime import logging as logger
+from redlotus.memory.records import CREDENTIAL_PATTERN, MemoryConflict, MemoryRecord
 from redlotus.memory.retrieval import RAG, missing_rag_settings
+from redlotus.runtime import logging as logger
 from redlotus.runtime.config import missing_rag_api_keys, settings
 from redlotus.runtime.resources import file_lock, iso_utc_now
 from redlotus.tools.references import ReferenceStore
-
 
 MEMORY_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
 

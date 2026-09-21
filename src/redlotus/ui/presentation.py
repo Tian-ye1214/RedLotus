@@ -2,32 +2,36 @@
 
 from __future__ import annotations
 
-import sys
+import asyncio
 import difflib
 import math
-import asyncio
+import sys
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol, Callable
-from rich.console import Console, Group
-from rich.text import Text
 from enum import StrEnum
-from rich.panel import Panel
-from redlotus.tools.interaction import UserMessage
-from redlotus.runtime import logging as logger
-from rich.markdown import Markdown
-from rich.align import Align
 from pathlib import Path
+from typing import Any, Callable, Protocol
+
+from pydantic_ai.exceptions import ModelHTTPError
+from rich.align import Align
+from rich.console import Console, Group
+from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.table import Table
-from redlotus.runtime.resources import conversations_root
+from rich.text import Text
+
 from redlotus.core.history import (
     MODEL_MESSAGES_GLOB,
-    UsageTotals,
     ContentTokenStats,
-    read_usage_messages,
+    UsageTotals,
     latest_usage_input_tokens,
+    read_usage_messages,
     summarize_messages,
 )
+from redlotus.runtime import logging as logger
+from redlotus.runtime.resources import conversations_root
+from redlotus.sessions.control import UserMessage
 
 
 @dataclass(frozen=True)
@@ -337,16 +341,15 @@ def model_stream_visible_text(text) -> str:
     return "\n".join(lines[-STREAM_PREVIEW_MAX_LINES:]) if len(lines) > STREAM_PREVIEW_MAX_LINES else body
 
 
-def print_error(message: str) -> None:
-    emit_renderable(Text(f"Error: {message}", style="bold red"))
+def print_message(message, *, prefix="", style=""):
+    emit_renderable(Text(prefix + message, style=style))
 
 
-def print_warning(message: str) -> None:
-    emit_renderable(Text(f"Warning: {message}", style="yellow"))
+from functools import partial
 
-
-def print_success(message: str) -> None:
-    emit_renderable(Text(message, style="green"))
+print_error = partial(print_message, prefix="Error: ", style="bold red")
+print_warning = partial(print_message, prefix="Warning: ", style="yellow")
+print_success = partial(print_message, style="green")
 
 
 def print_markdown(text: str) -> None:
@@ -360,11 +363,6 @@ def print_panel(content: str, *, title: str = "") -> None:
     emit_renderable(Panel(content, title=title or None))
 
 
-def print_markdown_panel(text: str, *, title: str = "") -> None:
-    body = (text or "").strip()
-    if not body:
-        return
-    emit_renderable(Panel(Markdown(body), title=title or None, border_style="cyan"))
 
 
 def show_file_diff(old: str, new: str, *, path: str) -> tuple[int, int, int]:
@@ -378,14 +376,18 @@ def show_file_diff(old: str, new: str, *, path: str) -> tuple[int, int, int]:
     return stats
 
 
-def show_model_output(text: str, *, title: str = "模型", markdown: bool = True) -> None:
+def show_model_output(text: str, *, title: str = "模型", markdown: bool = True, log=True) -> None:
     """Rich 渲染模型输出；原文仅写入日志文件。纯文本汇总请设 markdown=False 以保留换行。"""
     body = (text or "").strip()
     if not body:
         return
     content = Markdown(body) if markdown else Text(body)
     emit_renderable(Panel(content, title=title, border_style="cyan"))
-    logger.info_file_only("[模型]\n%s", body)
+    if log:
+        logger.info_file_only("[模型]\n%s", body)
+
+
+print_markdown_panel = partial(show_model_output, title="", log=False)
 
 
 def finish_model_stream(text: str, *, title: str = "模型", markdown: bool = True) -> None:
@@ -786,3 +788,28 @@ def _fmt_int(value: int) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.1f}k"
     return str(value)
+
+
+def handle_turn_error(e: Exception) -> None:
+    from redlotus.runtime.network import InputLimitError
+
+    if isinstance(e, InputLimitError):
+        print_warning(str(e))
+        return
+    if isinstance(e, ModelHTTPError):
+        body = e.body or {}
+        code = body.get("code", "") if isinstance(body, dict) else ""
+        if code == "data_inspection_failed":
+            print_warning(
+                "模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。"
+                "请尝试换一种表达方式，或 /clear 清空上下文后重试。"
+            )
+        else:
+            message = f"模型请求错误 (HTTP {e.status_code}): {e}"
+            if e.status_code in (401, 403):
+                message += "\n请检查实际生效的 API 凭据，或使用 /api 配置后重试。"
+            print_warning(message)
+            logger.error("详细信息:\n%s", traceback.format_exc(), file_only=True)
+        return
+    print_warning(f"未预期的系统错误: {e}")
+    logger.error("详细信息:\n%s", traceback.format_exc())

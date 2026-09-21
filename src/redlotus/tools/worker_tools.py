@@ -8,18 +8,24 @@ import inspect
 import json
 import uuid
 from typing import Callable
+
 from pydantic_ai.capabilities import Capability
-from redlotus.core.agents import (
-    AgentRegistry, SubagentFactory, SubagentResult, SubagentSpec, bind_to_loop,
+
+from redlotus.prompts.prompt import (
+    get_manager_system_prompt,
+    get_worker_system_prompt,
+    session_prompt_from_history,
+    with_runtime_context,
 )
 from redlotus.runtime.config import get_agent_usage_limits
-from redlotus.core.gateway import AgentRunner, create_agent, create_function_toolset
 from redlotus.runtime.network import ModelTarget
-from redlotus.core.history import ChatHistory, messages_safe_for_new_prompt
-from redlotus.prompts.prompt import (
-    get_manager_system_prompt, get_worker_system_prompt, session_prompt_from_history, with_runtime_context,
+from redlotus.runtime.resources import bind_to_loop
+from redlotus.sessions.context import (
+    ChatHistory,
+    SubagentResult,
+    SubagentSpec,
+    messages_safe_for_new_prompt,
 )
-from redlotus.tools.manager_tools import Task, TaskManager
 
 
 def worker_tool_groups(toolkit, memory, *, owner_loop=None, include_browser=True) -> dict[str, list]:
@@ -70,7 +76,7 @@ def worker_tools(toolkit, memory) -> list:
     return [tool for tools in worker_tool_groups(toolkit, memory, include_browser=True).values() for tool in tools]
 
 
-def create_worker_toolsets(toolkit, memory, owner_loop, *, include_browser):
+def create_worker_toolsets(toolkit, memory, owner_loop, *, include_browser, create_toolset):
     """Create native SDK capabilities from explicit callables and their own docstrings."""
     resident, capabilities = [], []
     groups = worker_tool_groups(toolkit, memory, owner_loop=owner_loop, include_browser=include_browser)
@@ -79,7 +85,7 @@ def create_worker_toolsets(toolkit, memory, owner_loop, *, include_browser):
             continue
         identity = "worker_" + group
         deferred = group != "core"
-        toolset = create_function_toolset(tools, toolset_id=identity, defer_loading=deferred)
+        toolset = create_toolset(tools, toolset_id=identity, defer_loading=deferred)
         if deferred:
             capabilities.append(Capability(
                 id=identity,
@@ -98,13 +104,13 @@ class WorkerOrchestrator:
     def __init__(
         self,
         toolkit,
-        task_manager: TaskManager,
+        task_manager,
         *,
         memory,
         memory_injection_getter: Callable[[], str] | None = None,
-        registry: AgentRegistry,
+        registry,
         persist,
-        factory: SubagentFactory | None = None,
+        factory,
     ):
         self._toolkit = toolkit
         self.memory = memory
@@ -112,7 +118,7 @@ class WorkerOrchestrator:
         self._memory_injection_getter = memory_injection_getter or (lambda: "")
         self._registry = registry
         self._persist = persist
-        self.factory = factory or SubagentFactory()
+        self.factory = factory
         self.session_file = None
         self._session_key: str | None = None
 
@@ -152,7 +158,7 @@ class WorkerOrchestrator:
             try:
                 if role == "worker":
                     toolsets, capabilities = create_worker_toolsets(
-                        toolkit, memory_service, owner_loop, include_browser=include_browser
+                        toolkit, memory_service, owner_loop, include_browser=include_browser, create_toolset=self.factory.create_toolset
                     )
                     instructions = session_prompt_from_history(messages) or get_worker_system_prompt(
                         toolkit.skills_manager, memory
@@ -160,7 +166,7 @@ class WorkerOrchestrator:
                     output_type = SubagentResult
                 else:
                     toolsets = [
-                        create_function_toolset(
+                        self.factory.create_toolset(
                             [bind_to_loop(t, owner_loop) for t in planning_tools], toolset_id="planning"
                         )
                     ]
@@ -183,7 +189,7 @@ class WorkerOrchestrator:
                         raise asyncio.CancelledError("Child checkpoint belongs to an ended invocation.")
                     local_history.set_messages(candidate)
 
-                agent = create_agent(
+                agent = self.factory.create_agent(
                     target,
                     instructions=instructions,
                     toolsets=toolsets,
@@ -196,7 +202,7 @@ class WorkerOrchestrator:
                 async def save_node(run):
                     await save_context(list(run.all_messages()))
 
-                result = await AgentRunner().run(
+                result = await self.factory.runner.run(
                     agent=agent,
                     prompt=with_runtime_context(copy.deepcopy(prompt)),
                     message_history=local_history.messages,
@@ -260,7 +266,7 @@ class WorkerOrchestrator:
         return report.success, report.model_dump_json()
 
     async def _execute_task(
-        self, task: Task, user_goal: str, attachments: list | None, turn_id: str | None
+        self, task, user_goal: str, attachments: list | None, turn_id: str | None
     ):
         prompt = json.dumps({
             "parent_goal_context": user_goal,
@@ -294,3 +300,13 @@ class WorkerOrchestrator:
                         self._execute_task(task, user_goal, attachments, turn_id)
                     )
         return self._task_manager.get_final_summary()
+
+
+def manager_tools(task_manager, toolkit, memory) -> tuple:
+    """List the complete Manager planning tool set; retain owner memory permissions."""
+    return (
+        task_manager.create_todo_list,
+        task_manager.get_todo_list,
+        toolkit.ask_user,
+        *([memory.reader.search_memory] if memory.owner_memory_allowed else []),
+    )

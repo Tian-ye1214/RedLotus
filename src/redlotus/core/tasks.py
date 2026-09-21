@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from enum import Enum
 from graphlib import CycleError, TopologicalSorter
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
-from redlotus.core.history import ChatHistory
+from pydantic_ai.messages import (
+    BaseToolReturnPart,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+)
 
-
-def manager_tools(task_manager, toolkit, memory) -> tuple:
-    """List the complete Manager planning tool set; retain owner memory permissions."""
-    return (
-        task_manager.create_todo_list,
-        task_manager.get_todo_list,
-        toolkit.ask_user,
-        *([memory.reader.search_memory] if memory.owner_memory_allowed else []),
-    )
+from redlotus.prompts.message_text import split_messages_into_turns
+from redlotus.prompts.prompt import load_prompt
+from redlotus.runtime import logging as logger
+from redlotus.sessions.context import ChatHistory
+from redlotus.sessions.control import UserMessage
 
 
 class TaskStatus(Enum):
@@ -235,3 +241,189 @@ class TaskManager:
                 else "Tasks remain incomplete.",
             ]
         )
+
+
+    async def execute_plan(self, user_input, continue_from_previous, *, orchestrator, history, tools, attachments, turn_id, presentation) -> str:
+        logger.info("[用户]\n%s", user_input)
+
+
+        if not continue_from_previous:
+            self.reset()
+            await self.save()
+            history.reset()
+            presentation.print_phase("第一阶段: Manager 规划任务列表")
+            tmpl = await asyncio.to_thread(load_prompt, "manager_planning_new.md")
+            planning_text = tmpl.format(user_input=user_input)
+        else:
+            presentation.print_phase("第一阶段: 基于用户反馈调整任务")
+            current_todo = self.get_todo_list()
+            tmpl = await asyncio.to_thread(load_prompt, "manager_planning_continue.md")
+            planning_text = tmpl.format(
+                user_input=user_input, current_todo=current_todo
+            )
+
+        planning_prompt = [planning_text, *attachments] if attachments else planning_text
+        result = await orchestrator.plan(
+            planning_prompt, history, turn_id=turn_id, tools=tools
+        )
+        presentation.show_model_output(result, title="Manager 规划")
+
+        presentation.print_phase("第二阶段: 多Worker并行执行任务")
+
+        final_summary = await orchestrator.execute_all_tasks_parallel(
+            user_input, attachments=attachments, turn_id=turn_id
+        )
+        presentation.show_model_output(final_summary, title="任务汇总", markdown=False)
+
+        presentation.print_phase("第三阶段: 生成最终报告")
+
+        summary_tmpl = await asyncio.to_thread(load_prompt, "manager_summary.md")
+        summary_text = summary_tmpl.format(
+            user_input=user_input, final_summary=final_summary
+        )
+        summary_prompt = [summary_text, *attachments] if attachments else summary_text
+        try:
+            final_text = await orchestrator.plan(
+                summary_prompt, history, turn_id=turn_id
+            )
+            presentation.show_model_output(final_text, title="最终报告")
+            report = final_text.strip() or final_summary.strip()
+        except Exception as exc:
+            logger.warning("Manager summary unavailable: %s", exc)
+            report = final_summary
+        return (
+            report
+            if self.completed
+            else "Error: Plan is incomplete.\n" + report
+        )
+
+
+class GoalSignal(str, Enum):
+    CONTINUE = "CONTINUE"
+    DONE = "DONE"
+
+
+GOAL_MARKER_RE = re.compile(
+    r"<!--\s*REDLOTUS_GOAL\s*:\s*(CONTINUE|DONE)\s*-->",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class GoalParseResult:
+    signal: GoalSignal
+    cleaned_text: str
+    marker_count: int
+
+    @property
+    def missing_marker(self) -> bool:
+        return self.marker_count == 0
+
+
+def parse_goal_output(text: str) -> GoalParseResult:
+    """Strip goal-mode sentinel markers and return the effective signal.
+
+    If no marker is present, goal mode treats the turn as CONTINUE so the next
+    prompt can remind the model to add an explicit status marker.
+    """
+    body = text or ""
+    matches = list(GOAL_MARKER_RE.finditer(body))
+    cleaned = GOAL_MARKER_RE.sub("", body).strip()
+    if not matches:
+        return GoalParseResult(GoalSignal.CONTINUE, cleaned, 0)
+    signal = GoalSignal(matches[-1].group(1).upper())
+    return GoalParseResult(signal, cleaned, len(matches))
+
+
+def summarize_last_coordinator_turn(messages: list) -> str:
+    """Build goal-mode previous_output from the latest turn's assistant text and tool returns."""
+    turns = split_messages_into_turns(messages)
+    if not turns:
+        return ""
+    sections: list[str] = []
+    for msg in turns[-1]:
+        if isinstance(msg, ModelResponse):
+            for part in msg.parts:
+                if isinstance(part, TextPart):
+                    text = (part.content or "").strip()
+                    if text:
+                        sections.append(text)
+        elif isinstance(msg, ModelRequest):
+            for part in msg.parts:
+                if isinstance(part, BaseToolReturnPart):
+                    content = (
+                        part.model_response_str()
+                        if hasattr(part, "model_response_str")
+                        else str(part.content)
+                    )
+                    tool_name = part.tool_name or "tool"
+                    sections.append(f"[{tool_name}]\n{content}")
+    return "\n\n".join(sections).strip()
+
+
+def build_goal_iteration_prompt(
+    *,
+    original_goal: str,
+    iteration: int,
+    previous_output: str = "",
+    missing_marker_reminder: bool = False,
+) -> str:
+    template = load_prompt("goal_iteration.md")
+    return template.format(
+        original_goal=original_goal.strip(),
+        iteration=iteration,
+        previous_output=previous_output.strip(),
+        user_updates="",
+        missing_marker_reminder=str(bool(missing_marker_reminder)).lower(),
+    )
+
+
+async def run_goal_loop(
+    system: Any,
+    *,
+    message: UserMessage,
+    history: Any,
+    turn_id: str | None,
+    set_iteration: Callable[[int], None] | None = None,
+) -> None:
+    original_goal = message.text or ""
+    previous_output = ""
+    missing_marker = False
+    iteration = 0
+
+    while True:
+        iteration += 1
+        if set_iteration is not None:
+            set_iteration(iteration)
+
+        prompt_text = build_goal_iteration_prompt(
+            original_goal=original_goal,
+            iteration=iteration,
+            previous_output=previous_output,
+            missing_marker_reminder=missing_marker,
+        )
+
+        parse_result: GoalParseResult | None = None
+
+        def output_transform(raw_output: str) -> str:
+            nonlocal parse_result
+            parse_result = parse_goal_output(raw_output)
+            return parse_result.cleaned_text
+
+        prompt_message = replace(message, text=prompt_text)
+        _history, output = await system.run_agent_system(
+            prompt_message,
+            history,
+            turn_id=turn_id,
+            output_transform=output_transform,
+            _inside_goal=True,
+        )
+
+        parsed = parse_result or parse_goal_output(output)
+        previous_output = summarize_last_coordinator_turn(_history.messages) or output
+        missing_marker = parsed.missing_marker
+
+        if parsed.signal == GoalSignal.DONE:
+            return
+
+

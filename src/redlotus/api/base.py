@@ -1,46 +1,46 @@
 from __future__ import annotations
 
-import os
-import sys
-import signal
-import shutil
-import threading
-from pathlib import Path
-from copy import deepcopy
-from urllib.parse import urlsplit
-from redlotus.runtime.config import (
-    ConfigError,
-    settings,
-    load_config,
-    update_config,
-    config_file,
-    config_source_summary,
-    get_model_and_params,
-    _frozen,
-    _model_selection_field,
-    _validate_config,
-    _model_roles,
-    _selected_model_name_path,
-    get_env,
-)
-
-import re
-import time
 import asyncio
 import contextvars
 import mimetypes
+import os
+import re
+import shutil
+import signal
+import sys
+import threading
+import time
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import Any, Awaitable, Callable, TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
-from redlotus.runtime import config as app_config, logging as logger
+from redlotus.runtime import config as app_config
+from redlotus.runtime import logging as logger
+from redlotus.runtime.config import (
+    ConfigError,
+    _frozen,
+    _model_roles,
+    _model_selection_field,
+    _selected_model_name_path,
+    _validate_config,
+    config_file,
+    config_source_summary,
+    get_env,
+    get_model_and_params,
+    load_config,
+    settings,
+    update_config,
+)
 from redlotus.runtime.network import close_all_clients
-from redlotus.tools.interaction import UserMessage
+from redlotus.sessions.control import UserMessage
+
 if TYPE_CHECKING:
     from redlotus.core.system import AgentSystem
-from redlotus.core.history import ChatHistory
-from redlotus.core.session import SessionController
-from redlotus.core.agents import InputAdmission
 from redlotus.runtime.resources import WorkspaceContext, current_workspace
+from redlotus.sessions.context import ChatHistory
+from redlotus.sessions.control import InputAdmission, SessionController
 from redlotus.tools import registry as tool_telemetry
 
 
@@ -128,15 +128,17 @@ class BotBase:
 
     def _agent_for_session(self, session_id):
         from redlotus.core.system import AgentSystem
+        from redlotus.ui import presentation
 
         state = self._session(session_id)
         if state.agent is None:
             state.agent = AgentSystem(
+                presentation=presentation,
                 owner_memory_allowed=self._is_owner_session(session_id),
                 input_controller=state.inputs,
             )
             state.agent.set_ask_user_handler(self._ask_user)
-            state.agent.set_task_directory(f"{self.platform_tag}_{session_id[:20]}")
+            state.agent.toolkit.set_task_directory(f"{self.platform_tag}_{session_id[:20]}")
         return state.agent
 
     async def _close_session(self, state):
@@ -275,11 +277,6 @@ class BotBase:
                     turn.user_message,
                     state.history,
                     turn_id=turn.admission.id,
-                    conversation_log_hint=identity,
-                    conversation_log_extra={
-                        "session_id": identity,
-                        "platform": self.platform_tag,
-                    },
                 )
                 return result
         finally:
@@ -588,14 +585,16 @@ def install_stop_handlers(stop_event: asyncio.Event) -> None:
 async def run_cli(system=None):
     """Run the interactive RedLotus CLI/TUI."""
     from redlotus.core.system import AgentSystem
+    from redlotus.ui import presentation
+    from redlotus.ui.console import AgentCliController
 
     if system is None:
         load_config()
-        system = AgentSystem()
+        system = AgentSystem(presentation=presentation)
     stop_event = asyncio.Event()
     install_stop_handlers(stop_event)
     try:
-        await system.run_interactive(stop_event=stop_event)
+        await AgentCliController(system).run_interactive(stop_event=stop_event)
     finally:
         await system.shutdown()
         await close_all_clients()
@@ -608,10 +607,11 @@ def main() -> None:
         if not asyncio.run(prepare_startup_configuration()):
             return
         from redlotus.core.system import AgentSystem
+        from redlotus.ui import presentation
 
         deadline = ExitDeadline(settings()["lifecycle"]["shutdown_grace_seconds"])
         try:
-            system = AgentSystem(exit_deadline=deadline)
+            system = AgentSystem(presentation=presentation, exit_deadline=deadline)
             asyncio.run(run_cli(system))
         finally:
             deadline.close()

@@ -3,53 +3,47 @@
 from __future__ import annotations
 
 import asyncio
-import re
-from collections.abc import Callable
-from dataclasses import dataclass, replace
-from datetime import datetime, timezone
-from enum import Enum
-from pydantic_ai.messages import BaseToolReturnPart, ModelRequest, ModelResponse, TextPart
-from redlotus.tools.interaction import UserMessage
-from redlotus.prompts.prompt import load_prompt
-from redlotus.prompts.message_text import split_messages_into_turns
 import inspect
 import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from redlotus.core.session import SessionFile
-from redlotus.runtime.resources import current_workspace, conversations_root
 from typing import Any
 
+from redlotus.api.base import configure_api
+from redlotus.core.agents import AgentInvocationState
+from redlotus.core.history import (
+    UsageReport,
+    context_usage_breakdown,
+    model_message_files_for_path,
+    session_model_message_files,
+    summarize_usage_files,
+)
+from redlotus.prompts.prompt import get_skills_as_in_system_prompt
 from redlotus.runtime.config import (
+    config_file,
+    config_sources,
     get_agent_roles,
     get_env,
     get_model_and_params,
     role_supported_thinking_efforts,
-    update_config,
     set_model_name,
     settings,
-    config_file,
-    config_sources,
+    update_config,
 )
-from redlotus.api.base import configure_api
-from redlotus.core.agents import AgentInvocationState, TRACE_STORE
 from redlotus.runtime.network import (
     ModelTarget,
     _lookup_openrouter_meta,
     lookup_model_context,
     lookup_model_max_output_tokens,
 )
-from redlotus.core.history import (
-    context_usage_breakdown,
-    UsageReport,
-    model_message_files_for_path,
-    session_model_message_files,
-    summarize_usage_files,
-    ChatHistory,
-)
-from redlotus.prompts.prompt import get_skills_as_in_system_prompt
+from redlotus.runtime.resources import conversations_root, current_workspace
+from redlotus.sessions.context import TRACE_STORE, ChatHistory
+from redlotus.sessions.storage import SessionFile
 from redlotus.tools.registry import SkillsManager
-from redlotus.core.presentation import (
+from redlotus.ui.presentation import (
+    build_panel_snapshot,
     console,
     print_error,
     print_markdown,
@@ -57,7 +51,6 @@ from redlotus.core.presentation import (
     print_panel,
     print_success,
     print_warning,
-    build_panel_snapshot,
     render_panel,
 )
 
@@ -103,7 +96,7 @@ def _openrouter_agent_meta_lines(model_name: str) -> list[str]:
 
 
 def print_cli_help() -> None:
-    from redlotus.core.console import COMMAND_HELP
+    from redlotus.ui.widgets import COMMAND_HELP
 
     rows = [
         f"| `{command}` | {description.replace('<', '&lt;').replace('>', '&gt;')} |"
@@ -402,7 +395,7 @@ class SlashCommands:
             "/pwd": lambda: print_success(str(self.system.workspace.root)),
             "/skills": lambda: print_loaded_skills(self.system._skills_manager),
             "/tasks": lambda: print_markdown_panel(
-                self.system.structured_task_status(), title="任务状态"
+                self.system._task_manager.structured_status(), title="任务状态"
             ),
             "/context": lambda: _print_context_usage(
                 self.system, self.state.history, self.system._manager_history
@@ -522,7 +515,7 @@ class SlashCommands:
             print_markdown_panel(
                 render(await snapshot()) + "\n\n" + detail, title=label
             )
-            answer = await self.system.ask_user(
+            answer = await self.system.toolkit.ask_user(
                 f"Type CLEAR {label} to clear {label}. This cannot be undone."
             )
             if answer.strip() == "CLEAR " + label:
@@ -612,7 +605,7 @@ class SlashCommands:
             return None
         await interactive_set_api(
             embedding=len(self.parts) == 2,
-            ask=self.system._cli_controller.config_prompt,
+            ask=self.controller.config_prompt,
         )
         return None
 
@@ -639,142 +632,6 @@ class SlashCommands:
     async def compress(self):
         lines = await self.system.compress_context(self.state.history)
         print_panel("\n".join(lines), title="上下文压缩")
-
-
-class GoalSignal(str, Enum):
-    CONTINUE = "CONTINUE"
-    DONE = "DONE"
-
-
-GOAL_MARKER_RE = re.compile(
-    r"<!--\s*REDLOTUS_GOAL\s*:\s*(CONTINUE|DONE)\s*-->",
-    re.IGNORECASE,
-)
-
-
-@dataclass(frozen=True)
-class GoalParseResult:
-    signal: GoalSignal
-    cleaned_text: str
-    marker_count: int
-
-    @property
-    def missing_marker(self) -> bool:
-        return self.marker_count == 0
-
-
-def parse_goal_output(text: str) -> GoalParseResult:
-    """Strip goal-mode sentinel markers and return the effective signal.
-
-    If no marker is present, goal mode treats the turn as CONTINUE so the next
-    prompt can remind the model to add an explicit status marker.
-    """
-    body = text or ""
-    matches = list(GOAL_MARKER_RE.finditer(body))
-    cleaned = GOAL_MARKER_RE.sub("", body).strip()
-    if not matches:
-        return GoalParseResult(GoalSignal.CONTINUE, cleaned, 0)
-    signal = GoalSignal(matches[-1].group(1).upper())
-    return GoalParseResult(signal, cleaned, len(matches))
-
-
-def summarize_last_coordinator_turn(messages: list) -> str:
-    """Build goal-mode previous_output from the latest turn's assistant text and tool returns."""
-    turns = split_messages_into_turns(messages)
-    if not turns:
-        return ""
-    sections: list[str] = []
-    for msg in turns[-1]:
-        if isinstance(msg, ModelResponse):
-            for part in msg.parts:
-                if isinstance(part, TextPart):
-                    text = (part.content or "").strip()
-                    if text:
-                        sections.append(text)
-        elif isinstance(msg, ModelRequest):
-            for part in msg.parts:
-                if isinstance(part, BaseToolReturnPart):
-                    content = (
-                        part.model_response_str()
-                        if hasattr(part, "model_response_str")
-                        else str(part.content)
-                    )
-                    tool_name = part.tool_name or "tool"
-                    sections.append(f"[{tool_name}]\n{content}")
-    return "\n\n".join(sections).strip()
-
-
-def build_goal_iteration_prompt(
-    *,
-    original_goal: str,
-    iteration: int,
-    previous_output: str = "",
-    missing_marker_reminder: bool = False,
-) -> str:
-    template = load_prompt("goal_iteration.md")
-    return template.format(
-        original_goal=original_goal.strip(),
-        iteration=iteration,
-        previous_output=previous_output.strip(),
-        user_updates="",
-        missing_marker_reminder=str(bool(missing_marker_reminder)).lower(),
-    )
-
-
-async def run_goal_loop(
-    system: Any,
-    *,
-    message: UserMessage,
-    history: Any,
-    turn_id: str | None,
-    conversation_log_hint: str,
-    set_iteration: Callable[[int], None] | None = None,
-) -> None:
-    original_goal = message.text or ""
-    previous_output = ""
-    missing_marker = False
-    iteration = 0
-
-    while True:
-        iteration += 1
-        if set_iteration is not None:
-            set_iteration(iteration)
-
-        prompt_text = build_goal_iteration_prompt(
-            original_goal=original_goal,
-            iteration=iteration,
-            previous_output=previous_output,
-            missing_marker_reminder=missing_marker,
-        )
-
-        parse_result: GoalParseResult | None = None
-
-        def output_transform(raw_output: str) -> str:
-            nonlocal parse_result
-            parse_result = parse_goal_output(raw_output)
-            return parse_result.cleaned_text
-
-        prompt_message = replace(message, text=prompt_text)
-        _history, output = await system.run_agent_system(
-            prompt_message,
-            history,
-            conversation_log_hint=conversation_log_hint,
-            conversation_log_extra={
-                "turn_id": turn_id,
-                "goal_mode": True,
-                "goal_iteration": iteration,
-            },
-            turn_id=turn_id,
-            output_transform=output_transform,
-            _inside_goal=True,
-        )
-
-        parsed = parse_result or parse_goal_output(output)
-        previous_output = summarize_last_coordinator_turn(_history.messages) or output
-        missing_marker = parsed.missing_marker
-
-        if parsed.signal == GoalSignal.DONE:
-            return
 
 
 MODEL_MESSAGES_GLOB = "*/model_messages.json"
@@ -858,7 +715,7 @@ def list_workspace_snapshots(*, root=None, include_unloadable=False):
             ))
             continue
         else:
-            from redlotus.core.presentation import print_warning
+            from redlotus.ui.presentation import print_warning
             print_warning(f"会话无法加载: {path}: {entry.error}")
             if include_unloadable:
                 try:

@@ -5,22 +5,29 @@ import asyncio
 import inspect
 import json
 import threading
-import httpx
-from pathlib import Path
-from dataclasses import dataclass, field
-from copy import deepcopy
 from collections.abc import Callable, Mapping
+from copy import deepcopy
+from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
+
+import httpx
 from pydantic_ai import ModelSettings
-from pydantic_ai.models import create_async_http_client, get_user_agent, infer_model, parse_model_id
+from pydantic_ai.models import (
+    create_async_http_client,
+    get_user_agent,
+    infer_model,
+    parse_model_id,
+)
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers import infer_provider_class
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.deepseek import DeepSeekProvider
+
 from redlotus.runtime import logging as logger
 from redlotus.runtime.config import (
-    apply_thinking_config,
     ConfigError,
+    apply_thinking_config,
     config_source_summary,
     credential_value,
     get_context_config,
