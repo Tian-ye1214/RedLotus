@@ -297,7 +297,7 @@ PyInstaller 浏览器构建采用 [Playwright 官方方式](https://playwright.d
 
 同批 `frozen/onedir-usage` 与 `frozen/onefile-usage` 均构建完成并实际调用模型：onedir 恢复原会话后委派 Worker 打开 Example Domain、读取标题并关闭浏览器，累计 4 回合／21 次响应；onefile 在明确的浅目录控制组恢复原会话、读回未变的 `42`，Worker 打开／关闭同一网页，累计 3 回合／28 次响应。二者无缺失 usage，活动 Agent 归零，正常退出。制品哈希及账本汇总分别保留于 `frozen/usage-manifest.json`、`usage-entry-summary.json`；这些是本地 1.0.1 候选，不是公开新版本或真实升级，也不覆盖之后的作用域和运行策略修改。
 
-当前运行策略修改的源码证据：`remaining-policy-green.log` 为 99 项辅助回归（37.08 秒）。真实 Worker 执行 Skill 时请求 300 秒，统一子进程入口返回配置的 2 秒超时；随后用于检查进程的部分模型命令失败，PID 回收未在这条真实场景独立证明，原始失败仍保留。另一个源码会话 `c11bf37cea7f4ddb89b949366bcbdcc9` 验证省略选择器工具超时后按配置 200 毫秒返回、关闭浏览器；真实记忆生产期间 `/STM clear` 按 0.2 秒等待返回忙碌，原生产继续正式提交；从 python.org 实际下载的 537 字节引用送入模型后，回答与文件的 5 个具名 User-agent 一致。最终 3 回合、12 次响应、活动 Agent 为 0、正常退出。证据为 `remaining-policy-live.json` 和 `reference-policy-live.json`。制品仍需包含并验证这批最新代码。
+此前运行策略修改的源码证据：`remaining-policy-green.log` 为 99 项辅助回归（37.08 秒）。真实 Worker 执行 Skill 时请求 300 秒，统一子进程入口返回配置的 2 秒超时；随后用于检查进程的部分模型命令失败，PID 回收未在这条真实场景独立证明，原始失败仍保留。另一个源码会话 `c11bf37cea7f4ddb89b949366bcbdcc9` 验证省略选择器工具超时后按配置 200 毫秒返回、关闭浏览器；真实记忆生产期间 `/STM clear` 按 0.2 秒等待返回忙碌，原生产继续正式提交；从 python.org 实际下载的 537 字节引用送入模型后，回答与文件的 5 个具名 User-agent 一致。最终 3 回合、12 次响应、活动 Agent 为 0、正常退出。证据为 `remaining-policy-live.json` 和 `reference-policy-live.json`；后续制品验收分别记录，不能混用回合增量。
 
 新增必填字段是 `memory_perception.quiescence_wait_timeout_seconds`、`input_limits.defaults.reference_download_timeout_seconds`、`browser.action_timeout_seconds` 和 `browser.navigation_timeout_seconds`。引用下载允许既有网关／角色覆盖；浏览器每次操作刷新默认值。字段契约不带测试默认值，缺项由已有向导收集，未修改私人配置。深目录 onefile、剩余策略来源审计、逐函数证明和完整发布门槛仍未完成。
 
@@ -315,6 +315,12 @@ PyInstaller 浏览器构建采用 [Playwright 官方方式](https://playwright.d
 
 上述制品仍为本地 1.0.1 候选，未发布、推送或合并。当前源码数量约束已通过；逐函数必要性、剩余运行策略来源、QQ 代理下载、onefile 深目录和原全量发布验收继续按各自证据保持未完成。
 
-以 `fab35348` 为基线的静态审查覆盖 1,086 个函数／lambda 位置。随后合并模型选项读取及原子写入，删除单次缓存路径包装，关闭七项重复实现缺口及文件锁策略缺口，117 项证明或验收缺口仍未关闭，详见[开发约定](development.md#代码组织与精简)。文件锁首次配置使用待提交值，解析并发、进程回收及浏览器启动读取明确配置，子线程等待复用已有完成通知。当前源码完整辅助回归为 115 项（37.23 秒），真实终端完成单字段配置、恢复、引用输入及浏览器模型调用；打包制品的已通过基线仍是前述 `fab35348`，不能沿用旧制品证据宣布新源码全部可合并。
+以 `fab35348` 为基线的静态审查覆盖 1,086 个函数／lambda 位置。随后合并模型选项读取及原子写入，删除单次缓存路径包装，关闭七项重复实现缺口及文件锁策略缺口，117 项证明或验收缺口仍未关闭，详见[开发约定](development.md#代码组织与精简)。文件锁首次配置使用待提交值，解析并发、进程回收及浏览器启动读取明确配置，子线程等待复用已有完成通知。当前源码完整辅助回归为 115 项（37.23 秒）；后续制品已更新到 `d01eb60a`，实际安装包完整回归为 115 项（45.63 秒），不能因此宣布全部发布门槛已通过。
 
 该精简批次的真实源码记录为 `reuse-source-live.json`：恢复旧会话后 Worker 用 Python 计算 25+17，并只读核对旧文件仍是两个字节 `42`；Coordinator 手工压缩 40 条消息为 1 条并保存。重新启动最终源码后加载压缩记录，正确回答临时代码，再真实调用 `write_file`／`read_file` 完成两行文件。独立核对磁盘为 `reuse\r\n42\r\n`，旧文件指纹未变；最终 9 回合、38 次累计响应，无缺失 usage，本批新增 2 回合／9 次响应。两个进程活动 Agent 均归零、退出码 0。该场景是手工压缩，不代表自动阈值门槛。首个统计脚本未解包读取函数返回的消息／元数据，错误得到零响应；修正脚本后与 CLI 和账本的 38 条记录一致，没有修改应用以迎合断言。
+
+`d01eb60a` 是当前应用与制品基线。`packages-d01eb60a/inspection.json` 核对 wheel／sdist 的 36 个应用文件和字段契约，`frozen/d01eb60a-manifest.json` 核对 onedir／onefile 的 33 个 CLI／TUI 可达应用模块、Chromium 及凭据排除。四个制品 SHA-256 分别以 `b41a2cd1`（wheel）、`c4d3bec4`（sdist）、`3504583c`（onedir EXE）、`53e21d56`（onefile EXE）开头，完整值见本地清单。两个 PyInstaller 构建保留已解释的可选 pycparser 表及 pandas Styler／jinja2 提示，不宣称构建零警告。
+
+最新源码真实验收包含单字段配置提交、引用顺序、配置浏览器及 Worker 超时回收。前两条父子进程命令在执行前被拒绝；显式命令实际获得 1 秒超时回执后，最终自动观察器在 600 秒自然结束窗口之前确认两个 PID 都已退出。首个人工 PID 检查过晚的结果也保留，不能用于证明及时回收。源码累计 14 回合、62 次响应，本批新增 4 回合／23 次响应，usage 无缺失；见 `runtime-policy-source-live.json` 及 `runtime-policy-child-verified-evidence.json`。
+
+`d01eb60a-entry-summary.json` 记录同一提交的实际安装入口：日常 pip 从 14 回合恢复并按序读入两个引用文件，新增 1 回合／1 次响应；onedir 从 6 回合恢复后打开 Example Domain，读取 960×640、en-US 并关闭，新增 1 回合／4 次响应；onefile 从浅目录 5 回合恢复，引用旧文件 `42` 并完成相同浏览器检查，新增 1 回合／4 次响应。三者最终累计为 15／7／6 回合、63／37／40 次响应，活动 Agent 为 0、退出码 0、无缺失 usage；onefile 解压目录清空，旧文件指纹不变。统计脚本曾漏传工作区，引用归属检查正确拒绝旧截图恢复；补充真实隔离工作区后完成统计，未改应用、未增加模型调用。深目录 onefile、QQ 代理下载、剩余策略来源、逐函数证明和完整发布验收仍未完成。
