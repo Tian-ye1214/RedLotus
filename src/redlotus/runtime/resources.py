@@ -251,7 +251,7 @@ def file_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:
     timeout = settings()["storage"]["file_lock_timeout_seconds"] if timeout is None else timeout
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with FileLock(str(lock_path), timeout=timeout, is_singleton=True):
+    with FileLock(str(lock_path), is_singleton=True).acquire(timeout=timeout):
         yield
 
 def read_locked_json(path: Path):

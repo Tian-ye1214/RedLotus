@@ -146,10 +146,9 @@ def test_atomic_write_preserves_native_encoding_and_original_on_replace_failure(
 def test_shared_file_lock_obeys_configured_wait_under_real_contention(tmp_path, timeout):
     from concurrent.futures import ThreadPoolExecutor
 
-    from filelock import FileLock, Timeout
+    from filelock import Timeout
     from redlotus.runtime.resources import file_lock
 
-    (tmp_path / "config.json").write_text(json.dumps({"storage": {"file_lock_timeout_seconds": timeout}}))
     path = tmp_path / "owned.json"
 
     def acquire():
@@ -157,7 +156,8 @@ def test_shared_file_lock_obeys_configured_wait_under_real_contention(tmp_path, 
             return "acquired"
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        with FileLock(str(path.with_suffix(".json.lock")), timeout=0):
+        with file_lock(path, timeout=1):
+            (tmp_path / "config.json").write_text(json.dumps({"storage": {"file_lock_timeout_seconds": timeout}}))
             waiting = executor.submit(acquire)
             with pytest.raises(Timeout):
                 waiting.result(timeout=1)
@@ -175,11 +175,12 @@ async def test_first_configuration_commit_uses_the_pending_lock_policy(tmp_path,
     async def answer(*args, **kwargs):
         return next(answers)
 
-    def lock(*args, **kwargs):
-        observed.append(kwargs["timeout"])
-        return FileLock(*args, **kwargs)
+    class ObservedLock(FileLock):
+        def acquire(self, timeout=None, *args, **kwargs):
+            observed.append(timeout)
+            return super().acquire(timeout, *args, **kwargs)
 
-    monkeypatch.setattr(resources, "FileLock", lock)
+    monkeypatch.setattr(resources, "FileLock", ObservedLock)
     setup = ConfigurationSetup(answer, emit=lambda text: None)
     assert not (tmp_path / "global/config.json").exists()
     assert await setup.fill(("storage", "file_lock_timeout_seconds"))

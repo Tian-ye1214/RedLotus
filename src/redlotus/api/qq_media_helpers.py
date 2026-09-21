@@ -122,7 +122,7 @@ def download_to_binary(url: str, filename: str = "") -> BinaryContent:
                                 media_type=pick_ct(url, resp.headers.get("content-type", ""), raw, filename=filename),
                                 identifier=filename or None,
                             )
-                    except (httpx.ConnectError, httpx.ConnectTimeout):
+                    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError):
                         if ip == addresses[-1]:
                             raise
         raise ValueError("重定向次数过多")

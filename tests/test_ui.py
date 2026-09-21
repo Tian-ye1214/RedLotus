@@ -493,7 +493,8 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
 
 
 @pytest.mark.parametrize("timeout", [2, 7])
-def test_qq_second_download_failure_is_not_a_partial_image_request(tmp_path, monkeypatch, timeout):
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError])
+def test_qq_second_download_failure_is_not_a_partial_image_request(tmp_path, monkeypatch, timeout, failure):
     from functools import partial
 
 
@@ -505,7 +506,7 @@ def test_qq_second_download_failure_is_not_a_partial_image_request(tmp_path, mon
     def respond(request):
         timeouts.append(request.extensions["timeout"]["read"])
         if request.url.host == "2606:4700:4700::1111":
-            raise httpx.ConnectError("first address cannot establish TLS")
+            raise failure("first address cannot establish a connection")
         return httpx.Response(404 if request.url.path.endswith("missing.png") else 200,
                               content=b"fixture", headers={"content-type": "image/png"})
 
