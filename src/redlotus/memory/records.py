@@ -1,31 +1,30 @@
-"""Memory records responsibilities."""
+"""Memory records, core Markdown and current-session observations."""
 
 from __future__ import annotations
-
 import asyncio
-import hashlib
 import json
-import re
-import shutil
 from dataclasses import asdict
-from pathlib import Path
-from typing import Literal
-
-from pydantic import BaseModel, Field, computed_field
-from pydantic_ai.messages import BinaryContent, ImageUrl, TextContent
-
-from redlotus.documents.references import ReferenceStore
-from redlotus.models.providers import ModelInputPolicy
-from redlotus.runtime.config import settings
-from redlotus.runtime.context import Outcome
-from redlotus.runtime.files import (
-    atomic_write_text,
-    file_lock,
+from pydantic_ai.messages import BinaryContent, ImageUrl, ModelMessagesTypeAdapter, TextContent
+from redlotus.core.config import (
+    settings,
     iso_utc_now,
     memory_dir,
+    atomic_write_text,
+    file_lock,
     project_data_dir,
 )
+from redlotus.core.gateway import ModelInputPolicy
+from redlotus.core.agents import Outcome
+from redlotus.tools.references import ReferenceStore
 from redlotus.tools.registry import tool_result_succeeded
+
+
+from typing import Literal
+from pydantic import BaseModel, Field, computed_field
+import re
+import shutil
+from pathlib import Path
+import hashlib
 
 
 class MemoryContent(BaseModel):
@@ -166,11 +165,7 @@ class ObservedTurn(BaseModel):
 
 
 SECTIONS = ("用户画像", "可复用经验")
-
-
 EMPTY_MEMORY = "# MEMORY\n\n## 用户画像\n\n## 可复用经验\n"
-
-
 CREDENTIAL_PATTERN = re.compile(
     r"(?i)(?:\b(?:api[_ -]?key|access[_ -]?token|password|secret|密码|密钥)\s*[:=：]\s*\S+"
     r"|\bsk-[A-Za-z0-9_-]{12,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|Bearer\s+[A-Za-z0-9_.-]{12,})"
@@ -234,92 +229,49 @@ class LongTermMemory:
     def get_injection(self):
         return "<core_memory>\n" + self.read() + "\n</core_memory>"
 
-    @staticmethod
-    def _marker(record):
-        return re.compile(
-            r"<!-- memory:"
-            + re.escape(record.id)
-            + r"(?: version:(\d+) hash:([0-9a-f]{16}))? -->\n(.*?)\n<!-- /memory -->",
-            re.S,
-        )
-
-    def _projected_body(self, original, record, previous=None, *, core_old_text=""):
-        prefix, sections = self._parse(original)
-        marker = self._marker(record)
-        match = marker.search(original)
-        content = record.content or record.result or record.goal
-        if match:
-            current = match.group(3).strip()
-            trusted = match.group(2) == hashlib.sha256(current.encode()).hexdigest()[:16]
-            old = previous.content or previous.result or previous.goal if previous else ""
-            if current not in {old.strip(), content.strip()} and not trusted:
-                return None
-        sections = {name: marker.sub("", text).strip() for name, text in sections.items()}
-        if record.state == "active" and record.projection != "none":
-            if CREDENTIAL_PATTERN.search(content):
-                raise ValueError("Credentials cannot enter core memory")
-            name = "用户画像" if record.projection == "profile" else "可复用经验"
-            digest = hashlib.sha256(content.strip().encode()).hexdigest()[:16]
-            block = (
-                f"<!-- memory:{record.id} version:{record.version} hash:{digest} -->\n"
-                f"{content}\n<!-- /memory -->"
-            )
-            if core_old_text and sections[name].count(core_old_text) == 1:
-                sections[name] = sections[name].replace(core_old_text, block, 1)
-            elif core_old_text and not match and content not in sections[name]:
-                raise ValueError("Core memory changed; old text no longer matches")
-            elif not match and sections[name].count(content) == 1:
-                sections[name] = sections[name].replace(content, block, 1)
-            else:
-                sections[name] = (sections[name] + "\n\n" + block).strip()
-        elif core_old_text and not match:
-            if sum(text.count(core_old_text) for text in sections.values()) > 1:
-                raise ValueError("Core memory text to remove is ambiguous")
-            sections = {
-                name: text.replace(core_old_text, "", 1).strip()
-                for name, text in sections.items()
-            }
-        return self._render(prefix, sections)
-
-    def plan_records(self, changes):
-        """Validate manual edits and return an unwritten projection plan."""
+    def apply_record(self, record, previous=None, *, core_old_text=""):
         self.read()
         with file_lock(self.path):
             original = self.path.read_text(encoding="utf-8")
-        updated, accepted = original, []
-        for record, previous, core_old_text in changes:
-            candidate = self._projected_body(
-                updated, record, previous, core_old_text=core_old_text
+            prefix, sections = self._parse(original)
+            marker = re.compile(
+                r"<!-- memory:"
+                + re.escape(record.id)
+                + r" -->\n(.*?)\n<!-- /memory -->",
+                re.S,
             )
-            if candidate is not None:
-                updated = candidate
-                accepted.append(record)
-        return original, updated, accepted
-
-    def commit_plan(self, expected, updated):
-        """Publish a prevalidated plan only if the editable file is unchanged."""
-        with file_lock(self.path):
-            if self.path.read_text(encoding="utf-8") != expected:
-                raise ValueError("Core memory changed after projection validation")
-            if updated != expected:
+            match = marker.search(original)
+            content = record.content or record.result or record.goal
+            if match and previous and record.origin != "explicit":
+                old = previous.content or previous.result or previous.goal
+                if match.group(1).strip() not in (old.strip(), content.strip()):
+                    return False
+            sections = {
+                name: marker.sub("", text).strip() for name, text in sections.items()
+            }
+            if record.state == "active" and record.projection != "none":
+                if CREDENTIAL_PATTERN.search(content):
+                    raise ValueError("Credentials cannot enter core memory")
+                name = "用户画像" if record.projection == "profile" else "可复用经验"
+                text = sections[name]
+                block = f"<!-- memory:{record.id} -->\n{content}\n<!-- /memory -->"
+                if core_old_text and text.count(core_old_text) == 1:
+                    sections[name] = text.replace(core_old_text, block, 1)
+                elif core_old_text and not match and content not in text:
+                    raise ValueError("Core memory changed; old text no longer matches")
+                elif content not in text:
+                    sections[name] = (text + "\n\n" + block).strip()
+            elif core_old_text and not match:
+                if sum(text.count(core_old_text) for text in sections.values()) > 1:
+                    raise ValueError("Core memory text to remove is ambiguous")
+                sections = {
+                    name: text.replace(core_old_text, "", 1).strip()
+                    for name, text in sections.items()
+                }
+            updated = self._render(prefix, sections)
+            if updated != original:
                 atomic_write_text(self.path, updated)
-
-    def apply_record(self, record, previous=None, *, core_old_text=""):
-        expected, updated, accepted = self.plan_records(
-            [(record, previous, core_old_text)]
-        )
-        if not accepted:
-            return False
-        self.commit_plan(expected, updated)
-        return True
-
-    def reconcile(self, records):
-        """Idempotently project formal records without consuming draft data."""
-        expected, updated, accepted = self.plan_records(
-            [(record, None, "") for record in records]
-        )
-        self.commit_plan(expected, updated)
-        return [record.id for record in accepted]
+            return True
 
     def legacy_content(self):
         body = self.read()

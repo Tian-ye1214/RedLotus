@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/icon.svg" alt="RedLotus icon" width="112" height="112">
+</p>
+
 <h1 align="center">RedLotus · 红莲极意</h1>
 
 <p align="center">
@@ -22,6 +26,10 @@ RedLotus 是一个运行在终端中的 AI Agent。它会根据任务复杂度�
 python -m pip install --upgrade redlotus
 redlotus
 ```
+
+<p align="center">
+  <img src="docs/assets/terminal.png" alt="RedLotus 终端任务示例" width="760">
+</p>
 
 ## 主要功能
 
@@ -95,22 +103,27 @@ pip install "redlotus[all]"      # 全部可选依赖
 浏览器能力首次使用前还需要安装 Chromium：
 
 ```bash
-python -m playwright install chromium
+playwright install chromium
 ```
-
-安装浏览器组件时，使用运行 RedLotus 的同一个 Python 环境；其他环境已安装不代表当前入口可用。
 
 ## 首次配置
 
 全局配置位于 `~/.redlotus/config.json`。逐字段优先级为本地 `src/redlotus/config.json` → 本地 `.env` → 全局 JSON；源码以仓库根目录、pip 以当前目录、PyInstaller 以 EXE 目录为本地查找基准，不向父目录搜索，也不使用 AppData 配置。`/config` 显示实际来源和修改目标。
 
-可用 `REDLOTUS_CONFIG_FILE` 或 `REDLOTUS_CONFIG_DIR` 显式选择配置。缺项应明确报错，不从隐藏模板补齐。项目会话与日志保存在项目 `.redlotus`，引用、缓存和产物位于项目 `WorkDatabase`；记忆数据库及长期记忆文档位于用户 `.redlotus`。安装包不含凭据。
+可用 `REDLOTUS_CONFIG_FILE` 或 `REDLOTUS_CONFIG_DIR` 显式选择配置。缺少必填项时会明确报错，不从隐藏模板补齐。项目会话与日志保存在项目 `.redlotus`，引用、缓存和产物位于项目 `WorkDatabase`；记忆数据库及长期记忆文档位于用户 `.redlotus`。安装包不含凭据。
 
-运行策略在配置中设置，不通过输入框填写。`models.<role>.max_context_windows` 缺失或为 `null` 时直接使用 OpenRouter metadata，正整数则覆盖容量。空配置或部分配置会进入模型、连接和凭据填写，取消不保存，确认只写本次修改。创建 Agent 前会统一列出缺少的运行字段，并按字段和来源报告类型错误；请依[完整字段参考：类型、单位、必需角色及可选功能](docs/design.md#configuration-reference)手工填写后重启。两个连接字段不足以完成配置，完整首用流程仍需真实验收。
+至少需要配置模型服务地址和密钥：
 
-网关复用 Pydantic AI 的 OpenAI Chat、OpenAI Responses、Anthropic Messages 和 Google 适配。Manager、Worker、Coordinator、Compressor、Title 可以分别配置或选择命名预设。感知通过 `memory_perception.model_role` 选择子 Agent 配置，由用户明确选择，与上下文压缩独立。RAG 连接、模型及请求策略由 `SILICONFLOW_BASE`、`SILICONFLOW_KEY`、`RAG_models` 和 `rag_service` 提供。
+```json
+{
+  "BASE_URL": "https://your-api.example.com/v1",
+  "API_KEY": "your-api-key"
+}
+```
 
-命名凭据引用从同一三层配置读取，包括本地 `.env`；不读取宿主环境变量或全局 `.env`。pip 的本地查找基准是启动目录，源码是仓库根，EXE 是程序目录。不要将真实密钥提交到 Git。详细结构见 [全局配置、网关预设与安装说明](docs/design.md#模型配置与上下文)。
+网关复用 Pydantic AI 的 OpenAI Chat、OpenAI Responses、Anthropic Messages 和 Google 适配。Manager、Worker、Coordinator、Compressor 可以分别配置或选择命名预设。感知通过 `memory_perception.model_role` 选择子 Agent 配置，默认使用 Worker，与上下文压缩独立。RAG 连接、模型及请求策略由 `SILICONFLOW_BASE`、`SILICONFLOW_KEY`、`RAG_models` 和 `rag_service` 提供。
+
+凭据可以使用命名环境引用或用户配置目录的 `.env`；只有开发入口显式选择仓库 `.env`，安装入口不搜索当前项目。不要将真实密钥提交到 Git。详细结构见 [全局配置、网关预设与安装说明](docs/gateway-installation.md)。
 
 ## 终端使用
 
@@ -132,9 +145,9 @@ python -m playwright install chromium
 | `Ctrl+R` | 打开逐块改动审查 |
 | `Ctrl+C` | 停止当前回合 |
 | `Ctrl+Q` | 退出 |
-| `@路径` | 引用文档或图片，支持 Tab 补全；文件数上限由配置决定，视频尚未真实验证 |
+| `@路径` | 引用文档、图片或视频，支持 Tab 补全；每次最多 20 个文件 |
 
-加急消息使用普通用户消息样式，不添加加急标签，也不支持文字 `/urgent` 命令。Ctrl+Enter 需要终端发送可区分的事件；若 PyCharm 把它与 Enter 编码成相同字符，应用无法还原区别，可使用底部已有的“发送”操作。Shift+Tab 独立编码，能识别它不表示支持 Ctrl+Enter。正式程序已移除按键检测；检测只用于测试阶段。见[按键输入说明](docs/design.md#请求执行)。
+加急消息以正常亮度和“加急”标记显示，不再使用文字 `/urgent` 命令。Windows Terminal 的 LF 编码和支持扩展键盘协议的终端共用这一入口。部分 PyCharm 经典终端会把 `Ctrl+Enter` 与普通回车发送成相同字符，应用无法区分；终端需保留组合键编码。具体支持边界与验证记录见 [按键输入说明](docs/keyboard-input.md)。
 
 引用之间不必加空格，例如 `@审稿意见.md解读这个文档，@图片.png分析这张图`。Tab 补全当前引用，遇到含空格或分隔符的路径会自动加引号，也可以手写 `@"路径"`、`@'路径'` 或 `@{路径}`。文件按首次出现顺序去重；超过 20 个不同文件会提示错误，不会只上传其中一部分。
 
@@ -155,6 +168,7 @@ python -m playwright install chromium
 | `/compress` | 压缩 Manager / Coordinator 上下文 |
 | `/status` · `/trace` · `/tasks` | 查看生命周期、调用追踪和任务状态 |
 | `/stop` · `/cancel` | 中断当前回合或 invocation |
+| `/urgent <内容>` | 加入当前内循环，与工具结果一起处理；普通消息仍逐条排队 |
 
 </details>
 
@@ -180,14 +194,14 @@ npx clawhub --dir skills install <slug>
 
 ## 文件与数据位置
 
-- 会话轨迹与感知进度保存在项目 `.redlotus`，引用快照保存在项目 `WorkDatabase/references`；压缩改变模型视图，保留原始轨迹供恢复和感知。
+- 会话轨迹、引用快照和感知任务保存在全局用户数据目录，项目事件按 `project_id` 分区；压缩只改变模型视图，完整原文保留。
 - 项目情景与全局长期记录保存在 LanceDB `memory_records_v3`，按 scope 和项目隔离，通过向量检索与重排召回，服务不可用时保留文本检索。
 - `MEMORY.md` 保存用户画像、环境、行为约束与通用经验，不设固定字符上限。它与 system prompt 在会话开始时完整形成快照，写入记忆不重写本会话前缀；新信息通过工具结果和检索消费，新会话读取最新版本。
 - 文件和命令工具默认操作当前项目，生成产物保存在 `WorkDatabase/`。`/cd` 先取消旧会话，再切换运行上下文。
 
 Enter 将输入排入 FIFO 队列；Ctrl+Enter 将加急补充加入当前回合，在下一请求边界与本批工具结果一起送给模型。子 Agent 各自拥有线程、事件循环和客户端，遵守配置中的会话线程上限。感知只处理当前会话每 20 个新增用户回合，附带前 3 回合衔接；新建、加载和退出不额外产生短窗口。主动记忆通过 remember 即时处理，失败和取消不会自动成为成功经验。
 
-向量模型、重排、分块、相似度阈值、候选数量和索引参数继续保留。完整的保留项、替代项与迁移行为见 [重构及 RAG 参数说明](docs/design.md)。
+向量模型、重排、分块、相似度阈值、候选数量和索引参数继续保留。完整的保留项、替代项与迁移行为见 [重构及 RAG 参数说明](docs/refactor.md)。
 
 ## QQ 与微信机器人
 
@@ -200,13 +214,13 @@ pip install "redlotus[bots] @ git+https://github.com/Tian-ye1214/RedLotus.git"
 启动方式：
 
 ```bash
-python -m redlotus.api.QQ
-python -m redlotus.api.WeChat
+python -m redlotus.API.QQ
+python -m redlotus.API.WeChat
 ```
 
 QQ 接入需要先运行 [NapCat](https://github.com/NapNeko/NapCatQQ)，并配置 OneBot WebSocket、机器人 QQ 号和 WebUI token。微信接入在启动后按提示扫码登录。
 
-个人聊天渠道需要配置 `bot.owner_channels.qq`（本人私聊 QQ 号）或 `bot.owner_channels.wechat`（本人 wxid）。未绑定渠道提供文本对话，不开放个人记忆和执行工具。消息在附件下载前登记顺序；任一附件失败明确报告并拒绝不完整请求，清空使旧消息失效。工具问答暂只接收文本，附件回复会明确拒绝并保留待回答问题。真实账号收发仍待验收，见[整改与验收](docs/design.md#本次一致性修复)。
+个人聊天渠道需要配置 `bot.owner_channels.qq`（本人私聊 QQ 号）或 `bot.owner_channels.wechat`（本人 wxid）。未绑定渠道提供文本对话，不开放个人记忆和执行工具。`/stop`、`/clear`、`/urgent` 与终端使用同一回合语义。配置示例见 [渠道绑定](docs/refactor.md#工作区渠道与迁移)。
 
 ## 本地开发
 
@@ -216,6 +230,7 @@ cd RedLotus
 
 pip install -e ".[dev]"
 python main.py
+pytest -q
 ```
 
 构建 Python 包：
@@ -231,10 +246,4 @@ pip install ".[build]"
 pyinstaller build.spec
 ```
 
-源码按配置运行时、核心编排、模型、存储、工具、终端和渠道等职责组织；命令入口为 `redlotus.terminal.console:main`，源码入口仍为 `main.py`。原则上每模块最多 5 个 Python 文件、每文件 500 有效行，并报告物理行数。代码简洁性、复用与逐行必要性同时纳入开发和验收；本轮全部已列整改包已获授权，后续新范围仍逐包审批，见[开发约定](docs/development.md#开发与验收审批)。
-
-## 验证状态
-
-每次功能测试、缺陷复测和发布验收都必须像新用户一样，按文档安装、完成首次配置并从真实入口调用真实服务 API，核对任务结果、产物和恢复。pip 新版本和当轮交付的 PyInstaller 制品必须分别实测；模拟用户操作不能变成模拟模型响应。具体见[真实验收习惯](docs/development.md#真实验收习惯)。
-
-本开发分支为重新实施的修复保留定向真实 API 证据与隔离辅助回归，不继承已撤回实现的通过结论。三平台 CI 仅检查辅助回归、安装和构建。360 回合长测、自动压缩、各环境缓存、真实 QQ／微信及跨平台核心流程仍待逐项验收；没有条件的项目保持未验证。本地 wheel 安装与新 PyPI 版本公开发布分开记录，见[当前证据与剩余验收](docs/design.md#本次验收边界)。
+项目主要代码位于 `src/redlotus/`，分为 `core`、`tools`、`api`、`prompts`、`memory` 五个板块；命令入口为 `redlotus.core.config:main`。

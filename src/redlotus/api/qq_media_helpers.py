@@ -1,26 +1,25 @@
-"""Api qq media helpers responsibilities."""
+"""QQ 媒体解析与下载（供 QQ.py 使用，减小主文件体积）。"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import asyncio
+import os
+import re
+import html
+import base64
+import ipaddress
+import mimetypes
+import socket
+from typing import Any, TYPE_CHECKING
+
+import httpx
+from pydantic_ai import BinaryContent, ImageUrl
+
+from redlotus.core import config as logger
+from redlotus.core.gateway import ModelInputPolicy
 
 if TYPE_CHECKING:
     from ncatbot.core import BaseMessageEvent
-
-import asyncio
-import base64
-import html
-import ipaddress
-import mimetypes
-import os
-import re
-import socket
-
-import httpx
-from pydantic_ai import BinaryContent
-
-from redlotus.api.base import AttachmentError
-from redlotus.models.providers import ModelInputPolicy
 
 
 def norm_url(url: str) -> str:
@@ -101,18 +100,18 @@ def _resolve_public_addr(host: str) -> str | None:
     return chosen
 
 
-def download_to_binary(url: str, filename: str = "") -> BinaryContent:
+def download_to_binary(url: str, filename: str = "") -> BinaryContent | None:
     url = norm_url(url)
-    identity = filename or url or "attachment"
     try:
         with httpx.Client(timeout=30, follow_redirects=False) as client:
             for _ in range(_MAX_REDIRECTS + 1):
                 parsed = httpx.URL(url)
                 if parsed.scheme not in ("http", "https") or not parsed.host:
-                    raise AttachmentError(identity, "invalid download URL")
+                    return None
                 ip = _resolve_public_addr(parsed.host)
                 if ip is None:
-                    raise AttachmentError(identity, "download URL is not public")
+                    logger.warning(f"[QQ] 拒绝下载非公网媒体地址 {url[:80]}")
+                    return None
                 host_header = (
                     parsed.host
                     if parsed.port is None
@@ -143,25 +142,23 @@ def download_to_binary(url: str, filename: str = "") -> BinaryContent:
                         media_type=pick_ct(url, resp.headers.get("content-type", ""), raw, filename=filename),
                         identifier=filename or None,
                     )
-        raise AttachmentError(identity, "too many redirects")
-    except AttachmentError:
-        raise
+        logger.warning(f"[QQ] 重定向次数过多 {url[:80]}")
+        return None
     except Exception as e:
-        raise AttachmentError(identity, str(e)) from e
+        logger.warning(f"[QQ] 下载媒体失败 {url[:80]}: {e}")
+        return None
 
 
 def binary_b64(file_val: str) -> BinaryContent | None:
     if not file_val or not file_val.startswith("base64://"):
         return None
     try:
-        raw = base64.b64decode(file_val[9:], validate=True)
-        if not raw:
-            raise ValueError("empty data")
         return BinaryContent(
-            data=raw, media_type="image/png"
+            data=base64.b64decode(file_val[9:]), media_type="image/png"
         )
     except Exception as e:
-        raise AttachmentError("base64 image", str(e)) from e
+        logger.warning(f"[QQ] 解析 base64 图片失败: {e}")
+        return None
 
 
 def iter_segments(event: BaseMessageEvent):
@@ -191,27 +188,28 @@ def extract_image_video(event: BaseMessageEvent) -> list[Any]:
         u = norm_url(seg_data.get("url") or fv)
         if u.startswith("http"):
             urls.append((seg_type, u))
-        else:
-            raise AttachmentError(seg_data.get("file") or seg_type, "missing media URL")
     if not urls:
         raw = getattr(event, "raw_message", "") or ""
         for m in re.finditer(r"\[CQ:(image|video),[^\]]*url=([^\],]+)", raw):
             urls.append((m.group(1), norm_url(m.group(2))))
-    for _, u in urls:
-        attachments.append(download_to_binary(u))
+    for kind, u in urls:
+        if kind == "image":
+            attachments.append(ImageUrl(u))
+            continue
+        bc = download_to_binary(u)
+        if bc:
+            attachments.append(bc)
     return attachments
 
 
 async def file_id_to_binary(
     bot_api, event: BaseMessageEvent, file_id: str, filename: str, allow: frozenset[str]
-) -> BinaryContent:
+) -> BinaryContent | None:
     from ncatbot.core import GroupMessageEvent
 
     ext = os.path.splitext(filename or "")[1].lower()
-    if not file_id:
-        raise AttachmentError(filename or "file", "missing file ID")
-    if ext not in allow:
-        raise AttachmentError(filename or file_id, f"unsupported file type {ext or '(none)'}")
+    if not file_id or ext not in allow:
+        return None
     try:
         url = await (
             bot_api.get_group_file_url(event.group_id, file_id)
@@ -219,9 +217,11 @@ async def file_id_to_binary(
             else bot_api.get_private_file_url(file_id)
         )
     except Exception as e:
-        raise AttachmentError(filename or file_id, f"could not get download URL: {e}") from e
+        logger.warning(f"[QQ] 获取文件 URL 失败 file_id={file_id[:24]}...: {e}")
+        return None
     if not url:
-        raise AttachmentError(filename or file_id, "download URL was empty")
+        logger.warning(f"[QQ] get_*_file_url 返回空，file_id={file_id[:24]}...")
+        return None
     return await asyncio.to_thread(download_to_binary, url, filename)
 
 
@@ -232,13 +232,12 @@ async def extract_media(
     seen: set[str] = set()
 
     async def add_fid(fid: str, fname: str) -> None:
-        if fid in seen:
+        if not fid or fid in seen:
             return
-        if not fid:
-            raise AttachmentError(fname or "file", "missing file ID")
         seen.add(fid)
         bc = await file_id_to_binary(bot_api, event, fid, fname, allow)
-        attachments.append(bc)
+        if bc:
+            attachments.append(bc)
 
     for st, sd in iter_segments(event):
         if st == "file":

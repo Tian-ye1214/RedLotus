@@ -1,4 +1,4 @@
-"""Tools worker tools responsibilities."""
+"""Worker execution tools, deferred loading and factory-managed delegation."""
 
 from __future__ import annotations
 
@@ -7,36 +7,17 @@ import copy
 import inspect
 import uuid
 from typing import Callable
-
 from pydantic_ai.capabilities import Capability
-
-from redlotus.models.context import ChatHistory, messages_safe_for_new_prompt
-from redlotus.models.gateway import AgentRunner, create_agent, create_function_toolset
-from redlotus.models.providers import ModelTarget
+from redlotus.core.agents import (
+    AgentRegistry, SubagentFactory, SubagentResult, SubagentSpec, bind_to_loop,
+)
+from redlotus.core.config import get_agent_usage_limits
+from redlotus.core.gateway import AgentRunner, ModelTarget, create_agent, create_function_toolset
+from redlotus.core.history import ChatHistory, messages_safe_for_new_prompt
 from redlotus.prompts.prompt import (
-    get_manager_system_prompt,
-    get_worker_system_prompt,
-    session_prompt_from_history,
-    with_runtime_context,
+    get_manager_system_prompt, get_worker_system_prompt, with_runtime_context,
 )
-from redlotus.runtime.config import get_agent_usage_limits
-from redlotus.runtime.context import (
-    SubagentResult,
-    SubagentSpec,
-    TaskStatus,
-    bind_to_loop,
-)
-
-
-def manager_tools(task_manager, toolkit, memory) -> tuple:
-    """List the complete Manager planning tool set; retain owner memory permissions."""
-    return (
-        task_manager.create_todo_list,
-        task_manager.get_todo_list,
-        task_manager.resume_task,
-        toolkit.ask_user,
-        *([memory.reader.search_memory] if memory.owner_memory_allowed else []),
-    )
+from redlotus.tools.manager_tools import Task, TaskManager, TaskStatus
 
 
 def worker_tool_groups(toolkit, memory, *, owner_loop=None, include_browser=True) -> dict[str, list]:
@@ -115,13 +96,13 @@ class WorkerOrchestrator:
     def __init__(
         self,
         toolkit,
-        task_manager,
+        task_manager: TaskManager,
         *,
         memory,
         memory_injection_getter: Callable[[], str] | None = None,
-        registry,
+        registry: AgentRegistry,
         persist,
-        factory,
+        factory: SubagentFactory | None = None,
     ):
         self._toolkit = toolkit
         self.memory = memory
@@ -129,9 +110,8 @@ class WorkerOrchestrator:
         self._memory_injection_getter = memory_injection_getter or (lambda: "")
         self._registry = registry
         self._persist = persist
-        self.factory = factory
+        self.factory = factory or SubagentFactory()
         self.session_file = None
-        self.plan_id = ""
         self._session_key: str | None = None
 
     def set_session_key(self, session_key: str | None) -> None:
@@ -153,14 +133,8 @@ class WorkerOrchestrator:
         owner_loop = asyncio.get_running_loop()
         persist = bind_to_loop(self._persist, owner_loop)
         session_key, session_file = self._session_key, self.session_file
-        plan_id = self.plan_id
         source_toolkit, memory_service = self._toolkit, self.memory
         target = ModelTarget.for_role(role)
-        agent_id = await self._registry.ensure_agent(
-            session_key, role, f"{self.plan_id}:{task_id}" if self.plan_id else task_id
-        )
-        if not history.messages and session_file:
-            history.set_messages(session_file.role_messages(role, agent_id=agent_id))
         # Snapshot before starting the thread: no mutable messages or clients cross loops.
         messages = copy.deepcopy(messages_safe_for_new_prompt(history.messages))
         memory = self._memory_injection_getter()
@@ -168,18 +142,6 @@ class WorkerOrchestrator:
             session_key, turn_id, source_toolkit.workspace, role=role
         )
         invocation = uuid.uuid4().hex
-        create_prompt = lambda: session_prompt_from_history(messages) or (
-            get_worker_system_prompt if role == "worker" else get_manager_system_prompt
-        )(source_toolkit.skills_manager, memory)
-        instructions = await self._persist(lambda: session_file.prompt_snapshot(agent_id, create_prompt)) if session_file else create_prompt()
-
-        async def save_context(candidate):
-            if session_file:
-                await persist(lambda: session_file.role_file(role).save_context(
-                    candidate, turn_id=turn_id, agent_id=agent_id, invocation=invocation,
-                ), cancelling=bool(asyncio.current_task().cancelling()))
-            if session_key != self._session_key or session_file is not self.session_file or plan_id != self.plan_id:
-                raise asyncio.CancelledError()
 
         async def execute_child():
             toolkit = source_toolkit.clone_for_worker(owner_loop)
@@ -190,6 +152,9 @@ class WorkerOrchestrator:
                     toolsets, capabilities = create_worker_toolsets(
                         toolkit, memory_service, owner_loop, include_browser=include_browser
                     )
+                    instructions = get_worker_system_prompt(
+                        toolkit.skills_manager, memory
+                    )
                     output_type = SubagentResult
                 else:
                     toolsets = [
@@ -198,6 +163,9 @@ class WorkerOrchestrator:
                         )
                     ]
                     capabilities = []
+                    instructions = get_manager_system_prompt(
+                        toolkit.skills_manager, memory
+                    )
                     output_type = str
                 agent = create_agent(
                     target,
@@ -206,13 +174,15 @@ class WorkerOrchestrator:
                     capabilities=capabilities,
                     output_type=output_type,
                     role=role,
-                    persist_context=save_context,
                 )
 
                 async def save_node(run):
-                    candidate = list(run.all_messages())
-                    await save_context(candidate)
-                    local_history.set_messages(candidate)
+                    local_history.set_messages(list(run.all_messages()))
+                    if session_file:
+                        await persist(lambda: session_file.role_file(role).save_context(
+                            local_history.messages, turn_id=turn_id,
+                            agent_id=agent_id, invocation=invocation,
+                        ))
 
                 result = await AgentRunner().run(
                     agent=agent,
@@ -229,6 +199,9 @@ class WorkerOrchestrator:
             return await self.factory.run(spec, execute_child)
 
         try:
+            agent_id = await self._registry.ensure_agent(
+                session_key, role, task_id
+            )
             report, returned_messages = await self._registry.run(
                 run_child, agent_id=agent_id, turn_id=turn_id
             )
@@ -275,7 +248,7 @@ class WorkerOrchestrator:
         return report.success, report.model_dump_json()
 
     async def _execute_task(
-        self, task, user_goal: str, attachments: list | None, turn_id: str | None
+        self, task: Task, user_goal: str, attachments: list | None, turn_id: str | None
     ):
         task.status = TaskStatus.IN_PROGRESS
         dependencies = "\n".join(
@@ -284,11 +257,8 @@ class WorkerOrchestrator:
         prompt = f"[Delegated task]\nGoal: {user_goal}\nTask: {task.description}\nDependencies:\n{dependencies}"
         if task.failure_history:
             prompt += "\nPrevious failures:\n" + "\n".join(task.failure_history)
-        if task.user_input:
-            prompt += "\nUser follow-up:\n" + task.user_input
         content = [prompt, *attachments] if attachments else prompt
         try:
-            await self._task_manager.save()
             report = await self._execute(
                 content, task.worker_chat_history, turn_id=turn_id, task_id=task.id,
                 include_browser=False,
@@ -300,22 +270,14 @@ class WorkerOrchestrator:
                 task.result = report.model_dump_json()
             elif report.success:
                 self._task_manager.mark_task_complete(task.id, report.model_dump_json())
-            elif report.status in {"cancelled", "unverified"}:
-                task.status, task.result = TaskStatus(report.status), report.model_dump_json()
             else:
                 self._task_manager.mark_task_failed(task.id, report.model_dump_json())
         except asyncio.CancelledError:
-            task.status = TaskStatus.CANCELLED
+            task.status = TaskStatus.FAILED
             task.failure_history.append(
                 "Cancelled by the owner; completion is unverified."
             )
             raise
-        finally:
-            if task.status == TaskStatus.IN_PROGRESS:
-                task.status = TaskStatus.UNVERIFIED
-            if self._task_manager.user_input:
-                task.blocked_input_id = self._task_manager.user_input()[0]
-            await self._task_manager.save()
 
     async def execute_all_tasks_parallel(
         self, user_goal: str, attachments: list | None = None, *, turn_id: str | None

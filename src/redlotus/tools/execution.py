@@ -1,30 +1,27 @@
-"""Execution commands responsibilities."""
+"""Existing interpreters, project caches, and owned command execution."""
 
 from __future__ import annotations
 
+import asyncio
+import codecs
 import json
+import locale
 import os
 import platform as _platform
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+
 _SEPARATORS = {";", "&", "&&", "|", "||", "\n"}
-
-
 _PYTHON_NAMES = {"python", "python.exe", "python3", "python3.exe"}
-
-
 _PY_LAUNCHER_NAMES = {"py", "py.exe"}
-
-
 _PIP_NAMES = {"pip", "pip.exe", "pip3", "pip3.exe"}
-
-
 _PIP_RESTRICTED_OPTIONS = {
     "--user",
     "--target",
@@ -35,8 +32,6 @@ _PIP_RESTRICTED_OPTIONS = {
     "--system",
     "-t",
 }
-
-
 _UV_NAMES = {"uv", "uv.exe"}
 
 
@@ -84,12 +79,12 @@ class CommandResult:
 
 def _workspace_for(cwd: str | Path | None, workspace=None):
     if workspace is None:
-        from redlotus.runtime.context import active_workspace
+        from redlotus.core.agents import active_workspace
 
         workspace = active_workspace()
     if workspace is not None:
         return workspace
-    from redlotus.runtime.context import WorkspaceContext
+    from redlotus.core.agents import WorkspaceContext
 
     return WorkspaceContext.from_path(cwd or Path.cwd())
 
@@ -110,17 +105,16 @@ def existing_python() -> Path:
         if found and not _same_path(found, Path(sys.executable)):
             return Path(found).resolve()
     if launcher := shutil.which("py"):
-        from redlotus.runtime.config import get_agent_run_policy
+        from redlotus.core.config import get_agent_run_policy
 
         result = subprocess.run(
-            [launcher, "-3", "-c", "import os, sys; sys.stdout.buffer.write(os.fsencode(sys.executable))"],
-            stdin=subprocess.DEVNULL,
+            [launcher, "-3", "-c", "import sys; print(sys.executable)"],
             capture_output=True,
             timeout=get_agent_run_policy().max_command_timeout_seconds,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         if not result.returncode:
-            path = Path(os.fsdecode(result.stdout))
+            path = Path(os.fsdecode(result.stdout.strip()))
             if path.is_file() and not _same_path(path, Path(sys.executable)):
                 return path.resolve()
     raise FileNotFoundError("未找到外部 Python，请将现有 Python 加入 PATH；普通命令和聊天仍可使用。")
@@ -128,7 +122,7 @@ def existing_python() -> Path:
 
 def execution_cache_dir(workspace) -> Path:
     """Resolve owned, regenerable caches under the configured project runtime."""
-    from redlotus.runtime.files import runtime_dir
+    from redlotus.core.config import runtime_dir
 
     return runtime_dir(workspace).resolve() / "cache"
 
@@ -138,7 +132,7 @@ def get_execution_environment(
     overrides: dict[str, str] | None = None, python_required: bool = True,
 ) -> ExecutionEnvironment:
     """Describe the existing environment without creating or rebuilding Python."""
-    from redlotus.runtime.files import runtime_dir
+    from redlotus.core.config import runtime_dir
 
     active = _workspace_for(cwd, workspace)
     runtime = runtime_dir(active).resolve()
@@ -284,13 +278,10 @@ def _command_invocations(command, *, posix_shell=None):
 
 def validate_agent_command(command, *, cwd: str) -> None:
     """One policy entry for commands, inline programs and executed scripts."""
-    from redlotus.execution.validation import (
-        JavaScriptCommandCheck,
-        PythonCommandCheck,
-        code_without_literals,
-        read_script,
-    )
-    from redlotus.runtime.context import current_execution_role
+    from redlotus.core.agents import current_execution_role
+    from redlotus.tools.registry import PythonCommandCheck, JavaScriptCommandCheck
+    from redlotus.tools.registry import code_without_literals
+    from redlotus.tools.registry import read_script
 
     role = current_execution_role()
     restricted = role in {"worker", "manager"}
@@ -564,4 +555,142 @@ def _unquote_shell_word(word: str) -> str:
         word[1:-1]
         if len(word) >= 2 and word[0] in "\"'" and word[-1] == word[0]
         else word
+    )
+
+
+async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """杀掉子进程及其后代（无 psutil 依赖），并收尸。"""
+    if proc.returncode is not None:
+        # An exited parent can leave inherited pipes open. Do not claim tree
+        # cleanup before they close, or target a PID whose owner may have changed.
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=5)
+        except TimeoutError as exc:
+            raise RuntimeError(
+                "Parent exited but inherited pipes remain open; descendant ownership is unknown and cleanup is unverified."
+            ) from exc
+        return
+    try:
+        if _platform.system() == "Windows":
+            # /T 杀整棵树：shell 会经 cmd.exe 再起真正的子进程。
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/F",
+                "/T",
+                "/PID",
+                str(proc.pid),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            await asyncio.wait_for(killer.wait(), timeout=5)
+            if killer.returncode and proc.returncode is None:
+                raise PermissionError(
+                    f"taskkill could not terminate process tree {proc.pid} (exit {killer.returncode})"
+                )
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+        raise  # Do not report successful tree cleanup when the OS denied it.
+    # Drain inherited pipes too: descendants can still be releasing files after
+    # the root process has exited.
+    await asyncio.wait_for(proc.communicate(), timeout=5)
+
+
+async def run_subprocess(
+    args,
+    *,
+    shell: bool,
+    cwd: str,
+    env: dict | None = None,
+    timeout: float,
+    workspace=None,
+) -> CommandResult:
+    """Run a command with its launch evidence, reclaiming owned processes on cancellation."""
+    await asyncio.to_thread(validate_agent_command, args, cwd=cwd)
+    python_required = any(
+        _program_name(values[0]) in _PYTHON_NAMES | _PY_LAUNCHER_NAMES | _PIP_NAMES
+        or (_program_name(values[0]) in _UV_NAMES and "pip" in values[1:3])
+        for values in _command_invocations(args)
+    )
+    environment = await asyncio.to_thread(
+        get_execution_environment, cwd=cwd, workspace=workspace,
+        overrides=env, python_required=python_required,
+    )
+    if python_required:
+        validate_pip_command(args, selected_python=environment.python)
+        args = _rewrite_python_command(args, environment, shell=shell)
+    await asyncio.to_thread(_prepare_runtime_dirs, environment)
+    env = environment.variables
+    python_on_path = str(environment.python) if environment.python else None
+
+    result = await _run_owned_process(
+        args, shell=shell, cwd=cwd, env=env, timeout=timeout
+    )
+    return replace(result, python_on_path=python_on_path)
+
+
+def _decode_output(data: bytes, encodings: list[str]) -> tuple[str, bool]:
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        encodings = ["utf-16"]
+    candidates = [
+        locale.getencoding() if value == "locale" else value for value in encodings
+    ]
+    for encoding in candidates:
+        try:
+            return data.decode(encoding), True
+        except UnicodeDecodeError:
+            continue
+    # Keep every byte and the original exit code; do not silently replace text.
+    return (
+        f"[Cannot decode output using {candidates}; raw bytes escaped below]\n"
+        + data.decode("ascii", errors="backslashreplace"),
+        False,
+    )
+
+
+async def _run_owned_process(
+    args, *, shell: bool, cwd: str, env: dict | None, timeout: float
+):
+    """Own one external process from creation through timeout or cancellation."""
+
+    kwargs = {
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+        "cwd": cwd,
+        "env": env,
+    }
+    if _platform.system() == "Windows":
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        )
+    else:
+        kwargs["start_new_session"] = True  # 独立进程组，便于 killpg
+
+    if shell:
+        proc = await asyncio.create_subprocess_shell(args, **kwargs)
+    else:
+        proc = await asyncio.create_subprocess_exec(*args, **kwargs)
+
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        await _terminate_process_tree(proc)
+        raise subprocess.TimeoutExpired(args, timeout)
+    except asyncio.CancelledError:
+        await _terminate_process_tree(proc)
+        raise
+    encodings = ["utf-8-sig", locale.getencoding()]
+    stdout, stdout_decoded = _decode_output(out, encodings)
+    stderr, stderr_decoded = _decode_output(err, encodings)
+    return CommandResult(
+        stdout,
+        stderr,
+        proc.returncode,
+        args if isinstance(args, str) else tuple(args),
+        cwd,
+        output_decoded=stdout_decoded and stderr_decoded,
     )

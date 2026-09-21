@@ -1,18 +1,17 @@
-"""Prompts prompt responsibilities."""
-
 from __future__ import annotations
 
+import json
+import re
+
+import datetime
+import os
+import platform
 from typing import TYPE_CHECKING
+
+from redlotus.core.config import project_data_dir, prompts_dir
 
 if TYPE_CHECKING:
     from redlotus.tools.registry import SkillsManager
-
-import datetime
-import json
-import os
-import platform
-
-from redlotus.runtime.files import project_data_dir, prompts_dir
 
 
 def get_skills_summary(skills_manager: SkillsManager) -> str:
@@ -52,7 +51,6 @@ def load_prompt(filename: str) -> str:
     filepath = prompts_dir() / filename
     with open(filepath, "r", encoding="utf-8") as f:
         return f.read()
-
 
 def get_skills_layout_text(skills_manager: SkillsManager) -> str:
     root = skills_manager.skills_dir.resolve()
@@ -103,7 +101,7 @@ def get_common_conduct() -> str:
 
 
 def project_agent_snapshot() -> str:
-    from redlotus.runtime.context import WorkspaceContext, current_workspace
+    from redlotus.core.agents import WorkspaceContext, current_workspace
 
     workspace = WorkspaceContext.from_path(current_workspace())
     path = project_data_dir(workspace) / "AGENT.md"
@@ -118,7 +116,7 @@ def _build_role_prompt(
     skills_manager: SkillsManager,
     memory_injection: str = "",
 ) -> str:
-    from redlotus.runtime.context import current_workspace
+    from redlotus.core.session import current_workspace
 
     template = load_prompt(template_name)
     values = {

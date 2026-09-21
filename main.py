@@ -1,8 +1,6 @@
 """Source-checkout launcher; importing this module performs no application startup."""
 
 
-
-
 def main():
     import os
     import sys
@@ -22,7 +20,7 @@ def main():
         ]]
     os.environ.setdefault("REDLOTUS_CONFIG_FILE", str(root / "src/redlotus/config.json"))
     os.environ.setdefault("REDLOTUS_DOTENV_FILE", str(root / ".env"))
-    from redlotus.terminal.console import main as run
+    from redlotus.core.config import main as run
 
     run()
 

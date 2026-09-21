@@ -1,4 +1,4 @@
-"""Memory service responsibilities."""
+"""Current-session perception scheduling and explicit memory requests."""
 
 from __future__ import annotations
 
@@ -9,26 +9,32 @@ import threading
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
+from typing import Literal
 
 from filelock import AsyncFileLock
 from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
 from pydantic_ai.messages import TextContent
 
-import redlotus.runtime.resources as _runtime_resources
-from redlotus.documents.references import ReferenceStore
-from redlotus.memory.perception import MemoryJob, MemoryPerception, produce_job
-from redlotus.memory.records import EvidenceReader, LongTermMemory, ObservationStore
-from redlotus.memory.retrieval import MemoryReader
-from redlotus.memory.store import MemoryStore
-from redlotus.models.providers import ModelTarget
+from redlotus.core.config import (
+    settings,
+    file_lock,
+    iso_utc_now,
+    read_locked_json,
+    save_locked_json,
+)
+from redlotus.core import config as logger
+from redlotus.core.gateway import ModelTarget
 from redlotus.prompts.prompt import load_prompt
-from redlotus.runtime.config import settings
-from redlotus.runtime.context import SubagentSpec, WorkspaceContext, current_workspace
-from redlotus.runtime.files import file_lock, iso_utc_now, read_locked_json, save_locked_json
+from redlotus.tools.references import ReferenceStore
+from redlotus.core.agents import WorkspaceContext, AgentRegistry, SubagentFactory, SubagentSpec
+from redlotus.memory.records import EvidenceReader, LongTermMemory, ObservationStore
+from redlotus.memory.perception import MemoryPerception, MemoryJob, produce_job
+from redlotus.memory.store import MemoryStore, MemoryReader
+from redlotus.core.session import current_workspace
 
 
 class MemoryService:
-    def __init__(self, *, workspace=None, owner_memory_allowed=True, factory, registry_factory):
+    def __init__(self, *, workspace=None, owner_memory_allowed=True, factory=None):
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
         self.owner_memory_allowed = owner_memory_allowed
         self.long_term, self.store = LongTermMemory(), MemoryStore(self.workspace)
@@ -36,8 +42,8 @@ class MemoryService:
         self.references = ReferenceStore(self.workspace)
         self.evidence = EvidenceReader(self.references)
         self.reader = MemoryReader(self.store, self.long_term, self.references, owner_memory_allowed)
-        self._registry_factory = registry_factory
-        self._perception_factory = factory
+        self._owns_factory = factory is None
+        self._perception_factory = factory or SubagentFactory()
         self.perception, self.current, self.session = None, None, None
         self._input_source = lambda: self.current.user_inputs if self.current else []
         self._injection_snapshot = None
@@ -92,7 +98,6 @@ class MemoryService:
     async def begin_turn(self, session_id, turn_id, user_text, *, references=()):
         if self.owner_memory_allowed:
             if self._injection_snapshot is None:
-                await self._reconcile_projection()
                 self._injection_snapshot = await asyncio.to_thread(
                     self.long_term.get_injection
                 )
@@ -100,15 +105,6 @@ class MemoryService:
                 session_id, turn_id, user_text, [ref.id for ref in references]
             )
         return self.current
-
-    async def _reconcile_projection(self):
-        """Bring core projection to formal global versions before new-session injection."""
-        self.long_term.directory.mkdir(parents=True, exist_ok=True)
-        async with AsyncFileLock(
-            self.long_term.directory / "publication.lock", run_in_executor=False
-        ):
-            records = await asyncio.to_thread(self.store.all, "global", active_only=False)
-            await asyncio.to_thread(self.long_term.reconcile, records)
 
     async def finish_turn(
         self, event, *, status, user_inputs, evidence_paths, error=""
@@ -164,7 +160,8 @@ class MemoryService:
         value["indexed"] = "indexed_at" in job.timings
         if value["indexed"]:
             value.update(event_ids=[], sources={}, bases={}, prompt_snapshot="", model_snapshot={}, perception_config={})
-            value["result"] = {"records": [], "reason": job.result.reason, "request_authorized": job.result.request_authorized}
+            value["result"] = {"records": [], "reason": job.result.reason,
+                               "request_authorized": job.result.request_authorized}
         self.session.update(jobs={job.id: value})
 
     async def _check_searches(self, job):
@@ -181,10 +178,7 @@ class MemoryService:
             if current and current.last_change_id == f"{job.id}:{index}":
                 continue
             search = searches.get(draft.search_id)
-            invalid = (not search or search.get("scope") != "global" or
-                       draft.action == "create" and (not search.get("retrieval_complete", False)
-                                                      or search.get("retrieval_error")))
-            if invalid:
+            if not search or search.get("scope") != "global" or search.get("retrieval_error"):
                 raise ValueError(json.dumps({"error": "memory_publication_search", "search_id": draft.search_id}))
             if search.get("revision") != await asyncio.to_thread(self.store.revision, "global"):
                 raise ValueError(json.dumps({"error": "memory_publication_changed", "search_id": draft.search_id}))
@@ -209,28 +203,28 @@ class MemoryService:
 
     async def _apply(self, job):
         self.long_term.directory.mkdir(parents=True, exist_ok=True)
-        lock = AsyncFileLock(self.long_term.directory / "publication.lock", run_in_executor=False)
-        async with lock:
-            if "stored_at" in job.timings:
-                job.records, plans = await asyncio.to_thread(job.stored_projection, self.store)
-                expected, projected, _ = await asyncio.to_thread(self.long_term.plan_records, plans)
-            else:
-                await self._check_searches(job)
-                changes = [
-                    (record, draft)
-                    for index, draft in enumerate(job.result.records)
-                    if (record := await asyncio.to_thread(
-                        self.store.materialize, job, draft, index, self._cleared_at))
-                ]
-                await self._check_promotion_sources(job, changes)
-                plans = [(record, job.bases.get(record.id), draft.core_old_text) for record, draft in changes]
-                expected, projected, committed = await asyncio.to_thread(self.long_term.plan_records, plans)
-                await asyncio.to_thread(self.store.save, committed)
-                job.records = [record.id for record in committed]
-                job.timings["stored_at"] = iso_utc_now()
-                self._save_job(job)
-            await asyncio.to_thread(self.long_term.commit_plan, expected, projected)
-            job.timings["projected_at"] = iso_utc_now()
+        async with AsyncFileLock(
+            self.long_term.directory / "publication.lock", run_in_executor=False
+        ):
+            await self._check_searches(job)
+            changes = [
+                (record, draft)
+                for index, draft in enumerate(job.result.records)
+                if (record := await asyncio.to_thread(self.store.materialize, job, draft, index, self._cleared_at))
+            ]
+            await self._check_promotion_sources(job, changes)
+            committed = []
+            for record, draft in changes:
+                if not await asyncio.to_thread(
+                    self.long_term.apply_record,
+                    record,
+                    job.bases.get(record.id),
+                    core_old_text=draft.core_old_text,
+                ):
+                    continue
+                committed.append(record)
+            await asyncio.to_thread(self.store.save, committed)
+            job.records = [record.id for record in committed]
             if job.window:
                 self.observations.commit(job.window)
             else:
@@ -287,7 +281,7 @@ class MemoryService:
             self._processor({})
             return True
         except Exception as exc:
-            if isinstance(exc, ValueError) and "stored_at" not in job.timings:
+            if isinstance(exc, ValueError):
                 job.result = None
             job.error = self.last_error = str(exc)
             job.failures.append(dict(recorded_at=iso_utc_now(), error=job.error))
@@ -305,7 +299,7 @@ class MemoryService:
             ):
                 state["blocked_route"] = self._route()
             self._processor(state)
-            _runtime_resources.error("记忆生产未完成，原始事件已保留：%s", exc)
+            logger.error("记忆生产未完成，原始事件已保留：%s", exc)
             return False
 
     async def remember(self, request: str) -> str:
@@ -444,9 +438,9 @@ class MemoryService:
 
     async def _drain_background(self):
         """Own model/database resources in the admitted thread; never inspect other sessions."""
-        producer = MemoryService(workspace=self.workspace, factory=self._perception_factory, registry_factory=self._registry_factory)
+        producer = MemoryService(workspace=self.workspace, factory=self._perception_factory)
         producer.bind_session(self.session)
-        producer.perception = MemoryPerception(self.workspace, None, self._registry_factory())
+        producer.perception = MemoryPerception(self.workspace, None, AgentRegistry())
         try:
             while True:
                 with self._schedule_lock:
@@ -496,7 +490,7 @@ class MemoryService:
                 other_seconds=max(0, elapsed - api_seconds),
             )
             self._save_job(job)
-            _runtime_resources.info_file_only(
+            logger.info_file_only(
                 "记忆感知：新增 %s 回合，保存 %s 条，总计 %.2f 秒（模型 API %.2f 秒），窗口 %s。",
                 len(job.window.new_turn_ids),
                 len(job.records),
@@ -589,5 +583,7 @@ class MemoryService:
         return True
 
     async def close(self):
+        if self._owns_factory:
+            await self._perception_factory.close()
         self.unbind_session()
         await self.store.close()

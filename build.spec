@@ -62,7 +62,6 @@ a = Analysis(
 )
 
 pyz = PYZ(a.pure)
-interpreter_options = [("X utf8", None, "OPTION")]
 
 if bundle_mode == "onefile":
     exe = EXE(
@@ -70,7 +69,6 @@ if bundle_mode == "onefile":
         a.scripts,
         a.binaries,
         a.datas,
-        interpreter_options,
         name="Agent",
         debug=False,
         bootloader_ignore_signals=False,
@@ -84,7 +82,7 @@ else:
     exe = EXE(
         pyz,
         a.scripts,
-        interpreter_options,
+        [],
         exclude_binaries=True,
         name="Agent",
         debug=False,

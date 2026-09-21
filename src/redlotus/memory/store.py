@@ -1,48 +1,28 @@
-"""Memory store responsibilities."""
+"""LanceDB owns complete memories; embedding is a recoverable index operation."""
 
 from __future__ import annotations
 
+import json
+from pydantic_ai import ToolReturn
+from redlotus.memory.records import CREDENTIAL_PATTERN, MemoryRecord
+
 import asyncio
 import hashlib
-import json
 import re
-from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
 
 import lancedb
+from copy import deepcopy
 from filelock import AsyncFileLock
 
-import redlotus.runtime.resources as _runtime_resources
-from redlotus.documents.references import ReferenceStore
-from redlotus.memory.records import CREDENTIAL_PATTERN, MemoryRecord
-from redlotus.memory.retrieval import MEMORY_ID_PATTERN, RAG
-from redlotus.runtime.config import missing_rag_api_keys, settings
-from redlotus.runtime.files import file_lock, iso_utc_now
+from redlotus.core import config as logger
+from redlotus.memory.retrieval import RAG, missing_rag_settings
+from redlotus.core.config import missing_rag_api_keys, settings, file_lock, iso_utc_now
+from redlotus.tools.references import ReferenceStore
 
 
-def missing_rag_settings(*, use_rerank=False, configuration=None, api_missing=None):
-    """Return incomplete optional-RAG fields without exposing their values."""
-    configuration = settings() if configuration is None else configuration
-    models = configuration.get("RAG_models", {})
-    models = models if isinstance(models, dict) else {}
-    missing = list(api_missing if api_missing is not None else (
-        name for name in ("SILICONFLOW_BASE", "SILICONFLOW_KEY")
-        if not str(configuration.get(name, "") or "").strip()
-    ))
-    required = [("RAG_models.embedding", models.get("embedding", ""))]
-    if use_rerank:
-        required.append(("RAG_models.reranker", models.get("reranker", "")))
-    missing.extend(name for name, value in required if not str(value or "").strip())
-    return tuple(dict.fromkeys(missing))
-
-
-class MemorySearchResult(list):
-    """List-compatible recall plus immutable per-call completeness status."""
-
-    def __init__(self, rows, complete, error):
-        super().__init__(rows)
-        self.retrieval_complete, self.retrieval_error = complete, error
+MEMORY_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 class MemoryStore:
@@ -68,7 +48,6 @@ class MemoryStore:
         self._index_lock = asyncio.Lock()
         self.last_error = ""
         self.retrieval_error = ""
-        self.retrieval_complete = True
 
     def _table(self):
         if self._db is None:
@@ -210,15 +189,10 @@ class MemoryStore:
     async def search(self, query, scope=None):
         records = await asyncio.to_thread(self.all, scope)
         by_id = {row.id: row for row in records}
-        if not records:
-            self.retrieval_error, self.retrieval_complete = "", True
-            return MemorySearchResult([], True, "")
-        if not query.strip():
-            self.retrieval_error, self.retrieval_complete = "Empty memory query.", False
-            return MemorySearchResult([], False, self.retrieval_error)
         reason = self.rag_unavailable_reason(scope)
-        if not reason:
-            reason = await self._incomplete_index_reason(scope)
+        if not query.strip() or not records:
+            self.retrieval_error = reason
+            return []
         ranked, errors = [], []
         if reason:
             errors.append(reason)
@@ -236,36 +210,15 @@ class MemoryStore:
                 except Exception as exc:
                     errors.append(str(exc))
                     if str(exc) not in self.retrieval_error:
-                        _runtime_resources.warning("记忆向量召回不可用，保留文本检索：%s", exc)
+                        logger.warning("记忆向量召回不可用，保留文本检索：%s", exc)
         self.retrieval_error = "; ".join(errors)
-        self.retrieval_complete = not errors
         tokens = self.tokens(query)
         matches = sorted(
             records, key=lambda row: len(tokens & self.tokens(row.text())), reverse=True
         )
         ranked.extend(row.id for row in matches if tokens & self.tokens(row.text()))
         limit = int(self.indexes["project"].config["final_top_k"])
-        rows = [by_id[key] for key in dict.fromkeys(ranked)][:limit]
-        return MemorySearchResult(rows, self.retrieval_complete, self.retrieval_error)
-
-    async def _incomplete_index_reason(self, scope):
-        """Report missing, partial or stale vectors for a non-empty formal store."""
-        for name in [scope] if scope else self.indexes:
-            rows = await asyncio.to_thread(self._rows, name)
-            if not rows:
-                continue
-            index = self.indexes[name]
-            try:
-                indexed = await index.indexed_record_ids()
-            except Exception as exc:
-                return str(exc)
-            if any(
-                row["id"] not in indexed
-                or row["indexed"] != row["body_hash"] + index.index_key
-                for row in rows
-            ):
-                return f"Memory vector index is missing, partial or stale for {name}; using text fallback."
-        return ""
+        return [by_id[key] for key in dict.fromkeys(ranked)][:limit]
 
     async def reconcile(self):
         if reason := self.rag_unavailable_reason():
@@ -304,7 +257,7 @@ class MemoryStore:
             except Exception as exc:
                 message = str(exc)
                 if message != self.last_error:
-                    _runtime_resources.warning(
+                    logger.warning(
                         "记忆索引更新未完成，正文已保存并等待重试：%s", message
                     )
                 self.last_error = message
@@ -405,13 +358,6 @@ class MemoryStore:
             previous = None
         if previous and previous.last_change_id == f"{job.id}:{index}":
             return previous
-        base_version = job.base_versions.get(identity)
-        if base_version is None:
-            base = job.bases.get(identity)
-            base_version = base.version if base else 0
-            job.base_versions[identity] = base_version
-        if (previous.version if previous else 0) != base_version:
-            return None
         if (
             previous
             and not explicit
@@ -522,10 +468,122 @@ class MemoryStore:
             kind="requested" if explicit else draft.kind,
             origin="explicit" if explicit else "automatic",
             state="deleted" if draft.action == "delete" else "active",
-            version=base_version + 1,
+            version=previous.version + 1 if previous else 1,
             updated_at=iso_utc_now(),
             last_change_id=f"{job.id}:{index}",
             source_updated_at=source_time,
             request_created_at=job.created_at,
         )
         return record.model_copy(update=body)
+
+
+class MemoryReader:
+    """Read-only memory tools and owner authorization, shared by CLI and Agents."""
+
+    def __init__(self, store, long_term, references, owner_memory_allowed):
+        self.store, self.long_term, self.references = store, long_term, references
+        self.owner_memory_allowed = owner_memory_allowed
+
+    async def search_memory(
+        self, query: str = "", scope: str | None = None, id: str | None = None,
+        include_references: bool = False,
+    ):
+        """Search permitted memories or retrieve one complete record by ID.
+
+        Project scope contains L1 memories of the current project. Global scope contains
+        L2 memories available across the owner's projects. Personal memories are not
+        available to unauthenticated channels.
+
+        Args:
+            query: The complete semantic search query; unused when id is supplied.
+            scope: project for L1, global for L2, or omitted to search both permitted scopes.
+            id: A known record ID to retrieve instead of performing a search.
+            include_references: Include original referenced content when retrieving by ID.
+
+        Returns:
+            Matching records or the requested full record, with retrieval errors reported explicitly."""
+        if not self.owner_memory_allowed:
+            return "Error: Personal memory unavailable."
+        if scope not in (None, "project", "global"):
+            return "Error: scope must be project (L1) or global (L2)."
+        if id is not None:
+            return await self.read_memory(id, include_references=include_references, scope=scope)
+        rows = await self.store.search(query, scope)
+        return json.dumps(
+            dict(
+                memories=[row.model_dump(mode="json") for row in rows],
+                retrieval_error=self.store.retrieval_error,
+            ),
+            ensure_ascii=False,
+        )
+
+    async def read_memory(self, id: str, include_references: bool = False, *, scope=None):
+        """Read a permitted complete memory; optionally include original referenced media."""
+        if not self.owner_memory_allowed:
+            return "Error: Personal memory unavailable."
+        if not MEMORY_ID_PATTERN.fullmatch(id):
+            return "Error: Invalid memory id."
+        try:
+            record = self.store.get(id)
+        except KeyError:
+            return "Error: Memory not found or unavailable."
+        if scope is not None and record.scope != scope:
+            return "Error: Memory not found in the selected scope."
+        if record.state != "active":
+            return json.dumps(dict(id=record.id, state=record.state))
+        if not include_references:
+            return record.model_dump_json()
+        references, errors = [], []
+        for key in record.reference_ids:
+            try:
+                source = record.reference_sources.get(key)
+                store = (ReferenceStore(self.references.workspace, root=Path(source).parent.parent)
+                         if source else self.references)
+                reference = await store.parse(await asyncio.to_thread(store.load, key))
+                references.extend(await asyncio.to_thread(reference.to_prompt))
+            except (OSError, ValueError) as exc:
+                errors.append(dict(id=key, error=str(exc)))
+        return ToolReturn(
+            return_value=json.dumps({**record.model_dump(mode="json"), "reference_errors": errors}, ensure_ascii=False),
+            content=references,
+        )
+
+    async def search_episodes(self, query: str) -> str:
+        """Search task episodes belonging only to the current project."""
+        if not self.owner_memory_allowed:
+            return "Error: Personal memory unavailable."
+        rows = await self.store.search(query, "project")
+        return json.dumps(
+            dict(
+                project_id=self.store.workspace.project_id,
+                retrieval_error=self.store.retrieval_error,
+                episodes=[
+                    row.model_dump(mode="json") for row in rows if row.kind == "episode"
+                ],
+            ),
+            ensure_ascii=False,
+        )
+
+    async def read_episode(self, id: str) -> str:
+        """Read one current-project episode with its original evidence sources."""
+        if not self.owner_memory_allowed:
+            return "Error: Personal memory unavailable."
+        if not MEMORY_ID_PATTERN.fullmatch(id):
+            return "Error: Invalid episode id."
+        try:
+            row = self.store.get(id)
+        except KeyError:
+            return "Error: Episode not found in this project."
+        if row.scope != "project" or row.kind != "episode" or row.state != "active":
+            return "Error: Episode not found in this project."
+        return row.model_dump_json()
+
+    async def long_term_snapshot(self):
+        return (
+            {
+                **await self.long_term.snapshot(),
+                "global_records": await self.store.snapshot("global"),
+            }
+            if self.owner_memory_allowed
+            else {}
+        )

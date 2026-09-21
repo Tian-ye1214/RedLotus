@@ -1,20 +1,17 @@
-"""Api WeChat responsibilities."""
-
 from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from wechatbot import WeChatBot
 
 import asyncio
 from functools import partial
+from typing import TYPE_CHECKING
 
 from pydantic_ai import BinaryContent
 
-import redlotus.runtime.resources as _runtime_resources
-from redlotus.api.base import AttachmentError, BotBase
-from redlotus.documents.interaction import UserMessage
+from redlotus.core import config as logger
+from redlotus.tools.interaction import UserMessage
+from redlotus.api.base import BotBase
+
+if TYPE_CHECKING:
+    from wechatbot import WeChatBot
 
 
 class WeChatAgentBot(BotBase):
@@ -34,16 +31,11 @@ class WeChatAgentBot(BotBase):
         """Build a UserMessage from text plus downloaded media bytes."""
         text = self.clean_text(msg.text or "")
         attachments: list = []
-        identity = (
-            getattr(msg, "file_name", None)
-            or getattr(msg, "id", None)
-            or getattr(msg, "type", None)
-            or "attachment"
-        )
         try:
             media = await bot.download(msg)
         except Exception as e:
-            raise AttachmentError(str(identity), str(e)) from e
+            logger.warning(f"[WeChat] 下载媒体失败: {e}")
+            media = None
         if media is not None and getattr(media, "data", None):
             filename = getattr(media, "file_name", None) or ""
             mtype = (getattr(media, "type", None) or "").lower()
@@ -53,8 +45,6 @@ class WeChatAgentBot(BotBase):
                     data=media.data, media_type=mime, identifier=filename or None
                 )
             )
-        elif (getattr(msg, "type", None) or "").lower() in self._MIME_MAP:
-            raise AttachmentError(str(identity), "download returned no data")
         return UserMessage(
             text=text,
             attachments=attachments,
@@ -65,13 +55,11 @@ class WeChatAgentBot(BotBase):
         if not msg.user_id:
             return
         session_id = f"{self.session_prefix}{msg.user_id}"
-        text = self.clean_text(msg.text or "")
-        await self.dispatch_event(
+        user_message = await self._build_user_message(bot, msg)
+        await self.dispatch_user_message(
             session_id,
-            text,
-            partial(self._build_user_message, bot, msg),
+            user_message,
             partial(bot.reply, msg),
-            retry_context=msg,
         )
 
     async def _async_main(self) -> None:
@@ -79,10 +67,10 @@ class WeChatAgentBot(BotBase):
 
         self._released = False
         kwargs: dict = {
-            "on_qr_url": lambda url: _runtime_resources.info(f"[WeChat] 请扫码登录: {url}"),
-            "on_scanned": lambda: _runtime_resources.info("[WeChat] 已扫码，确认登录中..."),
-            "on_expired": lambda: _runtime_resources.warning("[WeChat] 登录二维码已过期"),
-            "on_error": lambda err: _runtime_resources.error(f"[WeChat] SDK 错误: {err}"),
+            "on_qr_url": lambda url: logger.info(f"[WeChat] 请扫码登录: {url}"),
+            "on_scanned": lambda: logger.info("[WeChat] 已扫码，确认登录中..."),
+            "on_expired": lambda: logger.warning("[WeChat] 登录二维码已过期"),
+            "on_error": lambda err: logger.error(f"[WeChat] SDK 错误: {err}"),
         }
 
         bot = WeChatBot(**kwargs)
@@ -95,7 +83,7 @@ class WeChatAgentBot(BotBase):
             try:
                 bot.stop()
             except Exception as e:
-                _runtime_resources.debug("[WeChat] bot.stop 失败: %s", e)
+                logger.debug("[WeChat] bot.stop 失败: %s", e)
 
     def run(self) -> None:
         asyncio.run(self._async_main())
