@@ -13,7 +13,7 @@ from redlotus.runtime.config import get_env, user_config_dir
 from redlotus.sessions.control import UserMessage
 
 if TYPE_CHECKING:
-    from ncatbot.core import BaseMessageEvent, MetaEvent
+    from ncatbot.core import BaseMessageEvent
 
 
 class QQBot(BotBase):
@@ -60,7 +60,10 @@ class QQBot(BotBase):
             config.set_bot_uin(uin)
         self._doctor()
         self._bot_client = BotClient()
-        self._bot_client.add_shutdown_handler(self._on_shutdown)
+        adapter = self._bot_client.adapter
+        adapter.connect_websocket = partial(self._run_connection, adapter.connect_websocket)
+        self._bot_client.add_private_message_handler(self._handle_message)
+        self._bot_client.add_group_message_handler(self._handle_message)
 
     platform_tag = "QQ"
     session_prefix = "qq_"
@@ -92,11 +95,11 @@ class QQBot(BotBase):
             else event.reply(text=text)
         )
 
-    async def _extract_attachments(self, event: BaseMessageEvent) -> list:
-        return await extract_media(self._bot_client.api, event, self._FILE_ALLOW_EXT)
-
-    async def _on_shutdown(self, _: MetaEvent) -> None:
-        await self.release_all_resources_async()
+    async def _run_connection(self, connect) -> None:
+        try:
+            await connect()
+        finally:
+            await self.release_all_resources_async()
 
     async def _handle_message(self, event: BaseMessageEvent) -> None:
         raw_text = (event.raw_message or "").strip()
@@ -111,16 +114,11 @@ class QQBot(BotBase):
                 original_text=self.clean_text(raw_text),
             ),
             partial(self._reply_event, event),
-            prepare=partial(self._extract_attachments, event) if (
+            prepare=partial(extract_media, self._bot_client.api, event, self._FILE_ALLOW_EXT) if (
                 any(kind in ("image", "video", "file") for kind, _ in iter_segments(event))
                 or re.search(r"\[CQ:(?:image|video|file),", raw_text)
             ) else None,
         )
-
-    def _register_handlers(self) -> None:
-        from ncatbot.plugin_system import on_message
-
-        on_message(self._handle_message)
 
     def _doctor(self) -> None:
         """启动前体检：配置缺失/无效时立即报错退出，避免 ncatbot 回退到 input() 静默卡死。"""
@@ -135,30 +133,17 @@ class QQBot(BotBase):
                 f"或在 {config_path} 中填写 bt_uin。"
             )
         token = config.napcat.webui_token
-        if not strong_password_check(token):
+        if config.napcat.enable_webui and not strong_password_check(token):
             raise ValueError(
                 f"[QQ] NapCat WebUI 令牌强度不足（{config_path} 的 napcat.webui_token）。"
                 f"请改为至少 12 位、含数字与大小写字母及特殊符号的强密码。"
             )
 
-    def run(
-        self,
-        *,
-        debug: bool = True,
-        remote_mode: bool = True,
-        enable_webui_interaction: bool = False,
-        **kwargs,
-    ):
+    def run(self, **kwargs):
         self._doctor()
         self._released = False
-        self._register_handlers()
         try:
-            self._bot_client.run_frontend(
-                debug=debug,
-                remote_mode=remote_mode,
-                enable_webui_interaction=enable_webui_interaction,
-                **kwargs,
-            )
+            self._bot_client.run_frontend(**kwargs)
         finally:
             self.release_all_resources()
 

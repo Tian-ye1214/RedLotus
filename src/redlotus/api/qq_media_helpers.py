@@ -140,17 +140,11 @@ def binary_b64(file_val: str) -> BinaryContent | None:
 
 
 def iter_segments(event: BaseMessageEvent):
-    msg = getattr(event, "message", None)
-    if not msg or not hasattr(msg, "__iter__"):
-        msg = []
-    for seg in msg:
+    for seg in getattr(event, "message", None) or []:
         if isinstance(seg, dict):
             yield seg.get("type", ""), seg.get("data", {})
         else:
-            sd = getattr(seg, "data", {})
-            if not isinstance(sd, dict):
-                sd = vars(sd) if hasattr(sd, "__dict__") else {}
-            yield getattr(seg, "type", ""), sd
+            yield seg.msg_seg_type, vars(seg)
 
 
 def extract_image_video(event: BaseMessageEvent) -> list[Any]:

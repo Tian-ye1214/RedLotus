@@ -450,14 +450,15 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
 
     from pydantic_ai import BinaryContent
 
-    from redlotus.api.QQ import QQBot
+    from redlotus.api import QQ
 
     p = channel_probe
-    bot = object.__new__(QQBot)
+    bot = object.__new__(QQ.QQBot)
     base.BotBase.__init__(bot)
+    bot._bot_client = SimpleNamespace(api=object())
     started, release = asyncio.Event(), asyncio.Event()
 
-    async def attachments(event):
+    async def attachments(api, event, allow):
         if event.raw_message == "first":
             started.set()
             await release.wait()
@@ -467,13 +468,12 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
     async def reply(event, text):
         p.replies.append(text)
 
-    monkeypatch.setattr(bot, "_extract_attachments", attachments)
+    monkeypatch.setattr(QQ, "extract_media", attachments)
     monkeypatch.setattr(bot, "_reply_event", reply)
     monkeypatch.setattr(bot, "_is_at_me", lambda event: True)
     monkeypatch.setattr(bot, "_session_id", lambda event: "private_fixture")
-    monkeypatch.setattr(bot, "_ensure_session_gc", lambda: None)
     slow = asyncio.create_task(bot._handle_message(SimpleNamespace(
-        raw_message="first", message=[{"type": "file", "data": {"file": "first.txt", "file_id": "fixture"}}],
+        raw_message="first", message=[SimpleNamespace(msg_seg_type="file", file="first.txt", file_id="fixture")],
     )))
     await asyncio.wait_for(started.wait(), 1)
     await bot._handle_message(SimpleNamespace(raw_message="second"))
@@ -489,7 +489,8 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
     await bot._handle_message(SimpleNamespace(raw_message="answer", message=[]))
     assert state.question.done() and state.question.result() == "answer"
     assert state.inputs.user_inputs == ["answer"]
-    await bot.release_all_resources_async()
+    await bot._run_connection(release.wait)
+    assert bot._released and not bot._sessions
 
 
 @pytest.mark.parametrize("timeout", [2, 7])
