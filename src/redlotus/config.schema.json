@@ -161,11 +161,17 @@
           "type": "number",
           "description": "取消与退出清理的期限秒数",
           "exclusiveMinimum": 0
+        },
+        "process_termination_timeout_seconds": {
+          "type": "number",
+          "description": "进程树终止和继承管道回收各阶段的最长等待秒数，整体退出仍受 shutdown_grace_seconds 约束",
+          "exclusiveMinimum": 0
         }
       },
       "required": [
         "invocation_history_per_session",
-        "shutdown_grace_seconds"
+        "shutdown_grace_seconds",
+        "process_termination_timeout_seconds"
       ]
     },
     "storage": {
@@ -254,6 +260,11 @@
       "type": "object",
       "description": "全局和身份输入限制",
       "properties": {
+        "parse_concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "一次输入内同时解析引用文件的数量；独立于子 Agent 线程额度"
+        },
         "defaults": {
           "$ref": "#/$defs/input_limits",
           "required": [
@@ -264,7 +275,8 @@
         }
       },
       "required": [
-        "defaults"
+        "defaults",
+        "parse_concurrency"
       ],
       "additionalProperties": {
         "$ref": "#/$defs/input_limits"
@@ -531,10 +543,30 @@
         "question_timeout_seconds"
       ]
     },
+    "BROWSER_HEADLESS": {
+      "type": ["boolean", "string", "integer"],
+      "minimum": 0,
+      "maximum": 1,
+      "string_values": ["true", "false", "1", "0", "yes", "no"],
+      "description": "浏览器是否无窗口运行；兼容原 BROWSER_HEADLESS 配置键，缺失时明确填写"
+    },
     "browser": {
       "type": "object",
       "description": "浏览器操作等待策略",
       "properties": {
+        "viewport": {
+          "type": "object",
+          "description": "浏览器页面视口像素大小",
+          "properties": {
+            "width": {"type": "integer", "minimum": 1, "description": "页面视口宽度（像素）"},
+            "height": {"type": "integer", "minimum": 1, "description": "页面视口高度（像素）"}
+          },
+          "required": ["width", "height"]
+        },
+        "locale": {
+          "type": "string",
+          "description": "浏览器区域语言，例如 zh-CN 或 en-US"
+        },
         "action_timeout_seconds": {
           "type": "number",
           "exclusiveMinimum": 0,
@@ -547,6 +579,8 @@
         }
       },
       "required": [
+        "viewport",
+        "locale",
         "action_timeout_seconds",
         "navigation_timeout_seconds"
       ]
@@ -565,7 +599,8 @@
     "long_term_memory",
     "model_metadata",
     "rag_service",
-    "browser"
+    "browser",
+    "BROWSER_HEADLESS"
   ],
   "$defs": {
     "model": {

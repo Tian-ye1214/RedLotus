@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from redlotus.prompts.prompt import with_runtime_context
+from redlotus.runtime.config import settings
 from redlotus.runtime.network import ModelInputPolicy
 from redlotus.runtime.resources import current_workspace
 
@@ -516,7 +517,7 @@ async def load_file_refs(
     captured = await asyncio.gather(
         *(store.capture_file(path, policy=policy) for path in paths)
     )
-    slots = asyncio.Semaphore(4)
+    slots = asyncio.Semaphore(settings()["input_limits"]["parse_concurrency"])
 
     async def read(reference):
         async with slots:

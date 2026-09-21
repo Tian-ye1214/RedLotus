@@ -251,6 +251,7 @@ async def test_all_external_processes_obey_configured_command_deadline(tmp_path,
 
     (tmp_path / "config.json").write_text(json.dumps({
         "agent_run_policy": {"max_concurrent_threads_per_session": 1, "max_command_timeout_seconds": 1},
+        "lifecycle": {"process_termination_timeout_seconds": 2},
         "storage": {"runtime_dir": "WorkDatabase/runtime"},
     }), encoding="utf-8")
     execute = execution._run_owned_process
@@ -264,6 +265,158 @@ async def test_all_external_processes_obey_configured_command_deadline(tmp_path,
         await execution.run_subprocess([sys.executable, "-c", "import time; time.sleep(30)"],
                                        shell=False, cwd=str(tmp_path), timeout=requested)
     assert expired.value.timeout == 1
+
+
+async def test_inherited_pipe_failure_obeys_configured_cleanup_deadline(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from redlotus.tools.execution import _terminate_process_tree
+
+    (tmp_path / "config.json").write_text('{"lifecycle":{"process_termination_timeout_seconds":0.02}}')
+
+    async def inherited_pipe():
+        await asyncio.Event().wait()
+
+    with pytest.raises(RuntimeError, match="inherited pipes remain open"):
+        await asyncio.wait_for(_terminate_process_tree(SimpleNamespace(returncode=0, communicate=inherited_pipe)), .5)
+
+
+@pytest.mark.parametrize("parallelism", [1, 2])
+async def test_reference_parser_keeps_input_order_and_obeys_its_own_concurrency(tmp_path, monkeypatch, parallelism):
+    import asyncio
+    import json
+
+    from redlotus.runtime.network import ModelInputPolicy
+    from redlotus.runtime.resources import WorkspaceContext
+    from redlotus.sessions.control import load_file_refs
+    from redlotus.tools.references import ReferenceStore
+
+    (tmp_path / "config.json").write_text(json.dumps({
+        "input_limits": {"parse_concurrency": parallelism},
+        "storage": {"file_lock_timeout_seconds": 2, "references_dir": "references"},
+    }))
+    paths = [tmp_path / f"input-{n}.txt" for n in range(4)]
+    for path in paths:
+        path.write_text(path.stem, encoding="utf-8")
+    policy = ModelInputPolicy(max_files=4, max_file_bytes=1000, reference_download_timeout_seconds=2)
+    monkeypatch.setattr(ModelInputPolicy, "for_role", lambda role: policy)
+    parse, active, peak = ReferenceStore.parse, 0, 0
+
+    async def observe(self, reference):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(.03)
+            return await parse(self, reference)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(ReferenceStore, "parse", observe)
+    result = await load_file_refs(" ".join(f'@"{path}"' for path in paths), workspace=WorkspaceContext.from_path(tmp_path))
+    assert peak == parallelism and active == 0
+    assert [reference.parts[0].text for reference in result] == [path.stem for path in paths]
+
+
+@pytest.mark.parametrize("headless,expected,viewport,locale", [
+    (False, False, {"width": 900, "height": 700}, "en-US"),
+    (0, False, {"width": 800, "height": 600}, "fr-FR"),
+    ("YES", True, {"width": 640, "height": 480}, "zh-CN"),
+])
+async def test_browser_launch_uses_explicit_configuration(tmp_path, monkeypatch, headless, expected, viewport, locale):
+    import json
+    from types import SimpleNamespace
+
+    from playwright import async_api
+    from redlotus.tools.execution import PlaywrightBrowserSession
+
+    (tmp_path / "config.json").write_text(json.dumps({
+        "BROWSER_HEADLESS": headless, "browser": {"viewport": viewport, "locale": locale},
+    }))
+    calls = []
+
+    async def new_page(**kwargs):
+        calls.append(kwargs)
+        return object()
+
+    async def launch(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(new_page=new_page)
+
+    async def stop():
+        calls.append("stopped")
+
+    async def start():
+        return SimpleNamespace(chromium=SimpleNamespace(launch=launch), stop=stop)
+
+    monkeypatch.setattr(async_api, "async_playwright", lambda: SimpleNamespace(start=start))
+    browser = PlaywrightBrowserSession(None)
+    await browser._start()
+    assert calls == [{"headless": expected}, {"viewport": viewport, "locale": locale}]
+
+
+async def test_subagent_close_joins_its_thread_without_blocking_the_owner_loop(tmp_path):
+    import asyncio
+
+    from redlotus.core.agents import SubagentHandle
+    from redlotus.runtime.resources import WorkspaceContext
+    from redlotus.sessions.context import SubagentSpec
+
+    release = threading.Event()
+    handle = SubagentHandle(SubagentSpec("fixture", None, WorkspaceContext.from_path(tmp_path)), None)
+    handle._future.set_result("cleanup still finishing")
+    handle.thread = threading.Thread(target=release.wait)
+    handle.thread.start()
+    close = asyncio.create_task(handle.close())
+    try:
+        await asyncio.sleep(.02)
+        assert handle.thread.is_alive() and not close.done()
+    finally:
+        release.set()
+        await asyncio.wait_for(close, 1)
+    assert not handle.thread.is_alive()
+
+
+def test_cancelled_close_does_not_keep_the_owner_executor_alive(tmp_path):
+    import asyncio
+
+    from redlotus.core.agents import SubagentHandle
+    from redlotus.runtime.resources import WorkspaceContext
+    from redlotus.sessions.context import SubagentSpec
+
+    started, release, exited = threading.Event(), threading.Event(), threading.Event()
+
+    async def delayed_cleanup():
+        started.set()
+        while not release.is_set():
+            try:
+                await asyncio.sleep(.01)
+            except asyncio.CancelledError:
+                pass  # Reproduce a child which cannot finish cleanup before the exit deadline.
+
+    handle = SubagentHandle(SubagentSpec("fixture", None, WorkspaceContext.from_path(tmp_path)), delayed_cleanup)
+    handle.start()
+
+    async def cancel_close():
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(handle.close(), .05)
+
+    def owner():
+        asyncio.run(cancel_close())
+        exited.set()
+
+    owner_thread = threading.Thread(target=owner)
+    try:
+        assert started.wait(1)
+        owner_thread.start()
+        assert exited.wait(.5), "A pending join must not trap asyncio.run in executor shutdown"
+    finally:
+        release.set()
+        if owner_thread.ident is not None:
+            owner_thread.join(2)
+        handle.thread.join(2)
+    assert not owner_thread.is_alive() and not handle.thread.is_alive()
 
 
 async def test_reference_download_updates_its_http_timeout_and_keeps_contents(tmp_path, monkeypatch):

@@ -327,9 +327,9 @@ class SubagentHandle:
     async def close(self) -> None:
         if not self._future.done():
             self.cancel()
-        # Yield to the UI and other threads while cooperative cleanup finishes.
-        while self.thread is not None and self.thread.is_alive():
-            await asyncio.sleep(0.01)
+        if self.thread is not None and self.thread.is_alive():
+            await asyncio.gather(self.result(), return_exceptions=True)
+            await asyncio.to_thread(self.thread.join)
         if self._future.done() and not self._future.cancelled():
             self._future.exception()  # Retrieve errors even when its caller was cancelled.
 

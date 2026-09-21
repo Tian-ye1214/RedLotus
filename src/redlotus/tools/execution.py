@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
 
-from redlotus.runtime.config import get_agent_run_policy, get_env, settings
+from redlotus.runtime.config import get_agent_run_policy, settings
 
 _SEPARATORS = {";", "&", "&&", "|", "||", "\n"}
 _PYTHON_NAMES = {"python", "python.exe", "python3", "python3.exe"}
@@ -563,11 +563,12 @@ def _unquote_shell_word(word: str) -> str:
 
 async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
     """杀掉子进程及其后代（无 psutil 依赖），并收尸。"""
+    timeout = settings()["lifecycle"]["process_termination_timeout_seconds"]
     if proc.returncode is not None:
         # An exited parent can leave inherited pipes open. Do not claim tree
         # cleanup before they close, or target a PID whose owner may have changed.
         try:
-            await asyncio.wait_for(proc.communicate(), timeout=5)
+            await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except TimeoutError as exc:
             raise RuntimeError(
                 "Parent exited but inherited pipes remain open; descendant ownership is unknown and cleanup is unverified."
@@ -586,7 +587,7 @@ async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
                 stderr=asyncio.subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            await asyncio.wait_for(killer.wait(), timeout=5)
+            await asyncio.wait_for(killer.wait(), timeout=timeout)
             if killer.returncode and proc.returncode is None:
                 raise PermissionError(
                     f"taskkill could not terminate process tree {proc.pid} (exit {killer.returncode})"
@@ -600,7 +601,7 @@ async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
         raise  # Do not report successful tree cleanup when the OS denied it.
     # Drain inherited pipes too: descendants can still be releasing files after
     # the root process has exited.
-    await asyncio.wait_for(proc.communicate(), timeout=5)
+    await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
 
 async def run_subprocess(
@@ -737,14 +738,11 @@ class PlaywrightBrowserSession:
         self._browser_error = Error
         self._playwright = await async_playwright().start()
         try:
-            headless = (get_env("BROWSER_HEADLESS", warn=False) or "").lower() not in (
-                "0",
-                "false",
-                "no",
-            )
+            config = settings()
+            headless = str(config["BROWSER_HEADLESS"]).strip().lower() not in ("0", "false", "no")
             self._browser = await self._playwright.chromium.launch(headless=headless)
             self._page = await self._browser.new_page(
-                viewport={"width": 1280, "height": 720}, locale="zh-CN"
+                viewport=config["browser"]["viewport"], locale=config["browser"]["locale"]
             )
         except BaseException:
             await self._close()
