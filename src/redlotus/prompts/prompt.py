@@ -4,16 +4,13 @@ import datetime
 import json
 import os
 import platform
+from functools import partial
 from typing import TYPE_CHECKING
 
 from redlotus.runtime.resources import project_data_dir, prompts_dir
 
 if TYPE_CHECKING:
     from redlotus.tools.registry import SkillsManager
-
-
-def get_skills_summary(skills_manager: SkillsManager) -> str:
-    return skills_manager.get_skills_summary()
 
 
 def format_system_info() -> str:
@@ -46,9 +43,7 @@ def with_runtime_context(content) -> list:
 
 
 def load_prompt(filename: str) -> str:
-    filepath = prompts_dir() / filename
-    with open(filepath, "r", encoding="utf-8") as f:
-        return f.read()
+    return (prompts_dir() / filename).read_text(encoding="utf-8")
 
 def get_skills_layout_text(skills_manager: SkillsManager) -> str:
     root = skills_manager.skills_dir.resolve()
@@ -92,17 +87,9 @@ def memory_from_session_prompt(instructions: str) -> str:
 
 
 def get_skills_as_in_system_prompt(skills_manager: SkillsManager) -> str:
-    layout = get_skills_layout_text(skills_manager).rstrip()
-    summary = get_skills_summary(skills_manager).rstrip()
-    if not layout:
-        return summary
-    if not summary:
-        return layout
-    return f"{layout}\n\n{summary}"
-
-
-def get_common_conduct() -> str:
-    return load_prompt("common_conduct.md")
+    return "\n\n".join(filter(None, (
+        get_skills_layout_text(skills_manager).rstrip(), skills_manager.get_skills_summary().rstrip(),
+    )))
 
 
 def project_agent_snapshot() -> str:
@@ -127,10 +114,10 @@ def _build_role_prompt(
     values = {
         "current_time": format_prompt_current_time(),
         "skills_layout": get_skills_layout_text(skills_manager),
-        "skills_summary": get_skills_summary(skills_manager),
+        "skills_summary": skills_manager.get_skills_summary(),
         "system_info": format_system_info(),
         "long_term_memory": format_long_term_memory_for_prompt(memory_injection),
-        "common_conduct": get_common_conduct(),
+        "common_conduct": load_prompt("common_conduct.md"),
     }
     rendered = template
     for name, value in values.items():
@@ -151,27 +138,9 @@ def _build_role_prompt(
     return "\n\n".join(section.strip() for section in sections if section.strip())
 
 
-def get_manager_system_prompt(
-    skills_manager: SkillsManager,
-    memory_injection: str = "",
-) -> str:
-    return _build_role_prompt("manager_system.md", skills_manager, memory_injection)
+get_manager_system_prompt = partial(_build_role_prompt, "manager_system.md")
+get_worker_system_prompt = partial(_build_role_prompt, "worker_system.md")
+get_coordinator_system_prompt = partial(_build_role_prompt, "coordinator_system.md")
 
 
-def get_worker_system_prompt(
-    skills_manager: SkillsManager,
-    memory_injection: str = "",
-) -> str:
-    return _build_role_prompt("worker_system.md", skills_manager, memory_injection)
-
-
-def get_coordinator_system_prompt(
-    skills_manager: SkillsManager,
-    memory_injection: str = "",
-) -> str:
-    return _build_role_prompt("coordinator_system.md", skills_manager, memory_injection)
-
-
-def window_prompt_content(payload):
-    """Serialize the fixed perception window without clipping its evidence."""
-    return json.dumps(payload, ensure_ascii=False)
+window_prompt_content = partial(json.dumps, ensure_ascii=False)

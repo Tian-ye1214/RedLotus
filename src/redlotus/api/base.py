@@ -56,7 +56,7 @@ class QueuedTurn:
 
 @dataclass
 class ChatSession:
-    inputs: SessionController
+    inputs: SessionController = field(default_factory=SessionController)
     history: ChatHistory = field(default_factory=ChatHistory)
     agent: AgentSystem | None = None
     question: asyncio.Future | None = None
@@ -73,18 +73,13 @@ class BotBase:
       - session_prefix: str    —— 会话 ID 前缀，如 "wx_" / "qq_"
     """
 
-    AGENT_RUN_TIMEOUT_S = 900.0
-    SEND_REPLY_TIMEOUT_S = 120.0
-    REPLY_MAX_CHARS = 4500  # 单条回复字符上限，超长按段落/换行/空格切分后分条发送
-    SESSION_IDLE_TTL_S = 3600.0  # 空闲超过此时长的会话将被后台回收；<=0 关闭回收
-    SESSION_GC_INTERVAL_S = 300.0  # 空闲会话清扫间隔
     RESET_COMMANDS = frozenset({"新任务", "/新任务", "/reset"})
     END_TASK_COMMANDS = frozenset(
         {"结束任务", "/结束任务", "结束当前任务", "/结束当前任务"}
     )
     _MIME_MAP: dict[str, str] = {}
 
-    # 子类可覆盖（从环境变量读取超时）
+    # Legacy named fields still resolve through the three-layer configuration.
     _ENV_AGENT_TIMEOUT: str = ""
     _ENV_SEND_TIMEOUT: str = ""
     _ENV_SESSION_IDLE_TTL: str = ""
@@ -93,26 +88,24 @@ class BotBase:
         self._sessions: dict[str, ChatSession] = {}
         self._gc_task = None
         self._released = False
+        self._policy = settings()["bot"]
         self._agent_ctx = contextvars.ContextVar(
             f"{type(self).__name__}_context", default=None
         )
         for source, target in (
-            (self._ENV_AGENT_TIMEOUT, "AGENT_RUN_TIMEOUT_S"),
-            (self._ENV_SEND_TIMEOUT, "SEND_REPLY_TIMEOUT_S"),
-            (self._ENV_SESSION_IDLE_TTL, "SESSION_IDLE_TTL_S"),
+            (self._ENV_AGENT_TIMEOUT, "agent_run_timeout_seconds"),
+            (self._ENV_SEND_TIMEOUT, "send_reply_timeout_seconds"),
+            (self._ENV_SESSION_IDLE_TTL, "session_idle_ttl_seconds"),
         ):
             if source and (value := get_env(source, warn=False)):
-                setattr(self, target, float(value))
+                self._policy[target] = float(value)
 
     platform_tag: str
     session_prefix: str
 
-    def _new_session(self):
-        return ChatSession(SessionController())
-
     def _session(self, session_id):
         if session_id not in self._sessions:
-            state = self._new_session()
+            state = ChatSession()
             state.ready.set()
             self._sessions[session_id] = state
         return self._sessions[session_id]
@@ -153,7 +146,7 @@ class BotBase:
 
     async def _reset_session(self, session_id, *, preserve_queue=False):
         old = self._sessions.pop(session_id, None)
-        state = self._new_session()
+        state = ChatSession()
         self._sessions[session_id] = state
         if old:
             old.inputs.reset(discard=True)
@@ -169,19 +162,19 @@ class BotBase:
             state.ready.set()
 
     def _ensure_session_gc(self):
-        if self.SESSION_IDLE_TTL_S > 0 and (
+        if self._policy["session_idle_ttl_seconds"] > 0 and (
             self._gc_task is None or self._gc_task.done()
         ):
             self._gc_task = asyncio.create_task(self._session_gc_loop())
 
     async def _session_gc_loop(self):
         while True:
-            await asyncio.sleep(self.SESSION_GC_INTERVAL_S)
+            await asyncio.sleep(self._policy["session_gc_interval_seconds"])
             for identity, state in list(self._sessions.items()):
                 if (
                     not state.inputs.queue.current
                     and not state.inputs.queue.pending
-                    and time.monotonic() - state.touched > self.SESSION_IDLE_TTL_S
+                    and time.monotonic() - state.touched > self._policy["session_idle_ttl_seconds"]
                 ):
                     self._sessions.pop(identity, None)
                     await self._close_session(state)
@@ -201,7 +194,7 @@ class BotBase:
         await state.ready.wait()
         try:
             result = await asyncio.wait_for(
-                self._run_turn(identity, state, turn), self.AGENT_RUN_TIMEOUT_S
+                self._run_turn(identity, state, turn), self._policy["agent_run_timeout_seconds"]
             )
         except asyncio.CancelledError:
             raise
@@ -220,8 +213,8 @@ class BotBase:
 
     def _split_reply(self, text):
         chunks = []
-        while len(text) > self.REPLY_MAX_CHARS:
-            window = text[: self.REPLY_MAX_CHARS]
+        while len(text) > self._policy["reply_max_chars"]:
+            window = text[: self._policy["reply_max_chars"]]
             cut = next(
                 (
                     pos
@@ -238,7 +231,7 @@ class BotBase:
         """Send each chunk once; a missing acknowledgement is not failed delivery."""
         for chunk in self._split_reply(text):
             try:
-                await asyncio.wait_for(send_reply(chunk), self.SEND_REPLY_TIMEOUT_S)
+                await asyncio.wait_for(send_reply(chunk), self._policy["send_reply_timeout_seconds"])
             except TimeoutError as exc:
                 raise TimeoutError("发送确认超时，送达状态未知；未自动重发。") from exc
 
@@ -284,7 +277,7 @@ class BotBase:
             tool_telemetry.set_user_notify_callback(None)
             self._agent_ctx.reset(token)
 
-    async def _ask_user(self, question, timeout=120):
+    async def _ask_user(self, question, timeout=None):
         identity, state, turn = self._agent_ctx.get()
         async with state.question_lock:
             if self._sessions.get(identity) is not state:
@@ -292,7 +285,7 @@ class BotBase:
             state.question = asyncio.get_running_loop().create_future()
             try:
                 await self._safe_send(turn.send_reply, question)
-                return await asyncio.wait_for(state.question, timeout)
+                return await asyncio.wait_for(state.question, self._policy["question_timeout_seconds"] if timeout is None else timeout)
             except TimeoutError:
                 return None
             finally:
@@ -485,13 +478,13 @@ def rag_configuration_paths():
     """Connection and model fields exposed by the existing RAG configuration dialog."""
     return [("SILICONFLOW_BASE",), ("SILICONFLOW_KEY",), ("RAG_models", "embedding"), ("RAG_models", "reranker")]
 
-async def prepare_startup_configuration(*, ask=None, emit=print) -> bool:
+async def prepare_startup_configuration(*, required=(), ask=None, emit=print) -> bool:
     """Collect missing typed fields before constructing Agents; never silently fill policy values."""
     setup = ConfigurationSetup(ask, emit)
     interactive = ask is not None or configuration_prompt_available()
     emit(f"配置修改目标: {config_file()}\n读取来源: {config_source_summary()}")
     try:
-        while missing := missing_startup_fields(setup.values):
+        while missing := missing_startup_fields(setup.values, required):
             if not interactive:
                 raise ConfigError(f"非交互启动缺少必填配置 {', '.join('.'.join(path) for path in missing)}；请编辑 {config_file()}")
             if not await setup.fill(missing[0]):
@@ -537,18 +530,14 @@ async def configure_api(*, embedding=False, ask=None, emit=print) -> bool:
     except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
         return False
 
-class ExitDeadline:
+class ExitDeadline(threading.Timer):
     """Bound process exit even when a native call ignores task cancellation."""
 
     def __init__(self, seconds: float):
-        self._timer = threading.Timer(seconds, os._exit, args=(0,))
-        self._timer.daemon = True
+        super().__init__(seconds, os._exit, args=(0,))
+        self.daemon = True
 
-    def start(self):
-        self._timer.start()
-
-    def close(self):
-        self._timer.cancel()
+    close = threading.Timer.cancel
 
 def install_stop_handlers(stop_event: asyncio.Event) -> None:
     """Map process signals to the interactive runner's stop event."""
@@ -581,11 +570,14 @@ async def run_cli(system=None):
         await close_all_clients()
     return system
 
-def main() -> None:
-    """CLI entrypoint used by root ``main.py``."""
+def main(channel=None) -> None:
+    """Configure the selected transport before constructing its runtime."""
     try:
         load_config()
-        if not asyncio.run(prepare_startup_configuration()):
+        if not asyncio.run(prepare_startup_configuration(required=("bot",) if channel else ())):
+            return
+        if channel:
+            channel().run()
             return
         from redlotus.core.system import AgentSystem
         from redlotus.ui import presentation

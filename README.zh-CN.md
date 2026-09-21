@@ -139,7 +139,7 @@ python -m playwright install chromium
 | `Ctrl+Q` | 退出 |
 | `@路径` | 引用文档、图片或视频，支持 Tab 补全；每次最多 20 个文件 |
 
-加急消息以正常亮度和“加急”标记显示，终端使用 `Ctrl+Enter` 补充当前回合。如果终端把它与普通回车发送成相同编码，Python 无法区分，需要终端保留组合键信息；`Shift+Tab` 有单独编码，因此仍可能正常工作。按键检测只用于测试，不进入发布界面。具体支持边界与验证记录见 [按键输入说明](docs/design.md#请求执行)。
+补充内容显示为普通用户消息，不添加“加急”标记，终端使用 `Ctrl+Enter` 补充当前回合。如果终端把它与普通回车发送成相同编码，Python 无法区分，需要终端保留组合键信息；`Shift+Tab` 有单独编码，因此仍可能正常工作。按键检测只用于测试，不进入发布界面。具体支持边界与验证记录见 [按键输入说明](docs/design.md#请求执行)。
 
 引用之间不必加空格，例如 `@审稿意见.md解读这个文档，@图片.png分析这张图`。Tab 补全当前引用，遇到含空格或分隔符的路径会自动加引号，也可以手写 `@"路径"`、`@'路径'` 或 `@{路径}`。文件按首次出现顺序去重；超过 20 个不同文件会提示错误，不会只上传其中一部分。
 
@@ -211,7 +211,7 @@ python -m redlotus.api.WeChat
 
 QQ 接入需要先运行 [NapCat](https://github.com/NapNeko/NapCatQQ)，并配置 OneBot WebSocket、机器人 QQ 号和 WebUI token。微信接入在启动后按提示扫码登录。
 
-个人聊天渠道需要配置 `bot.owner_channels.qq`（本人私聊 QQ 号）或 `bot.owner_channels.wechat`（本人 wxid）。未绑定渠道提供文本对话，不开放个人记忆和执行工具。机器人支持 `/stop`、`/clear`、`/urgent`；真实账号及附件顺序验收仍待完成。配置示例见 [渠道绑定](docs/design.md#agent-与工具边界)。
+个人聊天渠道需要配置 `bot.owner_channels.qq`（本人私聊 QQ 号）或 `bot.owner_channels.wechat`（本人 wxid）。未绑定渠道提供文本对话，不开放个人记忆和执行工具。机器人支持 `/stop`、`/clear`；首次启动先收集缺失的渠道运行策略，再连接账号。适配器至真实模型的附件顺序已验证，真实账号收发仍待验收。配置示例见 [渠道绑定](docs/design.md#agent-与工具边界)。
 
 ## 本地开发
 
@@ -232,11 +232,13 @@ uv build
 
 构建 PyInstaller 可执行目录：
 
-```bash
+```powershell
 pip install ".[build]"
+$env:PLAYWRIGHT_BROWSERS_PATH="0"
+python -m playwright install chromium
 pyinstaller build.spec
 ```
 
-项目主要代码位于 `src/redlotus/`，分为 `core`、`tools`、`api`、`prompts`、`memory`、`runtime` 六个模块；命令入口为 `redlotus.api.base:main`。
+项目主要代码位于 `src/redlotus/`，分为 `runtime`、`sessions`、`core`、`tools`、`memory`、`prompts`、`ui`、`api` 八个模块；命令入口为 `redlotus.api.base:main`。
 
 当前结构整改与发布验收尚未完成。测试必须包含源码、日常 pip 和实际打包入口的真实 API 调用；隔离故障回归不能单独作为通过依据。详见 [开发与验收约定](docs/development.md)。

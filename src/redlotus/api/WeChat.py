@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from pydantic_ai import BinaryContent
 
-from redlotus.api.base import BotBase
+from redlotus.api.base import BotBase, main
 from redlotus.runtime import logging as logger
 from redlotus.sessions.control import UserMessage
 
@@ -88,4 +88,4 @@ class WeChatAgentBot(BotBase):
 
 
 if __name__ == "__main__":
-    WeChatAgentBot().run()
+    main(WeChatAgentBot)

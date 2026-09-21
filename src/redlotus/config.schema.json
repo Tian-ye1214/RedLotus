@@ -135,11 +135,17 @@
           "type": "integer",
           "description": "工具命令允许的最长执行秒数",
           "minimum": 1
+        },
+        "max_task_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "任务明确失败后的最大自动重试次数；0 表示不自动重试"
         }
       },
       "required": [
         "max_concurrent_threads_per_session",
-        "max_command_timeout_seconds"
+        "max_command_timeout_seconds",
+        "max_task_retries"
       ]
     },
     "lifecycle": {
@@ -207,12 +213,24 @@
               "type": "number",
               "description": "会话保留天数",
               "minimum": 0
+            },
+            "log_retention_days": {
+              "type": "number",
+              "minimum": 0,
+              "description": "日志保留天数；0 关闭日志清理"
+            },
+            "session_log_max_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "单会话日志滚动的字节数，保留上一份日志"
             }
           },
           "required": [
             "enabled",
             "execution_cache",
-            "session_retention_days"
+            "session_retention_days",
+            "log_retention_days",
+            "session_log_max_bytes"
           ]
         }
       },
@@ -451,6 +469,50 @@
         "type": "string",
         "description": "模型名称"
       }
+    },
+    "bot": {
+      "type": "object",
+      "description": "渠道运行策略；启用机器人前显式配置，不影响纯 CLI 启动",
+      "properties": {
+        "agent_run_timeout_seconds": {
+          "type": "number",
+          "description": "渠道任务最长运行秒数",
+          "exclusiveMinimum": 0
+        },
+        "send_reply_timeout_seconds": {
+          "type": "number",
+          "description": "渠道消息发送确认超时秒数，超时不自动重发",
+          "exclusiveMinimum": 0
+        },
+        "reply_max_chars": {
+          "type": "integer",
+          "description": "单条回复字符上限",
+          "exclusiveMinimum": 0
+        },
+        "session_idle_ttl_seconds": {
+          "type": "number",
+          "description": "空闲会话回收秒数，0 关闭回收",
+          "minimum": 0
+        },
+        "session_gc_interval_seconds": {
+          "type": "number",
+          "description": "空闲会话扫描间隔秒数",
+          "exclusiveMinimum": 0
+        },
+        "question_timeout_seconds": {
+          "type": "number",
+          "description": "等待渠道用户补充输入的秒数",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "agent_run_timeout_seconds",
+        "send_reply_timeout_seconds",
+        "reply_max_chars",
+        "session_idle_ttl_seconds",
+        "session_gc_interval_seconds",
+        "question_timeout_seconds"
+      ]
     }
   },
   "required": [
@@ -476,7 +538,7 @@
       "description": "模型对象或已命名的预设",
       "properties": {
         "name": {
-          "type": "string",
+          "type": ["string", "null"],
           "description": "SDK 的 服务:模型 标识；输入 =已配置角色 复用模型名，连接与策略保持当前角色配置"
         },
         "preset": {

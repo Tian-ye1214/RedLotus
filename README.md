@@ -140,7 +140,7 @@ Common shortcuts:
 | `Ctrl+Q` | Exit |
 | `@path` | Reference documents and images, with Tab completion; up to 20 files. Video validation is deferred. |
 
-Urgent messages keep normal brightness and an explicit label. The terminal uses Ctrl+Enter for urgent input. If a terminal sends the same code for Ctrl+Enter and Enter, Python cannot distinguish them; the terminal must preserve the modifier. Shift+Tab can still work because it has a separate code. Keyboard diagnostics are for testing only; see [keyboard behavior and verification](docs/design.md#请求执行).
+Supplements appear as ordinary user messages, without an urgency label. The terminal uses Ctrl+Enter to supplement the active turn. If a terminal sends the same code for Ctrl+Enter and Enter, Python cannot distinguish them; the terminal must preserve the modifier. Shift+Tab can still work because it has a separate code. Keyboard diagnostics are for testing only; see [keyboard behavior and verification](docs/design.md#请求执行).
 
 References can be adjacent or separated by punctuation, for example `@review.md,@image.png`. Tab completes the current reference and automatically quotes paths containing spaces or delimiters; `@"path"`, `@'path'`, and `@{path}` also work. Files are deduplicated in first-appearance order. More than 20 distinct files produces an error instead of a partial upload.
 
@@ -212,7 +212,7 @@ python -m redlotus.api.WeChat
 
 QQ integration requires [NapCat](https://github.com/NapNeko/NapCatQQ) with a configured OneBot WebSocket endpoint, bot QQ number, and WebUI token. The WeChat integration prompts for QR-code login at startup.
 
-Personal bot access must be bound in `bot.owner_channels.qq` (private QQ IDs) or `bot.owner_channels.wechat` (wxids). Unbound channels have text-only conversations and no access to personal memory or execution tools. Bots accept `/stop`, `/clear`, and `/urgent`; real account and attachment-order acceptance is still pending. See the [binding example](docs/design.md#agent-与工具边界).
+Personal bot access must be bound in `bot.owner_channels.qq` (private QQ IDs) or `bot.owner_channels.wechat` (wxids). Unbound channels have text-only conversations and no access to personal memory or execution tools. Bots accept `/stop` and `/clear`; their entrypoints collect missing channel policies before connecting. Attachment order has been checked through the adapter and real model API; real account messaging remains pending. See the [binding example](docs/design.md#agent-与工具边界).
 
 ## Development
 
@@ -233,11 +233,13 @@ uv build
 
 Build a PyInstaller application directory:
 
-```bash
+```powershell
 pip install ".[build]"
+$env:PLAYWRIGHT_BROWSERS_PATH="0"
+python -m playwright install chromium
 pyinstaller build.spec
 ```
 
-The main package lives in `src/redlotus/`, organized into `core`, `tools`, `api`, `prompts`, `memory`, and `runtime`. The `redlotus` command maps to `redlotus.api.base:main`.
+The main package lives in `src/redlotus/`, organized into `runtime`, `sessions`, `core`, `tools`, `memory`, `prompts`, `ui`, and `api`. The `redlotus` command maps to `redlotus.api.base:main`.
 
 The current restructuring and release acceptance are incomplete. Tests must include real API calls through source, installed pip, and packaged entries; isolated fault checks alone are insufficient. See the [development and acceptance rules](docs/development.md).

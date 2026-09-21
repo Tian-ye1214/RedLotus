@@ -388,6 +388,7 @@ def task_plan(tmp_path):
     from redlotus.core.tasks import TaskManager
     from redlotus.sessions.storage import SessionFile
 
+    (tmp_path / "config.json").write_text('{"agent_run_policy":{"max_task_retries":3}}')
     storage = SessionFile.create(tmp_path / "plan", "isolated-project")
     inputs = {"turn": "first", "texts": ["Plan A, then B; C is independent."]}
 
@@ -403,8 +404,8 @@ def test_interrupted_task_restores_unverified_without_replaying_side_effects():
 
     manager = TaskManager()
     manager.restore([
-        {"id": "A", "description": "done", "status": "completed", "result": "saved", "artifacts": ["A.txt"]},
-        {"id": "B", "description": "in flight", "dependencies": ["A"], "status": "running", "artifacts": ["B.txt"]},
+        {"id": "A", "description": "done", "max_retries": 2, "status": "completed", "result": "saved", "artifacts": ["A.txt"]},
+        {"id": "B", "description": "in flight", "max_retries": 2, "dependencies": ["A"], "status": "running", "artifacts": ["B.txt"]},
     ])
     assert manager.tasks["B"].status.value == "unverified"
     assert manager.get_all_ready_tasks() == []

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import copy_metadata
+from playwright.sync_api import sync_playwright
 
 project = os.path.dirname(os.path.abspath(SPEC))
 source_root = Path(project, "src", "redlotus")
@@ -14,6 +15,12 @@ bundle_mode = os.environ.get("REDLOTUS_PYINSTALLER_MODE", "onedir")
 # directory, so a one-file run keeps its transient _MEI directory in the
 # selected project's WorkDatabase instead of the system temporary directory.
 onefile_runtime_dir = str(Path("WorkDatabase") / "runtime" / "pyinstaller")
+
+# Playwright's frozen transport uses its package-local browser installation.
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+with sync_playwright() as playwright:
+    if not Path(playwright.chromium.executable_path).is_file():
+        raise SystemExit('Before building: set PLAYWRIGHT_BROWSERS_PATH=0 and run python -m playwright install chromium')
 
 
 def resource_files(source: Path, destination: str):

@@ -14,6 +14,7 @@ from loguru import logger as _lg
 from rich.console import Console
 from rich.text import Text
 
+from redlotus.runtime.config import settings
 from redlotus.runtime.resources import active_workspace, logs_dir, safe_name
 
 console_sink = Console().print
@@ -34,8 +35,6 @@ _LOG_DIR = "log_dir"
 _TASK_LOG_PATH = "task_log_path"
 _task_log_path: ContextVar[Path | None] = ContextVar("task_log_path", default=None)
 _task_log_paths: dict[Path, Path] = {}
-SESSION_LOG_MAX_BYTES = 10 * 1024 * 1024  # 单会话日志上限，超出滚动保留一个 .log.1
-LOG_RETENTION_DAYS = 14.0  # logs 根目录 *.log 保留天数；<=0 关闭清理
 
 def get_log_dir() -> Path:
     return _configured_dir or logs_dir()
@@ -102,7 +101,7 @@ def _session_sink(message: Any) -> None:
     path = log_dir / f"{message.record['extra']['session']}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        if path.exists() and path.stat().st_size >= SESSION_LOG_MAX_BYTES:
+        if path.exists() and path.stat().st_size >= message.record["extra"]["session_log_max_bytes"]:
             backup = path.with_name(path.name + ".1")
             backup.unlink(missing_ok=True)
             path.rename(backup)
@@ -166,7 +165,7 @@ def setup_task_logger(task_name: str = "task") -> None:
 
 def prune_old_logs(max_age_days: float | None = None) -> None:
     """删除 logs 根目录下超过保留期的 *.log / *.log.1（不递归，不动 conversations 等子目录）。"""
-    days = LOG_RETENTION_DAYS if max_age_days is None else max_age_days
+    days = settings()["storage"]["cleanup"]["log_retention_days"] if max_age_days is None else max_age_days
     if days <= 0:
         return
     cutoff = time.time() - days * 86400.0
@@ -190,6 +189,7 @@ def session_log_context(session_name: str):
     log_dir = logs_dir(workspace) if workspace is not None else get_log_dir()
     with _lg.contextualize(
         session=safe_name(session_name, max_len=50, fallback="task"),
+        session_log_max_bytes=settings()["storage"]["cleanup"]["session_log_max_bytes"],
         **{_SESSION_LOG_DIR: str(log_dir)},
     ):
         yield

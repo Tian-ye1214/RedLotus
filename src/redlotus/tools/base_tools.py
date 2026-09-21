@@ -251,18 +251,15 @@ class BasicToolkit:
         self._artifact_dir = self._WORK_DATABASE_ROOT
         logger.info(f"📁 工作目录已重置为: {self._base_dir}")
 
-    def _resolve_path_candidate(self, name: str) -> Path:
+    def _readable_path(self, name: str) -> Path:
         return resolve_readable_path(name, work_base=self._base_dir)
 
     def _safe_path(self, name: str) -> Path:
-        path = self._resolve_path_candidate(name)
+        path = self._readable_path(name)
         root = self.workspace.root
         if not path.is_relative_to(root):
             raise ValueError(f"Path not under current project: {path}")
         return path
-
-    def _readable_path(self, name: str) -> Path:
-        return self._resolve_path_candidate(name)
 
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
         """Check if command contains dangerous patterns"""

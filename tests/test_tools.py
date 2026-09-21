@@ -134,3 +134,66 @@ def test_application_structure_keeps_approved_module_and_effective_line_limits()
                         for token in tokenize.generate_tokens(io.StringIO(source).readline))
         assert effective <= 500, (str(relative), effective)
     assert len(counts) <= 8 and max(counts.values()) <= 5, dict(counts)
+
+
+@pytest.mark.parametrize("retries", [0, 1])
+async def test_task_retry_limit_comes_from_config(tmp_path, retries):
+    import json
+
+    from redlotus.core.tasks import TaskManager
+    from redlotus.sessions.context import SubagentResult
+
+    (tmp_path / "config.json").write_text(json.dumps({"agent_run_policy": {"max_task_retries": retries}}))
+    manager = TaskManager()
+    await manager.create_todo_list('[{"id":"A","description":"explicit failure"}]')
+    task = manager.tasks["A"]
+    assert task.max_retries == retries
+    await manager.finish(task, SubagentResult(status="failed", summary="did not execute"))
+    assert task.status.value == ("pending" if retries else "failed")
+    restored = TaskManager()
+    restored.restore(manager.snapshot())
+    assert restored.tasks["A"].max_retries == retries
+    records = manager.snapshot()
+    records[0]["max_retries"] = 3  # Pre-migration checkpoint must not override a new policy.
+    (tmp_path / "config.json").write_text('{"agent_run_policy":{"max_task_retries":0}}')
+    restored.restore(records)
+    await restored.finish(restored.tasks["A"], SubagentResult(status="failed", summary="explicit failure"))
+    assert restored.tasks["A"].status.value == "failed"
+    assert "max_retries" not in restored.snapshot()[0]
+
+
+def test_log_retention_and_rotation_follow_config(tmp_path, monkeypatch):
+    import json
+    import os
+    import time
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from redlotus.runtime import logging as logger
+
+    (tmp_path / "config.json").write_text(json.dumps({"storage": {"cleanup": {
+        "log_retention_days": 1, "session_log_max_bytes": 1,
+    }}}))
+    monkeypatch.setattr(logger, "_configured_dir", tmp_path)
+    path = tmp_path / "fixture.log"
+    path.write_text("first", encoding="utf-8")
+
+    class Message(str):
+        record = {"extra": {"session": "fixture"}}
+
+    @contextmanager
+    def contextualize(**extra):
+        Message.record["extra"] = extra
+        yield
+
+    monkeypatch.setattr(logger, "_lg", SimpleNamespace(contextualize=contextualize))
+    with logger.session_log_context("fixture"):
+        with monkeypatch.context() as scoped:
+            scoped.setattr(logger, "settings", lambda: pytest.fail("A log record must use its session's policy snapshot"))
+            logger._session_sink(Message("second"))
+    assert path.read_text() == "second"
+    backup = path.with_name("fixture.log.1")
+    assert backup.read_text() == "first"
+    os.utime(backup, (time.time() - 2 * 86400,) * 2)
+    logger.prune_old_logs()
+    assert path.is_file() and not backup.exists()

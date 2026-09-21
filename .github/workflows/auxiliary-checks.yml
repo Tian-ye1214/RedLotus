@@ -1,0 +1,36 @@
+name: Auxiliary regression and installation
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install build and auxiliary test dependencies
+        run: python -m pip install '.[dev]' build
+      - name: Build wheel and source distribution
+        run: python -m build --outdir dist
+      - name: Install the built wheel
+        run: python -c "import pathlib, subprocess, sys; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', '--no-deps', str(next(pathlib.Path('dist').glob('*.whl')))])"
+      - name: Check installed dependencies
+        run: python -m pip check
+      - name: Run isolated regression against installed package
+        run: python -m pytest -q -o pythonpath= tests
+      # pytest exit code 5 (no tests collected) fails this job.
+      # These checks never substitute for the documented live API release gates.

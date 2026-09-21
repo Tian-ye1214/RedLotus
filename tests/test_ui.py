@@ -137,7 +137,10 @@ def channel_probe(tmp_path, monkeypatch):
     monkeypatch.setattr(system, "AgentSystem", Agent)
     monkeypatch.setattr(base.app_config, "reload_config", lambda: None)
     monkeypatch.setattr(base.app_config, "missing_main_api_keys", lambda: [])
-    monkeypatch.setattr(base, "settings", lambda: {})
+    monkeypatch.setattr(base, "settings", lambda: {"bot": {
+        "agent_run_timeout_seconds": 10, "send_reply_timeout_seconds": 1, "reply_max_chars": 4500,
+        "session_idle_ttl_seconds": 0, "session_gc_interval_seconds": 10, "question_timeout_seconds": .01,
+    }})
     monkeypatch.setattr(base, "get_env", lambda *args, **kwargs: None)
     monkeypatch.setattr(base.logger, "session_log_context", lambda *args: nullcontext())
     monkeypatch.setattr(base.logger, "error", lambda *args: None)
@@ -219,6 +222,27 @@ async def test_channel_attachment_failure_never_executes_partial_request(channel
     assert not p.calls
     assert any("missing.txt" in reply and "输入" in reply for reply in p.replies)
     await p.bot.release_all_resources_async()
+
+
+async def test_channel_wait_uses_configured_deadline(channel_probe):
+    import asyncio
+
+    from redlotus.api.base import QueuedTurn
+    from redlotus.sessions.control import UserMessage
+
+    p = channel_probe
+    state = p.bot._session("wx_fixture")
+
+    async def reply(text):
+        p.replies.append(text)
+
+    token = p.bot._agent_ctx.set(("wx_fixture", state, QueuedTurn(UserMessage(text="question"), reply, asyncio.get_running_loop())))
+    try:
+        assert await asyncio.wait_for(p.bot._ask_user("Choose format"), .3) is None
+        assert p.replies == ["Choose format"] and state.question is None
+    finally:
+        p.bot._agent_ctx.reset(token)
+        await p.bot.release_all_resources_async()
 
 
 async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
@@ -322,11 +346,11 @@ def startup_values():
         },
         "BASE_URL": "https://example.invalid/v1", "API_KEY": "not-a-real-key",
         "MODEL_HTTP_TIMEOUT": 30, "request_limit": None,
-        "agent_run_policy": {"max_concurrent_threads_per_session": 2, "max_command_timeout_seconds": 15},
+        "agent_run_policy": {"max_concurrent_threads_per_session": 2, "max_command_timeout_seconds": 15, "max_task_retries": 2},
         "lifecycle": {"invocation_history_per_session": 10, "shutdown_grace_seconds": 2},
         "storage": {"project_dir": "data", "sessions_dir": "data/sessions", "project_logs_dir": "data/logs",
                     "references_dir": "data/references", "runtime_dir": "data/runtime", "state_dir": "",
-                    "cleanup": {"enabled": False, "execution_cache": False, "session_retention_days": 7}},
+                    "cleanup": {"enabled": False, "execution_cache": False, "session_retention_days": 7, "log_retention_days": 7, "session_log_max_bytes": 4096}},
         "input_limits": {"defaults": {"max_files": 2, "max_file_bytes": 1024}},
         "memory_perception": {"model_role": "worker", "window_turns": 20, "overlap_turns": 3},
         "short_term_memory": {"db_path": "memory", "table_name": "fixture", "turn_token_limit": 200,
@@ -409,3 +433,50 @@ async def test_model_reuse_preserves_role_policy_and_layered_writes(tmp_path, st
         return "n"
 
     assert await prepare_startup_configuration(ask=skip_optional, emit=lambda text: None)
+
+
+@pytest.mark.parametrize("channel_name", ["QQ", "WeChat"])
+def test_channel_startup_collects_policy_before_constructing_bot(tmp_path, startup_values, monkeypatch, channel_name):
+    import json
+    from importlib import import_module
+
+    from redlotus.api import base
+
+    (tmp_path / "config.json").write_text(json.dumps(startup_values), encoding="utf-8")
+    questions, started = [], []
+
+    async def answer(question, **kwargs):
+        questions.append(question)
+        if question.startswith("现在配置 RAG"):
+            return "n"
+        if question.startswith("确认将"):
+            return "y"
+        return "10"
+
+    monkeypatch.setattr(base, "ask_configuration", answer)
+    monkeypatch.setattr(base, "configuration_prompt_available", lambda: True)
+    channel = import_module("redlotus.api." + channel_name)
+    bot_type = channel.QQBot if channel_name == "QQ" else channel.WeChatAgentBot
+    monkeypatch.setattr(bot_type, "__init__", lambda self: base.BotBase.__init__(self))
+    monkeypatch.setattr(bot_type, "run", lambda self: started.append(self._policy))
+    channel.main(bot_type)
+    assert len(started) == 1 and len(started[0]) == 6
+    assert sum(question.startswith("bot.") for question in questions) == 6
+    assert not any("max_context_windows" in question for question in questions)
+
+
+@pytest.mark.parametrize("limit", ["12", " +12 ", "1_2"])
+@pytest.mark.parametrize("empty", [None, " "])
+def test_legacy_numeric_limit_and_empty_model_override(tmp_path, limit, empty):
+    import json
+
+    from redlotus.runtime.config import get_agent_usage_limits, get_model_and_params
+
+    global_file = tmp_path / "global/config.json"
+    global_file.parent.mkdir()
+    global_file.write_text('{"models":{"worker":{"name":"openai:fixture"}}}')
+    (tmp_path / "config.json").write_text(json.dumps({
+        "request_limit": limit, "models": {"worker": {"name": empty}},
+    }))
+    assert get_agent_usage_limits().request_limit == 12
+    assert get_model_and_params("worker")[0] == "openai:fixture"

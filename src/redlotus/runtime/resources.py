@@ -53,12 +53,8 @@ def bind_context(variable, value, *, expose=False):
     finally:
         variable.reset(token)
 
-def active_workspace() -> WorkspaceContext | None:
-    return _workspace_context.get()
-
-def workspace_context(workspace: WorkspaceContext):
-    """Bind project identity for tools running in this execution context."""
-    return bind_context(_workspace_context, workspace, expose=True)
+active_workspace = _workspace_context.get
+workspace_context = functools.partial(bind_context, _workspace_context, expose=True)
 
 def current_workspace():
     active = active_workspace()
@@ -68,9 +64,6 @@ def set_workspace(path):
     global _workspace
     _workspace = Path(path).expanduser().resolve()
     return _workspace
-
-def conversations_root():
-    return session_data_dir(WorkspaceContext.from_path(current_workspace()))
 
 def resource_root() -> Path:
     """随包只读资源根（redlotus 包目录）。
@@ -89,17 +82,12 @@ def user_data_dir() -> Path:
     """Persistent memory state; the explicit environment override remains supported."""
     if override := os.environ.get("REDLOTUS_DATA_DIR"):
         return Path(override)
-    return _storage_path("state_dir", Path.home() / ".redlotus")
-
-def _storage_path(name: str, default: Path) -> Path:
     # Config discovery uses user_config_dir(), so it never depends on these data paths.
-    configured = settings()["storage"][name]
-    return Path(configured).expanduser().resolve() if configured else default
+    configured = settings()["storage"]["state_dir"]
+    return Path(configured).expanduser().resolve() if configured else Path.home() / ".redlotus"
 
 def _storage_workspace(workspace=None):
-    if workspace is not None:
-        return workspace
-    return WorkspaceContext.from_path(current_workspace())
+    return workspace if workspace is not None else WorkspaceContext.from_path(current_workspace())
 
 def _project_storage_path(name: str, workspace=None) -> Path:
     workspace = _storage_workspace(workspace)
@@ -113,17 +101,11 @@ def _project_storage_path(name: str, workspace=None) -> Path:
         raise ConfigError(f"配置 storage.{name} 必须位于当前项目目录内")
     return path
 
-def project_data_dir(workspace) -> Path:
-    return _project_storage_path("project_dir", workspace)
-
-def session_data_dir(workspace) -> Path:
-    return _project_storage_path("sessions_dir", workspace)
-
-def references_dir(workspace=None) -> Path:
-    return _project_storage_path("references_dir", workspace)
-
-def runtime_dir(workspace=None) -> Path:
-    return _project_storage_path("runtime_dir", workspace)
+project_data_dir = functools.partial(_project_storage_path, "project_dir")
+session_data_dir = functools.partial(_project_storage_path, "sessions_dir")
+conversations_root = session_data_dir
+references_dir = functools.partial(_project_storage_path, "references_dir")
+runtime_dir = functools.partial(_project_storage_path, "runtime_dir")
 
 def _storage_full(error: OSError) -> bool:
     return error.errno == errno.ENOSPC or getattr(error, "winerror", None) == 112
@@ -231,8 +213,7 @@ def skills_dir() -> Path:
     """随包基线技能（只读）。"""
     return resource_root() / "tools" / "skills"
 
-def logs_dir(workspace=None) -> Path:
-    return _project_storage_path("project_logs_dir", workspace)
+logs_dir = functools.partial(_project_storage_path, "project_logs_dir")
 
 def memory_dir() -> Path:
     """个人全局 MEMORY.md 及旧 SOUL/USER 文档的迁移备份目录。"""

@@ -26,9 +26,7 @@ class AgentRunPolicy:
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any]) -> "AgentRunPolicy":
-        values = deepcopy(cfg["agent_run_policy"])
-        values.pop("max_tool_output_chars", None)
-        return cls(**values)
+        return cls(**{key: cfg["agent_run_policy"][key] for key in cls.__dataclass_fields__})
 
     def clamp_command_timeout(self, timeout: int) -> int:
         return max(1, min(int(timeout), self.max_command_timeout_seconds))
@@ -104,14 +102,6 @@ def _model_selection_field(path: tuple[str, ...]) -> bool:
         path[0] in {"models", "model_presets"} and path[-1] == "name"
     )
 
-def _selected_model_name_path(role: str, cfg: dict[str, Any]) -> tuple[str, ...]:
-    """Locate the field that owns a selected role's model name."""
-    selected = (cfg.get("models") or {}).get(role)
-    preset = selected if isinstance(selected, str) else (selected or {}).get("preset")
-    if preset and preset in cfg.get("model_presets", {}):
-        return "model_presets", preset, "name"
-    return "models", role, "name"
-
 
 @lru_cache(maxsize=1)
 def config_schema():
@@ -144,7 +134,7 @@ def config_value(values, path, default=None):
     return values
 
 
-def missing_startup_fields(values):
+def missing_startup_fields(values, required=()):
     """Resolve presets before finding required fields; new configured roles need no Python list."""
     schema = config_schema()
     roles = dict.fromkeys([*schema["properties"]["models"]["required"], *values.get("models", {})])
@@ -177,7 +167,7 @@ def missing_startup_fields(values):
             elif key not in (current or {}) or value == "" and not child.get("allow_empty"):
                 yield field_path
 
-    return list(collect(schema, effective))
+    return list(collect({**schema, "required": [*schema["required"], *required]}, effective))
 
 def _validate_config(value, source: Path, path=()) -> None:
     """Validate supplied fields at each layer; setup checks the merged required fields."""
@@ -191,6 +181,12 @@ def _validate_config(value, source: Path, path=()) -> None:
     valid = not kinds or any(isinstance(value, types[kind]) and (not isinstance(value, bool) or kind == "boolean") for kind in kinds)
     if isinstance(value, str) and "string_values" in field:
         valid = value.strip().lower() in field["string_values"]
+        if not valid and "integer" in kinds:
+            try:
+                value = int(value)
+                valid = True
+            except ValueError:
+                pass
     if valid and isinstance(value, (int, float)) and not isinstance(value, bool):
         valid = all(test for key, test in (
             ("minimum", value >= field.get("minimum", value)),
@@ -234,8 +230,6 @@ def _parse_config(path: Path, raw: bytes | None, *, dotenv=False) -> dict:
                     raise ConfigError(f"配置 {path}: 字段 {binding.key} 重复或结构冲突")
                 node[parts[-1]] = value
         _validate_config(result, path)
-        if not isinstance(result, dict):
-            raise ConfigError(f"配置 {path}: 根节点必须是对象")
         return result
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ConfigError(f"配置 {path}: 无效编码或 JSON，无法读取") from exc
@@ -270,13 +264,10 @@ def _config_locks():
             locks.enter_context(file_lock(path))
         yield
 
-def _config_version():
-    return tuple((path, path.read_bytes() if path.is_file() else None) for path in config_sources())
-
 def settings() -> dict[str, Any]:
     """从各配置来源的一次完整字节快照解析，并返回独立副本。"""
     global _CONFIG
-    version = _config_version()
+    version = tuple((path, path.read_bytes() if path.is_file() else None) for path in config_sources())
     cached = _CONFIG
     if cached is None or version != cached[0]:
         value, origins = {}, {}
@@ -292,8 +283,7 @@ def load_config() -> dict[str, Any]:
     _CONFIG = None
     return settings()
 
-def reload_config() -> dict[str, Any]:
-    return load_config()
+reload_config = load_config
 
 def credential_value(gateway_name: str, cfg: dict) -> str:
     """命名网关的直接值和命名引用按各自来源排序，同层优先直接值。"""
@@ -407,11 +397,7 @@ def apply_thinking_config(model_params, *, model_name=None):
 
 def get_model_and_params(role: str, *, cfg=None) -> tuple[str, dict[str, Any]]:
     cfg = settings() if cfg is None else cfg
-    selected = (cfg.get("models") or {}).get(role)
-    if selected is None:
-        path = ("models", role, "name")
-        raise ConfigError(f"缺少有效配置 {'.'.join(path)}；检查来源: {config_source_summary()}", path=path, missing=True)
-    raw = deepcopy(selected)
+    raw = deepcopy((cfg.get("models") or {}).get(role) or {})
     if isinstance(raw, str):
         raw = {"preset": raw}
     preset = raw.pop("preset", None)
@@ -439,7 +425,7 @@ def get_model_and_params(role: str, *, cfg=None) -> tuple[str, dict[str, Any]]:
         raw["gateway"] = gateway
     name = raw.pop("name", None)
     if not isinstance(name, str) or not name.strip():
-        path = _selected_model_name_path(role, cfg)
+        path = ("model_presets", preset, "name") if preset in cfg.get("model_presets", {}) else ("models", role, "name")
         raise ConfigError(f"缺少有效配置 {'.'.join(path)}；检查来源: {config_source_summary()}", path=path, missing=True)
     name = name.strip()
     return name, raw
@@ -467,8 +453,6 @@ def get_context_profile_roles() -> tuple[str, ...]:
     )
 
 def get_context_config(role: str, *, cfg=None) -> dict[str, Any]:
-    cfg = settings() if cfg is None else cfg
     _, parameters = get_model_and_params(role, cfg=cfg)
     fields = ("max_context_windows", "auto_compress_ratio", "compress_head_turns", "compress_tail_turns")
-    result = {key: deepcopy(parameters[key]) for key in fields if key in parameters}
-    return result
+    return {key: parameters[key] for key in fields if key in parameters}

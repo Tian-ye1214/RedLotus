@@ -39,7 +39,7 @@ dependencies = [
 browser = ["playwright>=1.49.0"]
 bots = ["ncatbot>=4.4.1.post1", "wechatbot-sdk>=0.2.1"]
 viz = ["matplotlib>=3.10.9", "reportlab>=4.5.0", "pillow>=12.2.0"]
-build = ["pyinstaller>=6.20.0"]
+build = ["pyinstaller>=6.20.0", "playwright>=1.49.0"]
 dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0", "opencv-python-headless>=4.8.0"]
 all = [
     "playwright>=1.49.0",

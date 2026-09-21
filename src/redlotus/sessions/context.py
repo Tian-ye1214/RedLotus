@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import time
-from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -155,13 +155,8 @@ def _estimate_text_tokens(text):
 _execution_role: ContextVar[str | None] = ContextVar("execution_role", default=None)
 
 
-def current_execution_role() -> str | None:
-    return _execution_role.get()
-
-
-def execution_role(role: str):
-    """Bind tool permissions to the current Agent's role."""
-    return bind_context(_execution_role, role)
+current_execution_role = _execution_role.get
+execution_role = partial(bind_context, _execution_role)
 
 
 _CURRENT_TURN_ID: ContextVar[str | None] = ContextVar("agent_turn_id", default=None)
@@ -170,35 +165,20 @@ _USAGE_RECORDER: ContextVar[Any] = ContextVar("usage_recorder", default=None)
 current_usage_recorder = _USAGE_RECORDER.get
 
 
-def current_turn_id() -> str | None:
-    return _CURRENT_TURN_ID.get()
-
-
-def current_agent_id() -> str | None:
-    return _CURRENT_AGENT_ID.get()
+current_turn_id = _CURRENT_TURN_ID.get
+current_agent_id = _CURRENT_AGENT_ID.get
 
 
 def short_agent_id(agent_id: str | None) -> str:
-    if not agent_id:
-        return ""
-    parts = agent_id.split(":")
-    if len(parts) >= 2:
-        return ":".join(parts[1:])
-    return agent_id
+    return agent_id.split(":", 1)[-1] if agent_id else ""
 
 
 def current_short_agent_id() -> str:
     return short_agent_id(current_agent_id())
 
 
-def turn_context(turn_id: str | None) -> AbstractContextManager[None]:
-    """Attach tool and model trace events to their owning user turn."""
-    return bind_context(_CURRENT_TURN_ID, turn_id)
-
-
-def agent_context(agent_id: str | None) -> AbstractContextManager[None]:
-    """Attach tool and model trace events to their owning Agent."""
-    return bind_context(_CURRENT_AGENT_ID, agent_id)
+turn_context = partial(bind_context, _CURRENT_TURN_ID)
+agent_context = partial(bind_context, _CURRENT_AGENT_ID)
 
 
 class TurnTraceStore:
@@ -258,9 +238,7 @@ TRACE_STORE = TurnTraceStore()
 
 
 def make_agent_id(session_key: str, role: str, suffix: str | None = None) -> str:
-    if suffix:
-        return f"{session_key}:{role}:{suffix}"
-    return f"{session_key}:{role}"
+    return f"{session_key}:{role}" + (f":{suffix}" if suffix else "")
 
 
 @dataclass(frozen=True)

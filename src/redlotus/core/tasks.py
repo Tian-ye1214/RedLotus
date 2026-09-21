@@ -21,6 +21,7 @@ from pydantic_ai.messages import (
 from redlotus.prompts.message_text import split_messages_into_turns
 from redlotus.prompts.prompt import load_prompt
 from redlotus.runtime import logging as logger
+from redlotus.runtime.config import settings
 from redlotus.sessions.context import ChatHistory
 from redlotus.sessions.control import UserMessage
 
@@ -46,13 +47,16 @@ class Task(TaskDefinition):
     status: TaskStatus = TaskStatus.PENDING
     result: str = ""
     retry_count: int = 0
-    max_retries: int = 3
     failure_history: list[str] = Field(default_factory=list)
     worker_chat_history: ChatHistory = Field(default_factory=ChatHistory, exclude=True)
     artifacts: list[str] = Field(default_factory=list)
     tool_summaries: list[str] = Field(default_factory=list)
     input_cursor: tuple[str | None, int] = (None, 0)
     user_updates: list[str] = Field(default_factory=list)
+
+    @property
+    def max_retries(self):
+        return settings()["agent_run_policy"]["max_task_retries"]
 
 
 class TaskManager:
