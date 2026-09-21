@@ -228,20 +228,20 @@ flowchart TD
 
 ## 验收状态与已知缺口
 
-**当前不能 LGTM。** 应用候选为 `0b876831`，onefile 构建调整为 `03acaea2`。相对重做基线 `ca98b811`：8 个模块、36 个应用 Python 文件，每模块最多 5 文件、每文件最多 498 有效行；总计 10,306 有效行，少 67 行，应用 Python 毛新增 5,956、毛删除 6,177。第三方 Skills 资源另计，不能借此排除自有实现。逐函数必要性与完整发布门槛没有因数量达标而通过。
+**当前不能 LGTM。** 应用及两个 EXE 候选为 `4825e43b`，沿用 `03acaea2` 的原生 onefile 解包。相对重做基线 `ca98b811`：8 个模块、36 个应用 Python 文件，每模块最多 5 文件、每文件最多 498 有效行；总计 10,305 有效行，少 68 行，应用 Python 毛新增 5,958、毛删除 6,181。第三方 Skills 资源另计，不能借此排除自有实现。逐函数必要性与完整发布门槛没有因数量达标而通过。
 
-源码完整辅助回归为 **161 项通过（39.20 秒）**，已安装 wheel 的独立环境同样 **161 项通过（51.58 秒）**，该环境依赖检查通过。覆盖文件外部编辑／删除、LF 与 CRLF 字节恢复、写盘失败、记忆事务、任务取消／恢复、上下文账本、输入顺序、配置、QQ 公网地址／TLS／回退、原生类型化附件、终端中断及资源回收；本批补充持锁期间超时变更和代理连接失败。故障注入与网络夹具使用隔离数据，不能替代真实 API、机器人账号和跨平台验收。Ruff 与 whitespace 检查通过，14 个受保护配置及提示词指纹未变。日常共享 Python 环境的 `pip check` 仍返回六项第三方依赖冲突，见 `qq-tls-daily-pip-check.log`；本次 `--no-deps` 只替换 RedLotus，没有更改冲突软件的依赖。
+源码完整辅助回归为 **161 项通过（39.32 秒）**，日常环境实际安装的 wheel 同样 **161 项通过（44.05 秒）**；清空源码导入路径验证安装来源，另一个隔离安装环境的依赖检查通过。覆盖文件外部编辑／删除、LF 与 CRLF 字节恢复、写盘失败、记忆事务、任务取消／恢复、上下文账本、输入顺序、配置、QQ 公网地址／TLS／回退、原生类型化附件、终端中断及资源回收。本批没有增加应用或测试文件。故障注入与网络夹具使用隔离数据，不能替代真实 API、机器人账号和跨平台验收。Ruff 与 whitespace 检查通过，14 个受保护配置及提示词指纹未变。日常共享 Python 环境的 `pip check` 仍返回六项第三方依赖冲突，见 `qq-tls-daily-pip-check.log`；本次 `--no-deps` 只替换 RedLotus，没有更改冲突软件的依赖。
 
 ### 当前候选与真实入口
 
 | 入口／制品 | 本批实际证据 | 边界 |
 | --- | --- | --- |
-| 源码／日常 pip QQ 原生 SDK 至模型 | 两个入口各下载真实 robots.txt 537 字节并由模型准确回答首行，各 1 回合／1 次响应，usage 无缺失、HTTP 池清零；同一进程验证持锁期间修改超时、并发读取超时及释放后恢复 | `qq-sdk-lock-proxy-source-live.json`／`qq-sdk-lock-proxy-pip-live.json`；模型、HTTP 和 SDK 前端真实执行，NapCat 传输为本地夹具 |
-| 锁与代理失败对照 | 两项旧实现失败后最小修复；原生 HTTPX 经本地 CONNECT 502 代理，尝试由首个地址扩展至全部 8 个，全部失败仍拒绝请求 | `review-lock-proxy-reproduced-red.log`、`lock-proxy-connect-*.json`；502 代理是故障夹具，成功公网下载另由上述真实链路验证 |
-| onedir `0b876831` | 实际 EXE 使用命令工具计算 199×67=13333；1 回合／3 次响应，标题单列，usage 无缺失、面板显示活动 Agent 0，退出 0 后所属进程消失 | `0b876831-onedir-live.json`；本批未重复该入口的浏览器场景 |
-| onefile `03acaea2` | 在此前失败的同一个深工作目录启动，真实模型驱动包内浏览器打开、读取 Example Domain 并关闭；1 回合／5 次响应，usage 无缺失，面板及退出清理通过 | `03acaea2-onefile-live.json`；验收进程显式 `TMP` 位于 E 盘；相同设置下旧包仍失败，不代表所有操作系统临时目录都已验证 |
-| wheel／sdist | `packages-0b876831/inspection.json` 核对 36 个应用文件与 schema，排除私人配置；日常和独立环境均已安装 wheel，后者依赖检查通过 | wheel SHA-256 以 `5cd19d40` 开头；sdist 含后续打包及文档调整，应用身份仍为 `0b876831`；同版本 1.0.1 本地候选，未公开发布 |
-| 新 EXE 资源 | `frozen/0b876831-manifest.json`、`frozen/03acaea2-manifest.json` 核对 33 个可达应用模块的编译代码、2,670 项资源、schema、包内 Chromium 和私人配置排除 | 最终 onedir／onefile 指纹以 `0100d250`／`c194c466` 开头；构建使用 Python 3.12.13、PyInstaller 6.20.0；QQ／微信仍为源码／pip 入口 |
+| 源码／日常 pip QQ 原生 SDK 至模型 | 源码准确回答公网 robots.txt 首行；pip 首次加了反引号，严格比对失败，另一次明确纯文本要求通过。三次各 1 回合／1 次响应，usage 无缺失，退出均清空 HTTP 池和会话 | `qq-sdk-finalizer-source-live.json`、`qq-sdk-finalizer-pip-live.json`、`qq-sdk-finalizer-pip-plain-live.json`；NapCat 传输为夹具。补测题面更明确，不能关闭原题格式稳定性缺口 |
+| QQ 退出转发精简 | 删除只调用一次的同步包装；QQ 原 `finally` 直接使用相同 `asyncio.run` 表达式。正常、启动失败、连接失败、KeyboardInterrupt 四种场景的异常、释放次数与客户端关闭结果前后一致 | `qq-finalizer-before-controls.json`／`qq-finalizer-after-controls.json`；失败为隔离注入，不模拟账号登录 |
+| onedir `4825e43b` | 实际 EXE 使用命令工具计算 211×67=14137；1 回合／3 次响应，标题单列，usage 无缺失、面板显示活动 Agent 0，退出 0 后所属进程消失 | `4825e43b-onedir-live.json`；本批未重复该入口的浏览器场景 |
+| onefile `4825e43b` | 实际 EXE 通过包内浏览器打开 Example Domain、读取标题并关闭；1 回合／5 次响应，标题单列，usage 无缺失，面板活动 Agent 为 0，退出 0 | `4825e43b-onefile-live.json`；本次两个进程及浏览器后代均结束，显式 E 盘 `TMP` 下原生解包目录自动回收；不代表任意路径或跨平台已验证 |
+| wheel／sdist | `packages-4825e43b/inspection.json` 核对应用与资源；日常和独立环境均安装 wheel，后者依赖检查通过 | wheel SHA-256 以 `736539a6` 开头；同版本 1.0.1 本地候选，未公开发布 |
+| 新 EXE 资源 | `frozen/4825e43b-manifest.json` 核对 33 个可达应用模块的编译代码、2,670 项资源、schema、包内 Chromium 和私人配置排除 | onedir／onefile 指纹以 `e9bbc613`／`96fbdbad` 开头；构建使用 Python 3.12.13、PyInstaller 6.20.0；QQ／微信仍为源码／pip 入口 |
 
 独立审查定位 FileLock 的 singleton 参数冲突，以及 CONNECT 502 对应的 `ProxyError` 未进入地址回退；两项各改一个现有语句，无新增应用文件或函数。完整回归前的首次 pytest 调用因共享临时目录权限未进入测试，随后改用显式隔离路径保留红绿结果。构建专用 venv 没有 build／pip，wheel 改由已有日常 Python 的 pip 调用 setuptools 后端生成，没有为此增加依赖。
 
@@ -327,7 +327,7 @@ onefile 原来强制在项目 `WorkDatabase` 解压，新的 264 字符目标再
 | 门槛 | 当前状态与下一步 |
 | --- | --- |
 | 深目录 onefile | `03acaea2` 已在相同失败工作目录完成真实 API、浏览器和清理；原生临时目录选择不再被项目深度覆盖。验收使用显式 E 盘 `TMP`，未承诺任意临时路径、权限和跨平台都可用，未修改注册表 |
-| 逐函数必要性／正交性 | 当前 992 个函数＋79 个 lambda；`necessity-current-reconciliation.json` 衔接 996 个 AST 未变节点、71 个修改和 4 个新增，独立增量审查及两项修复见 `necessity-review-lock-proxy-delta.json`。旧记忆接口行为已验证，外部需求仍未确认；同步清理包装全部分支、真实账号生命周期及全项目逐函数证明仍未完成 |
+| 逐函数必要性／正交性 | 当前 991 个函数＋79 个 lambda；`necessity-current-reconciliation.json` 衔接 995 个 AST 未变节点、71 个修改和 4 个新增。`necessity-finalizer-delta.json` 记录同步包装删除及四个新增定义的职责、消费者、复用和证据边界；AST 对齐不等于功能证明。旧记忆接口的外部需求、真实账号生命周期及全项目逐函数证明仍未完成 |
 | 运行策略来源 | 已关闭原列出的轨迹、刷新、diff、重定向、图像、流式预览、会话展示、补全和搜索策略；通知／明细上限、名称长度、CSV 探测和 Ctrl+C 连按间隔也来自配置。渠道目录 20 字符短名及固定展示布局继续做兼容评估，身份／协议格式不随意参数化 |
 | 模型字节保真 | onedir 的 CRLF 指定写入和严格原样复制未通过。工具回执及模型下一次参数已分开记录；后续需验证模型对精确内容约束的遵守，不用事后文本相似或 shell 修正替代原题通过 |
 | 无工具群聊回答 | `6e1911b1` 的真实计算请求得到 DSML 工具标记正文，没有答案；没有可执行工具调用，权限未放开。后续协议对照及本批原题成功未证明原因或解决方案，原失败保留，稳定性门槛仍未关闭；不把正文解析为工具调用或修改题面取得通过 |
