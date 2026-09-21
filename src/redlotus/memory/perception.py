@@ -319,6 +319,7 @@ class MemoryPerception:
                     instructions=instructions,
                     output_type=PerceptionResult,
                     role="perception",
+                    usage_category="auxiliary",
                     capabilities=[PerceptionTiming(on_call)],
                     toolsets=[FunctionToolset(tools)],
                 )

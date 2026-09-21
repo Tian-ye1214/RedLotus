@@ -40,8 +40,9 @@ from redlotus.sessions.context import agent_context, current_agent_id, current_u
 
 
 class RequestPolicy(AbstractCapability):
-    def __init__(self, role, target, model, *, follow_config=False, task_state=None, persist_context=None):
+    def __init__(self, role, target, model, *, usage_category, follow_config=False, task_state=None, persist_context=None):
         self.role, self.target, self.model = role, target, model
+        self.usage_category = usage_category
         self.follow_config = follow_config
         self.task_state = task_state
         self.persist_context = persist_context
@@ -55,7 +56,7 @@ class RequestPolicy(AbstractCapability):
         parameters = request_context.model_request_parameters
         tool_definitions = [*parameters.function_tools, *parameters.output_tools]
         candidate = request_context.messages
-        if "auto_compress_ratio" in target.context:
+        if self.usage_category != "auxiliary" and "auto_compress_ratio" in target.context:
             from redlotus.core.history import compact_request_messages
 
             candidate = await compact_request_messages(
@@ -86,7 +87,7 @@ class RequestPolicy(AbstractCapability):
     async def after_model_request(self, ctx, *, request_context, response):
         response.metadata = {
             **(response.metadata or {}),
-            "usage_category": "main" if self.role == "coordinator" else "agent" if "auto_compress_ratio" in self.target.context else "auxiliary",
+            "usage_category": self.usage_category,
             "model_target": {
                 "name": self.target.name,
                 "protocol": self.target.protocol,
@@ -294,6 +295,7 @@ def create_agent(
     capabilities: list | None = None,
     output_type: Any = str,
     role: str | None = None,
+    usage_category: str = "agent",
     follow_config: bool = False,
     task_state=None,
     persist_context=None,
@@ -311,6 +313,7 @@ def create_agent(
                 role,
                 model_name,
                 model,
+                usage_category=usage_category,
                 follow_config=follow_config,
                 task_state=task_state,
                 persist_context=persist_context,
@@ -355,6 +358,7 @@ async def create_coordinator_agent(
         instructions=instructions,
         toolsets=toolsets,
         role="coordinator",
+        usage_category="main",
         follow_config=True,
         task_state=task_state,
         persist_context=persist_context,
@@ -366,7 +370,8 @@ async def complete_text(
 ):
     """Auxiliary calls use the foreground Agent's provider routing."""
     target = ModelTarget.for_role(role)
-    agent = create_agent(target, instructions=system_prompt, role=role, output_type=output_type)
+    agent = create_agent(target, instructions=system_prompt, role=role, output_type=output_type,
+                         usage_category="auxiliary")
     if output_validator is not None:
         agent.output_validator(output_validator)
 

@@ -297,24 +297,6 @@ class LongTermMemory:
             sections = {name: text.replace(core_old_text, "", 1).strip() for name, text in sections.items()}
         return cls._render(prefix, sections)
 
-    def legacy_content(self):
-        body = self.read()
-        if not re.search(r"^## (用户偏好|项目简况|经验)$", body, re.M):
-            return ""
-        backup = self.directory / "migration_backup/MEMORY-v1.md"
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        if not backup.exists():
-            backup.write_text(body, encoding="utf-8")
-        return body
-
-    def finish_legacy_migration(self, expected):
-        with file_lock(self.path):
-            prefix, sections = self._parse(self.path.read_text(encoding="utf-8"))
-            _, old = self._parse(expected)
-            if sections.get("项目简况") == old.get("项目简况"):
-                sections.pop("项目简况", None)
-            atomic_write_text(self.path, self._render(prefix, sections))
-
     async def list_memory(self):
         return await asyncio.to_thread(self.read)
 
@@ -378,9 +360,6 @@ class ObservationStore:
         """Count exactly one finished outer turn, retaining its actual outcome."""
         event.finished_at = iso_utc_now()
         self.session.finish_turn(event.id, event.model_dump(mode="json"))
-
-    def order(self):
-        return [row["id"] for row in self.session.pending_turns(0)] if self.session else []
 
     def cursor(self):
         return self.session.metadata.get("perception_consumed", 0) if self.session else 0

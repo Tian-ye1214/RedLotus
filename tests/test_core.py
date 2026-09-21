@@ -146,7 +146,7 @@ def test_space_recovery_preserves_active_and_current_sessions(tmp_path):
                 for name in ("old", "active", "current")}
     sessions["active"].update(metadata={"active_turn": "running"})
     for session in sessions.values():
-        os.utime(session.path, (0, 0))
+        os.utime(session.path, (session.path.stat().st_mtime - 2 * 86400,) * 2)
     retried = []
     with workspace_context(workspace):
         retry_after_storage_cleanup(
@@ -260,7 +260,7 @@ async def test_response_accounting_survives_validation_retry_and_cancellation(tm
     model = FunctionModel(respond)
     target = SimpleNamespace(name="fixture", protocol="fixture", context={},
                              limits={"max_files": 1, "max_file_bytes": 1000})
-    agent = Agent(model, capabilities=[RequestPolicy("compressor", target, model)])
+    agent = Agent(model, capabilities=[RequestPolicy("compressor", target, model, usage_category="auxiliary")])
 
     @agent.output_validator
     def reject(output):
@@ -278,6 +278,39 @@ async def test_response_accounting_survives_validation_retry_and_cancellation(tm
     assert rows[0]["agent_id"] == f"{storage.session_id}:compressor"
     assert rows[0]["invocation"]
     assert rows[0]["category"] == "auxiliary"
+
+
+@pytest.mark.parametrize("role,category", [
+    ("coordinator", "main"), ("worker", "agent"), ("manager", "agent"),
+    ("perception", "auxiliary"), ("title", "auxiliary"),
+    ("compressor", "auxiliary"), ("future_helper", "auxiliary"),
+])
+async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp_path, monkeypatch, role, category):
+    from redlotus.core import history
+    from redlotus.core.gateway import RequestPolicy
+    from redlotus.sessions.storage import SessionFile
+
+    compacted = []
+    async def compact(messages, **kwargs):
+        compacted.append(True)
+        return messages
+    monkeypatch.setattr(history, "compact_request_messages", compact)
+    target = SimpleNamespace(name="shared-worker-model", protocol="fixture", context={"auto_compress_ratio": .9},
+                             limits={"max_files": 1, "max_file_bytes": 1000})
+    policy = RequestPolicy(role, target, SimpleNamespace(settings={}), usage_category=category)
+    request = SimpleNamespace(messages=[ModelRequest([])], model_request_parameters=SimpleNamespace(
+        function_tools=[], output_tools=[], instruction_parts=[]))
+    await policy.before_model_request(None, request)
+    assert bool(compacted) == (category != "auxiliary")
+    response = ModelResponse([TextPart("receipt")], model_name="shared-worker-model",
+                             provider_response_id="same-receipt", usage=RequestUsage(input_tokens=17, output_tokens=3))
+    await policy.after_model_request(SimpleNamespace(run_id="first"), request_context=None, response=response)
+    storage = SessionFile.create(tmp_path, "fixture")
+    storage.record_usage([response], role=role, invocation="first")
+    storage.record_usage([response], role=role, invocation="save-retry")
+    rows = SessionFile.load(storage.path).usage_responses()
+    assert len(rows) == 1 and rows[0]["role"] == role and rows[0]["category"] == category
+    assert rows[0]["usage"]["input_tokens"] == 17
 
 
 async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(monkeypatch):
@@ -654,7 +687,7 @@ async def test_native_sdk_restoration_does_not_duplicate_deferred_catalog():
     def agent(instructions):
         return Agent(model, instructions=instructions, capabilities=[
             Capability(id="fixture_files", description="Read isolated fixtures", defer_loading=True),
-            RequestPolicy("fixture", target, model),
+            RequestPolicy("fixture", target, model, usage_category="agent"),
         ])
 
     first = await agent("Original role snapshot").run("first")

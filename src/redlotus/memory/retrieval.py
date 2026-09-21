@@ -381,16 +381,6 @@ class RAG:
             start = max(start + 1, end - overlap)
         return chunks or [""]
 
-    async def upsert_records(self, records: list[dict]) -> int:
-        count = await self.write_records(await self.prepare_records(records))
-        try:
-            await self._db.ensure_vector_index()
-        except Exception as exc:
-            # Exact vector search remains available without an acceleration index.
-            self.last_error = f"Index acceleration unavailable: {exc}"
-            logger.warning(self.last_error)
-        return count
-
     async def prepare_records(self, records: list[dict]) -> list[dict]:
         """Embed complete record chunks without holding any database write lock."""
         model = await self.refresh_embedding_space()
@@ -508,9 +498,6 @@ class RAG:
             await self.refresh_embedding_space()
             ids = ",".join("'" + value.replace("'", "''") + "'" for value in record_ids)
             await self._db.delete_where(f"{self.where} AND record_id IN ({ids})")
-
-    async def clear_project(self) -> None:
-        await self._db.delete_where(self.where)
 
     async def close(self) -> None:
         await self._db.close()
