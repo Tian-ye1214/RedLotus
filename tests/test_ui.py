@@ -328,23 +328,29 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
     await bot.release_all_resources_async()
 
 
-def test_qq_second_download_failure_is_not_a_partial_image_request(monkeypatch):
+@pytest.mark.parametrize("timeout", [2, 7])
+def test_qq_second_download_failure_is_not_a_partial_image_request(monkeypatch, timeout):
     import httpx
 
     from redlotus.api import qq_media_helpers as media
 
-    original = httpx.Client
-    client = lambda **kwargs: original(transport=httpx.MockTransport(
-        lambda request: httpx.Response(404 if request.url.path.endswith("missing.png") else 200,
-                                      content=b"fixture", headers={"content-type": "image/png"})
-    ), **kwargs)
+    original, timeouts = httpx.Client, []
+
+    def respond(request):
+        timeouts.append(request.extensions["timeout"]["read"])
+        return httpx.Response(404 if request.url.path.endswith("missing.png") else 200,
+                              content=b"fixture", headers={"content-type": "image/png"})
+
+    client = lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
     monkeypatch.setattr(media.httpx, "Client", client)
     monkeypatch.setattr(media, "_resolve_public_addr", lambda host: "203.0.113.10")
-    monkeypatch.setattr(media.ModelInputPolicy, "for_role", lambda: SimpleNamespace(check=lambda sizes: None))
+    monkeypatch.setattr(media.ModelInputPolicy, "for_role", lambda: SimpleNamespace(
+        check=lambda sizes: None, reference_download_timeout_seconds=timeout))
     event = SimpleNamespace(message=[{"type": "image", "data": {"url": "https://example.com/" + name}}
                                     for name in ("first.png", "missing.png")], raw_message="")
     with pytest.raises(ValueError, match="image\\[2\\]"):
         media.extract_image_video(event)
+    assert timeouts == [timeout, timeout]
 
 
 @pytest.mark.parametrize("initial", [{}, {"BASE_URL": "https://example.invalid/v1", "API_KEY": "fixture-only"}])

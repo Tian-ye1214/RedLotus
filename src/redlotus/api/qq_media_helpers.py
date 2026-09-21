@@ -91,7 +91,8 @@ def _resolve_public_addr(host: str) -> str | None:
 def download_to_binary(url: str, filename: str = "") -> BinaryContent:
     url = norm_url(url)
     try:
-        with httpx.Client(timeout=30, follow_redirects=False) as client:
+        policy = ModelInputPolicy.for_role()
+        with httpx.Client(timeout=policy.reference_download_timeout_seconds, follow_redirects=False) as client:
             for _ in range(_MAX_REDIRECTS + 1):
                 parsed = httpx.URL(url)
                 if parsed.scheme not in ("http", "https") or not parsed.host:
@@ -115,7 +116,6 @@ def download_to_binary(url: str, filename: str = "") -> BinaryContent:
                         url = str(parsed.join(location))
                         continue
                     resp.raise_for_status()
-                    policy = ModelInputPolicy.for_role()
                     if length := resp.headers.get("content-length"):
                         policy.check([int(length)])
                     chunks, size = [], 0

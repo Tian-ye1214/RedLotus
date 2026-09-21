@@ -75,7 +75,6 @@ class MemoryPerception:
 
     async def produce(
         self,
-        job_id: str,
         payload: dict,
         references: list[ReferenceFile],
         *,
@@ -480,7 +479,6 @@ async def produce_job(service, job):
     job.timings["model_started_at"] = iso_utc_now()
     service._save_job(job)
     result = await service.perception.produce(
-        job.id,
         payload,
         references,
         on_usage=usage,

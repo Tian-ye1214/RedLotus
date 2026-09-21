@@ -23,7 +23,7 @@ from redlotus.runtime.network import get_client, openai_base_url
 from redlotus.runtime.resources import user_data_dir
 
 
-def resolve_lancedb_dir(configured_path: str, *, table_name: str = "") -> str:
+def resolve_lancedb_dir(configured_path: str) -> str:
     """Use the configured database path, with an explicit process override for tests."""
     p = Path(os.environ.get("RAG_DB_PATH") or configured_path).expanduser()
     if not p.is_absolute():
@@ -170,7 +170,7 @@ class EmbedDataBase:
     )
 
     def __init__(self, db_path, table_name, vector_dim=None, *, index_config=None):
-        self.db_path = resolve_lancedb_dir(db_path, table_name=table_name)
+        self.db_path = resolve_lancedb_dir(db_path)
         self.table_name, self.vector_dim = table_name, vector_dim
         self._index_config = deepcopy(index_config or {})
         self._db = None

@@ -263,10 +263,6 @@ def _format_usage_report(report: UsageReport) -> str:
     return "\n".join(lines)
 
 
-def _conversation_session_key(system: Any) -> str | None:
-    return system.session_key
-
-
 async def _print_usage_report(raw: str, system: Any) -> None:
     tail = raw.strip()[6:].strip()
     if tail:
@@ -279,7 +275,7 @@ async def _print_usage_report(raw: str, system: Any) -> None:
             print_error(f"未找到 model_messages 日志: {target}")
             return
     else:
-        session_key = _conversation_session_key(system)
+        session_key = system.session_key
         if not session_key:
             print_error("当前会话尚未绑定日志目录；请使用 /usage <path>")
             return
