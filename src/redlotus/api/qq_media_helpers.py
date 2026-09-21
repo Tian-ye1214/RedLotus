@@ -10,6 +10,7 @@ import mimetypes
 import os
 import re
 import socket
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -55,23 +56,14 @@ def pick_ct(url: str, header_ct: str, raw: bytes, filename: str = "") -> str:
     return mime_magic(raw) or "application/octet-stream"
 
 
-def _resolve_public_addr(host: str) -> str | None:
-    """解析主机名并校验：仅当所有解析结果都是公网地址时，返回首个已校验 IP（否则 None）。
+def _resolve_public_addr(host: str) -> list[str]:
+    """Return every resolved address in order only when all are public.
 
-    返回已校验的 IP 供调用方直接拨号，使「校验」与「连接」共用同一次解析结果，
-    杜绝 DNS rebinding（校验时返回公网 IP、连接时改返内网 IP）的 TOCTOU 绕过。
+    Dial these same addresses so connection attempts cannot resolve the host again.
     """
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError:
-        return None
-    chosen: str | None = None
-    for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            return None
+    addresses = list(dict.fromkeys(info[4][0] for info in socket.getaddrinfo(host, None)))
+    for addr in addresses:
+        ip = ipaddress.ip_address(addr)
         if (
             not ip.is_global
             or ip.is_private
@@ -80,55 +72,59 @@ def _resolve_public_addr(host: str) -> str | None:
             or ip.is_reserved
             or ip.is_multicast
         ):
-            return None
-        if chosen is None:
-            chosen = addr
-    return chosen
+            return []
+    return addresses
 
 
 def download_to_binary(url: str, filename: str = "") -> BinaryContent:
     url = norm_url(url)
     try:
         policy = ModelInputPolicy.for_role()
-        with httpx.Client(timeout=policy.reference_download_timeout_seconds, follow_redirects=False) as client:
-            for _ in range(settings()["input_limits"]["max_redirects"] + 1):
-                parsed = httpx.URL(url)
-                if parsed.scheme not in ("http", "https") or not parsed.host:
-                    raise ValueError("附件地址必须是完整的 http/https URL")
-                ip = _resolve_public_addr(parsed.host)
-                if ip is None:
-                    raise ValueError("附件地址无法解析为公网地址")
-                host_header = (
-                    parsed.host
-                    if parsed.port is None
-                    else f"{parsed.host}:{parsed.port}"
-                )
-                with client.stream(
-                    "GET",
-                    parsed.copy_with(host=ip),
-                    headers={"Host": host_header},
-                    extensions={"sni_hostname": parsed.host},
-                ) as resp:
-                    location = resp.headers.get("location")
-                    if resp.is_redirect and location:
-                        url = str(parsed.join(location))
-                        continue
-                    resp.raise_for_status()
-                    if length := resp.headers.get("content-length"):
-                        policy.check([int(length)])
-                    chunks, size = [], 0
-                    for chunk in resp.iter_bytes():
-                        size += len(chunk)
-                        policy.check([size])
-                        chunks.append(chunk)
-                    raw = b"".join(chunks)
-                    if not raw:
-                        raise ValueError("下载结果为空")
-                    return BinaryContent(
-                        data=raw,
-                        media_type=pick_ct(url, resp.headers.get("content-type", ""), raw, filename=filename),
-                        identifier=filename or None,
-                    )
+        for _ in range(settings()["input_limits"]["max_redirects"] + 1):
+            parsed = httpx.URL(url)
+            if parsed.scheme not in ("http", "https") or not parsed.host:
+                raise ValueError("附件地址必须是完整的 http/https URL")
+            addresses = _resolve_public_addr(parsed.host)
+            if not addresses:
+                raise ValueError("附件地址无法解析为公网地址")
+            context = httpx.create_ssl_context()
+
+            def wrap_tls(method, *args, **kwargs):
+                # HTTP CONNECT currently ignores sni_hostname; keep native verification.
+                return method(*args, **(kwargs | {"server_hostname": parsed.host}))
+
+            for method in ("wrap_socket", "wrap_bio"):
+                setattr(context, method, partial(wrap_tls, getattr(context, method)))
+            with httpx.Client(verify=context, timeout=policy.reference_download_timeout_seconds, follow_redirects=False) as client:
+                for ip in addresses:
+                    try:
+                        with client.stream(
+                            "GET", parsed.copy_with(host=ip), headers={"Host": parsed.netloc.decode("ascii")},
+                            extensions={"sni_hostname": parsed.host},
+                        ) as resp:
+                            location = resp.headers.get("location")
+                            if resp.is_redirect and location:
+                                url = str(parsed.join(location))
+                                break
+                            resp.raise_for_status()
+                            if length := resp.headers.get("content-length"):
+                                policy.check([int(length)])
+                            chunks, size = [], 0
+                            for chunk in resp.iter_bytes():
+                                size += len(chunk)
+                                policy.check([size])
+                                chunks.append(chunk)
+                            raw = b"".join(chunks)
+                            if not raw:
+                                raise ValueError("下载结果为空")
+                            return BinaryContent(
+                                data=raw,
+                                media_type=pick_ct(url, resp.headers.get("content-type", ""), raw, filename=filename),
+                                identifier=filename or None,
+                            )
+                    except (httpx.ConnectError, httpx.ConnectTimeout):
+                        if ip == addresses[-1]:
+                            raise
         raise ValueError("重定向次数过多")
     except (httpx.HTTPError, OSError, ValueError) as exc:
         raise ValueError(f"附件 {filename or '媒体'} 准备失败：{exc}；请重新发送完整消息。") from exc

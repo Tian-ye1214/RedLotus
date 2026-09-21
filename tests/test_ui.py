@@ -469,23 +469,27 @@ def test_qq_second_download_failure_is_not_a_partial_image_request(tmp_path, mon
 
     def respond(request):
         timeouts.append(request.extensions["timeout"]["read"])
+        if request.url.host == "2606:4700:4700::1111":
+            raise httpx.ConnectError("first address cannot establish TLS")
         return httpx.Response(404 if request.url.path.endswith("missing.png") else 200,
                               content=b"fixture", headers={"content-type": "image/png"})
 
     monkeypatch.setattr(media.httpx, "Client", partial(original, transport=httpx.MockTransport(respond)))
-    monkeypatch.setattr(media, "_resolve_public_addr", lambda host: "203.0.113.10")
+    monkeypatch.setattr(media.socket, "getaddrinfo", lambda *args: [
+        (None, None, None, None, (address, 443)) for address in ("2606:4700:4700::1111", "8.8.8.8")])
     monkeypatch.setattr(media.ModelInputPolicy, "for_role", lambda: SimpleNamespace(
         check=lambda sizes: None, reference_download_timeout_seconds=timeout))
     event = SimpleNamespace(message=[{"type": "image", "data": {"url": "https://example.com/" + name}}
                                     for name in ("first.png", "missing.png")], raw_message="")
     with pytest.raises(ValueError, match="image\\[2\\]"):
         media.extract_image_video(event)
-    assert timeouts == [timeout, timeout]
+    assert timeouts == [timeout] * 4
 
 
 @pytest.mark.parametrize("limit,public", [(0, True), (1, True), (1, False)])
 def test_qq_redirect_policy_keeps_each_destination_check(tmp_path, monkeypatch, limit, public):
     import httpx
+    import ssl
 
     from redlotus.api import qq_media_helpers as media
 
@@ -494,7 +498,7 @@ def test_qq_redirect_policy_keeps_each_destination_check(tmp_path, monkeypatch, 
 
     def address(host):
         resolved.append(host)
-        return "203.0.113.10" if public or host == "first.invalid" else None
+        return ["203.0.113.10"] if public or host == "first.invalid" else []
 
     def respond(request):
         requested.append(request.headers["Host"])
@@ -502,7 +506,17 @@ def test_qq_redirect_policy_keeps_each_destination_check(tmp_path, monkeypatch, 
                 if request.headers["Host"] == "first.invalid" else httpx.Response(200, content=b"complete"))
 
     original = httpx.Client
-    monkeypatch.setattr(media.httpx, "Client", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
+
+    def client(**kwargs):
+        context = kwargs["verify"]
+        assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+        for method in ("wrap_socket", "wrap_bio"):
+            assert getattr(context, method)(None, server_hostname="203.0.113.10") == resolved[-1]
+        return original(transport=httpx.MockTransport(respond), **kwargs)
+
+    for method in ("wrap_socket", "wrap_bio"):
+        monkeypatch.setattr(ssl.SSLContext, method, lambda *args, **kwargs: kwargs["server_hostname"])
+    monkeypatch.setattr(media.httpx, "Client", client)
     monkeypatch.setattr(media, "_resolve_public_addr", address)
     monkeypatch.setattr(media.ModelInputPolicy, "for_role", lambda: SimpleNamespace(check=lambda sizes: None, reference_download_timeout_seconds=2))
     if limit and public:
@@ -512,6 +526,18 @@ def test_qq_redirect_policy_keeps_each_destination_check(tmp_path, monkeypatch, 
             media.download_to_binary("https://first.invalid/file.txt", "file.txt")
     assert resolved == (["first.invalid", "second.invalid"] if limit else ["first.invalid"])
     assert requested == (["first.invalid", "second.invalid"] if limit and public else ["first.invalid"])
+
+
+@pytest.mark.parametrize("addresses,public", [
+    (["8.8.8.8"], True), (["2606:4700:4700::1111", "8.8.8.8"], True),
+    (["8.8.8.8", "127.0.0.1"], False), (["169.254.1.1"], False), (["ff02::1"], False), ([], False),
+])
+def test_qq_checks_all_dns_answers_before_connecting(monkeypatch, addresses, public):
+    from redlotus.api import qq_media_helpers as media
+
+    monkeypatch.setattr(media.socket, "getaddrinfo", lambda *args: [
+        (None, None, None, None, (address, 443)) for address in addresses])
+    assert media._resolve_public_addr("fixture.invalid") == (addresses if public else [])
 
 
 @pytest.mark.parametrize("initial", [{}, {"BASE_URL": "https://example.invalid/v1", "API_KEY": "fixture-only"}])
