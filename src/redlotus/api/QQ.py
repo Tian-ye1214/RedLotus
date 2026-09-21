@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import os
 import re
 from functools import partial
@@ -80,21 +79,6 @@ class QQBot(BotBase):
         msg = getattr(event, "message", None)
         return msg is not None and msg.is_user_at(config.bt_uin)
 
-    def _session_id(self, event: BaseMessageEvent) -> str:
-        from ncatbot.core import GroupMessageEvent
-
-        if isinstance(event, GroupMessageEvent):
-            return f"group_{event.group_id}"
-        return f"private_{event.user_id}"
-
-    async def _reply_event(self, event: BaseMessageEvent, text: str) -> None:
-        sig = inspect.signature(event.reply)
-        await (
-            event.reply(text=text, at=False)
-            if "at" in sig.parameters
-            else event.reply(text=text)
-        )
-
     async def _run_connection(self, connect) -> None:
         try:
             await connect()
@@ -105,15 +89,16 @@ class QQBot(BotBase):
         raw_text = (event.raw_message or "").strip()
         if not self._is_at_me(event):
             return
-        session_id = self._session_id(event)
+        is_group = event.is_group_msg()
+        session_id = f"group_{event.group_id}" if is_group else f"private_{event.user_id}"
         user_text = self.clean_text(raw_text)
         await self.dispatch_user_message(
             session_id,
             UserMessage(
                 text=user_text,
-                original_text=self.clean_text(raw_text),
+                original_text=user_text,
             ),
-            partial(self._reply_event, event),
+            partial(event.reply, at=False) if is_group else event.reply,
             prepare=partial(extract_media, self._bot_client.api, event, self._FILE_ALLOW_EXT) if (
                 any(kind in ("image", "video", "file") for kind, _ in iter_segments(event))
                 or re.search(r"\[CQ:(?:image|video|file),", raw_text)

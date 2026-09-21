@@ -465,18 +465,17 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
             return [BinaryContent(data=b"fixture", media_type="text/plain", identifier="first.txt")]
         return []
 
-    async def reply(event, text):
+    async def reply(text):
         p.replies.append(text)
 
     monkeypatch.setattr(QQ, "extract_media", attachments)
-    monkeypatch.setattr(bot, "_reply_event", reply)
     monkeypatch.setattr(bot, "_is_at_me", lambda event: True)
-    monkeypatch.setattr(bot, "_session_id", lambda event: "private_fixture")
+    event_data = dict(reply=reply, is_group_msg=lambda: False, user_id="fixture")
     slow = asyncio.create_task(bot._handle_message(SimpleNamespace(
-        raw_message="first", message=[SimpleNamespace(msg_seg_type="file", file="first.txt", file_id="fixture")],
+        **event_data, raw_message="first", message=[SimpleNamespace(msg_seg_type="file", file="first.txt", file_id="fixture")],
     )))
     await asyncio.wait_for(started.wait(), 1)
-    await bot._handle_message(SimpleNamespace(raw_message="second"))
+    await bot._handle_message(SimpleNamespace(**event_data, raw_message="second"))
     for _ in range(10):
         await asyncio.sleep(0)
     assert not p.calls, "QQ text overtook the first attachment"
@@ -486,7 +485,7 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
     assert [(text, count) for text, count, _ in p.calls] == [("first", 1), ("second", 0)]
     state = bot._sessions["private_fixture"]
     state.question = asyncio.get_running_loop().create_future()
-    await bot._handle_message(SimpleNamespace(raw_message="answer", message=[]))
+    await bot._handle_message(SimpleNamespace(**event_data, raw_message="answer", message=[]))
     assert state.question.done() and state.question.result() == "answer"
     assert state.inputs.user_inputs == ["answer"]
     await bot._run_connection(release.wait)
