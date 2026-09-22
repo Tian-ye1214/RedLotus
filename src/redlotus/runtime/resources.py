@@ -154,12 +154,6 @@ def _locked_storage_file(path: Path) -> FileLock | None:
     except (OSError, Timeout):
         return None
 
-def _release_storage_lock(lock: FileLock) -> None:
-    try:
-        lock.release()
-    except OSError:
-        pass
-
 def _delete_owned_cache(root: Path, target: Path) -> int | None:
     entries = []
 
@@ -191,11 +185,7 @@ def _delete_owned_cache(root: Path, target: Path) -> int | None:
         return None
     return released
 
-def _storage_cleanup_log(path: Path, released: int) -> None:
-    try:
-        _lg.info("Storage cleanup released {} bytes at {}", released, path)
-    except OSError:
-        pass
+_storage_cleanup_log = functools.partial(_lg.info, "Storage cleanup released {1} bytes at {0}")
 
 def _retry_after_cleanup(retry: Callable[[], None]) -> bool:
     try:

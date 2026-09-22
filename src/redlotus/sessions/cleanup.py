@@ -15,7 +15,6 @@ from redlotus.runtime.config import settings
 from redlotus.runtime.resources import (
     _delete_owned_cache,
     _locked_storage_file,
-    _release_storage_lock,
     _retry_after_cleanup,
     _safe_storage_child,
     _same_storage_volume,
@@ -45,7 +44,7 @@ def _locked_session(message_path: Path) -> Iterator[FileLock | None]:
         yield None
         return
     with ExitStack() as locks:
-        locks.callback(_release_storage_lock, transaction)
+        locks.callback(transaction.release)
         children = _storage_children(message_path.parent)
         if children is None:
             yield None
@@ -60,7 +59,7 @@ def _locked_session(message_path: Path) -> Iterator[FileLock | None]:
                 if use_lock is None:
                     yield None
                     return
-                locks.callback(_release_storage_lock, use_lock)
+                locks.callback(use_lock.release)
         yield transaction
 
 
