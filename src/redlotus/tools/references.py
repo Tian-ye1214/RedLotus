@@ -268,10 +268,10 @@ class DocumentReader:
         ]
 
     def pdf(self, source: Path, directory: Path) -> list[ReferencePart]:
-        import fitz
+        import pymupdf
 
         parts = []
-        with fitz.open(source) as document:
+        with pymupdf.open(source) as document:
             if document.needs_pass:
                 raise ValueError("PDF 已加密，不能读取。")
             for number, page in enumerate(document, 1):
@@ -287,7 +287,7 @@ class DocumentReader:
                     )
                 if page.get_images() or not text.strip() or page.get_drawings():
                     target = directory / f"page-{number}.png"
-                    page.get_pixmap(matrix=fitz.Matrix(1.4, 1.4)).save(target)
+                    page.get_pixmap(matrix=pymupdf.Matrix(1.4, 1.4)).save(target)
                     parts.append(
                         ReferencePart(
                             kind="image",
@@ -296,6 +296,9 @@ class DocumentReader:
                             media_type="image/png",
                         )
                     )
+            for number, page in enumerate(document, 1):
+                if links := page.get_links():
+                    parts.append(ReferencePart.from_text(links, locator=f"Page {number}, links"))
         return parts
 
     def word(self, source: Path, directory: Path) -> list[ReferencePart]:
@@ -484,7 +487,7 @@ def reference_message_data(value, *, restore=False, workspace=None):
 
 
 class ReferenceStore:
-    PARSER_VERSION = 3
+    PARSER_VERSION = 4
 
     def __init__(self, workspace: WorkspaceContext, root: Path | None = None):
         self.workspace = workspace

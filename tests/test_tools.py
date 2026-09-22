@@ -1,4 +1,4 @@
-"""File review transaction faults, exercised against real isolated files."""
+"""Tool execution, file review, and reference parsing on isolated inputs."""
 
 import asyncio
 import csv
@@ -15,9 +15,17 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 import requests
+from filelock import FileLock, Timeout
 
-from redlotus.runtime.resources import WorkspaceContext
-from redlotus.tools.base_tools import PendingReviewStore, generate_image_from_flux
+from redlotus.core.agents import SubagentHandle
+from redlotus.runtime import logging as logger, resources
+from redlotus.runtime.network import ModelInputPolicy, close_all_clients
+from redlotus.runtime.resources import WorkspaceContext, file_lock
+from redlotus.sessions.context import SubagentResult, SubagentSpec, TRACE_STORE, TurnTraceStore, turn_context
+from redlotus.tools import base_tools, execution, registry
+from redlotus.tools.base_tools import BasicToolkit, PendingReviewStore, generate_image_from_flux
+from redlotus.tools.execution import PlaywrightBrowserSession, _terminate_process_tree
+from redlotus.tools.references import DocumentReader, ReferenceStore
 
 
 @pytest.fixture(params=["\n", "\r\n"])
@@ -120,7 +128,6 @@ def test_rejecting_new_file_removes_only_the_reviewed_version(tmp_path):
 @pytest.mark.parametrize("content,encoding", [("line\n雪\r\n", "utf-8"), ("line\n雪\r\n", "utf-16"), (bytes(range(256)), None)],
                          ids=["utf8-text", "utf16-text", "raw-bytes"])
 def test_atomic_write_preserves_native_encoding_and_original_on_replace_failure(tmp_path, monkeypatch, content, encoding):
-    from redlotus.runtime import resources
 
     path, native = tmp_path / "owned.bin", tmp_path / "native.bin"
     if isinstance(content, str):
@@ -143,8 +150,6 @@ def test_atomic_write_preserves_native_encoding_and_original_on_replace_failure(
 def test_shared_file_lock_obeys_configured_wait_under_real_contention(tmp_path, timeout):
     from concurrent.futures import ThreadPoolExecutor
 
-    from filelock import Timeout
-    from redlotus.runtime.resources import file_lock
 
     path = tmp_path / "owned.json"
 
@@ -162,10 +167,8 @@ def test_shared_file_lock_obeys_configured_wait_under_real_contention(tmp_path, 
 
 
 async def test_first_configuration_commit_uses_the_pending_lock_policy(tmp_path, monkeypatch):
-    from filelock import FileLock
 
     from redlotus.api.base import ConfigurationSetup
-    from redlotus.runtime import resources
 
     answers, observed = iter(["0", "y"]), []
 
@@ -218,8 +221,6 @@ async def test_toolset_telemetry_preserves_results_without_execution_policy(tmp_
     from pydantic_ai import ToolReturn
 
     from redlotus.core.gateway import create_function_toolset
-    from redlotus.sessions.context import TRACE_STORE, turn_context
-    from redlotus.tools import registry
 
     (tmp_path / "config.json").write_text('{"lifecycle":{"trace_history_turns":10},"ui":{"tool_argument_preview_chars":80,"tool_keyword_limit":5,"tool_positional_limit":3}}')
     result = ToolReturn(return_value="original")
@@ -250,7 +251,6 @@ async def test_toolset_telemetry_preserves_results_without_execution_policy(tmp_
 
 def test_trace_retention_reads_configuration_only_when_recording(tmp_path):
 
-    from redlotus.sessions.context import TurnTraceStore
 
     for limit in (2, 1):
         trace = TurnTraceStore()  # Import and construction must work before initial setup.
@@ -267,7 +267,6 @@ async def test_all_external_processes_obey_configured_command_deadline(tmp_path,
     import subprocess
     import sys
 
-    from redlotus.tools import execution
 
     (tmp_path / "config.json").write_text(json.dumps({
         "agent_run_policy": {"max_concurrent_threads_per_session": 1, "max_command_timeout_seconds": 1},
@@ -289,7 +288,6 @@ async def test_all_external_processes_obey_configured_command_deadline(tmp_path,
 
 async def test_inherited_pipe_failure_obeys_configured_cleanup_deadline(tmp_path):
 
-    from redlotus.tools.execution import _terminate_process_tree
 
     (tmp_path / "config.json").write_text('{"lifecycle":{"process_termination_timeout_seconds":0.02}}')
 
@@ -323,9 +321,7 @@ print(result.stdout, end="")
 @pytest.mark.parametrize("parallelism", [1, 2])
 async def test_reference_parser_keeps_input_order_and_obeys_its_own_concurrency(tmp_path, monkeypatch, parallelism):
 
-    from redlotus.runtime.network import ModelInputPolicy
     from redlotus.sessions.control import load_file_refs
-    from redlotus.tools.references import ReferenceStore
 
     (tmp_path / "config.json").write_text(json.dumps({
         "input_limits": {"parse_concurrency": parallelism},
@@ -362,7 +358,6 @@ async def test_reference_parser_keeps_input_order_and_obeys_its_own_concurrency(
 async def test_browser_launch_uses_explicit_configuration(tmp_path, monkeypatch, headless, expected, viewport, locale):
 
     from playwright import async_api
-    from redlotus.tools.execution import PlaywrightBrowserSession
 
     (tmp_path / "config.json").write_text(json.dumps({
         "BROWSER_HEADLESS": headless, "browser": {"viewport": viewport, "locale": locale},
@@ -391,8 +386,6 @@ async def test_browser_launch_uses_explicit_configuration(tmp_path, monkeypatch,
 
 async def test_subagent_close_joins_its_thread_without_blocking_the_owner_loop(tmp_path):
 
-    from redlotus.core.agents import SubagentHandle
-    from redlotus.sessions.context import SubagentSpec
 
     release = threading.Event()
     handle = SubagentHandle(SubagentSpec("fixture", None, WorkspaceContext.from_path(tmp_path)), None)
@@ -411,8 +404,6 @@ async def test_subagent_close_joins_its_thread_without_blocking_the_owner_loop(t
 
 def test_cancelled_close_does_not_keep_the_owner_executor_alive(tmp_path):
 
-    from redlotus.core.agents import SubagentHandle
-    from redlotus.sessions.context import SubagentSpec
 
     started, release, exited = threading.Event(), threading.Event(), threading.Event()
 
@@ -451,8 +442,6 @@ def test_cancelled_close_does_not_keep_the_owner_executor_alive(tmp_path):
 async def test_reference_download_updates_its_http_timeout_and_keeps_contents(tmp_path, monkeypatch):
 
 
-    from redlotus.runtime.network import ModelInputPolicy, close_all_clients
-    from redlotus.tools.references import ReferenceStore
 
     observed = []
 
@@ -484,8 +473,6 @@ async def test_reference_download_updates_its_http_timeout_and_keeps_contents(tm
 @pytest.mark.parametrize("overrides", [{}, {"width": 128, "height": 96, "max_wait_time": 5}])
 async def test_image_generation_shares_configured_http_and_preserves_explicit_arguments(tmp_path, monkeypatch, overrides):
 
-    from redlotus.runtime import logging as logger
-    from redlotus.runtime.network import close_all_clients
 
     monkeypatch.setattr(logger, "_configured_dir", tmp_path)
     (tmp_path / "config.json").write_text(json.dumps({
@@ -530,8 +517,6 @@ async def test_image_generation_shares_configured_http_and_preserves_explicit_ar
 @pytest.mark.parametrize("phase", ["submission", "poll", "download", "cancel"])
 async def test_image_deadline_includes_submission_and_cancels_async_io(tmp_path, monkeypatch, phase):
 
-    from redlotus.runtime import logging as logger
-    from redlotus.runtime.network import close_all_clients
 
     monkeypatch.setattr(logger, "_configured_dir", tmp_path)
     (tmp_path / "config.json").write_text(json.dumps({
@@ -576,7 +561,6 @@ async def test_image_deadline_includes_submission_and_cancels_async_io(tmp_path,
 
 async def test_browser_updates_separate_action_and_navigation_policies(tmp_path):
 
-    from redlotus.tools.execution import PlaywrightBrowserSession
 
     observed, navigations = {}, []
 
@@ -601,7 +585,6 @@ async def test_browser_updates_separate_action_and_navigation_policies(tmp_path)
 @pytest.mark.parametrize("max_results", [None, 2])
 def test_web_search_reads_config_and_preserves_explicit_limit(tmp_path, monkeypatch, max_results):
 
-    from redlotus.tools import base_tools
 
     policy = {"max_results": 1, "region": "wt-wt", "timeout_seconds": 7,
               "safesearch": "moderate", "timelimit": None, "backend": "auto"}
@@ -621,7 +604,6 @@ def test_web_search_reads_config_and_preserves_explicit_limit(tmp_path, monkeypa
 
 @pytest.mark.parametrize("limit,newline,expected", [(4, "\n", "a|b\n"), (8, "\r\n", "a|b\r\n1|2")])
 def test_csv_detection_sample_does_not_truncate_parsed_rows(tmp_path, monkeypatch, limit, newline, expected):
-    from redlotus.tools.references import DocumentReader
 
     (tmp_path / "config.json").write_text(json.dumps({"input_limits": {"csv_sniff_chars": limit}}))
     path = tmp_path / "table.csv"
@@ -637,7 +619,6 @@ def test_csv_detection_sample_does_not_truncate_parsed_rows(tmp_path, monkeypatc
 async def test_task_retry_limit_comes_from_config(tmp_path, retries):
 
     from redlotus.core.tasks import TaskManager
-    from redlotus.sessions.context import SubagentResult
 
     (tmp_path / "config.json").write_text(json.dumps({"agent_run_policy": {"max_task_retries": retries}}))
     manager = TaskManager()
@@ -660,8 +641,6 @@ async def test_task_retry_limit_comes_from_config(tmp_path, retries):
 
 def test_log_retention_and_rotation_follow_config(tmp_path, monkeypatch):
 
-    from redlotus.runtime import logging as logger
-    from redlotus.tools.base_tools import BasicToolkit
 
     (tmp_path / "config.json").write_text(json.dumps({"storage": {"filename_max_chars": 7, "cleanup": {
         "log_retention_days": 1, "session_log_max_bytes": 1,
@@ -693,3 +672,30 @@ def test_log_retention_and_rotation_follow_config(tmp_path, monkeypatch):
     os.utime(backup, (time.time() - 2 * 86400,) * 2)
     logger.prune_old_logs()
     assert path.is_file() and not backup.exists()
+
+
+async def test_pdf_references_preserve_external_and_internal_link_destinations(tmp_path):
+    import pymupdf
+
+    path = tmp_path / "links.pdf"
+    with pymupdf.open() as document:
+        document.new_page().insert_text((72, 72), "First page; external reference and next page")
+        document.new_page().insert_text((72, 72), "Second page receipt")
+        document[1].draw_rect(pymupdf.Rect(72, 100, 140, 150))
+        document[0].insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(72, 60, 140, 75),
+                                 "uri": "https://example.com/hidden-target"})
+        document[0].insert_link({"kind": pymupdf.LINK_GOTO, "from": pymupdf.Rect(150, 60, 210, 75),
+                                 "page": 1, "to": pymupdf.Point(72, 72)})
+        document.save(path)
+    store = ReferenceStore(WorkspaceContext.from_path(tmp_path), tmp_path / "references")
+    reference = await store.capture_file(path, policy=ModelInputPolicy(max_files=1, max_file_bytes=100000, reference_download_timeout_seconds=1))
+    old_parts = [part for part in DocumentReader().pdf(path, tmp_path) if not part.locator.endswith(", links")]
+    (store.root / "manifests").mkdir()
+    (store.root / "manifests" / f"{reference.id}.json").write_text(reference.model_copy(update={"parts": old_parts, "parser_version": 3}).model_dump_json())
+    (reference.snapshot.parent / "parts-v3.pdf.json").write_text(json.dumps([part.model_dump(mode="json") for part in old_parts]))
+    parts = (await store.parse(reference)).parts
+    assert [(part.kind, part.locator, part.text.strip()) for part in parts[:3]] == [
+        ("text", "Page 1", "First page; external reference and next page"), ("text", "Page 2", "Second page receipt"), ("image", "Page 2", "")]
+    links = json.loads(next(part.text for part in parts if part.locator == "Page 1, links"))
+    assert next(link for link in links if link["kind"] == pymupdf.LINK_URI)["uri"] == "https://example.com/hidden-target"
+    assert next(link for link in links if link["kind"] == pymupdf.LINK_GOTO)["page"] == 1

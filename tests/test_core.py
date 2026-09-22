@@ -340,6 +340,7 @@ async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp
 @pytest.mark.parametrize("capacity,output,ratio,used,threshold,compresses", [
     (100, 40, .9, 53, 54, False), (None, 40, .9, 54, 54, True),
     (100, None, .9, 89, 90, False), (None, None, .9, 90, 90, True),
+    (1024000, 393216, .8, 504627, 504628, False), (1024000, 393216, .8, 504628, 504628, True),
     (125, 100, .28, 7, 7, True),
 ])
 async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(monkeypatch, capacity, output, ratio, used, threshold, compresses):
