@@ -24,7 +24,7 @@ from redlotus.runtime.config import get_agent_usage_limits, settings
 from redlotus.runtime.resources import (
     WorkspaceContext,
     current_workspace,
-    finish_file_io,
+    finish_io,
     session_data_dir,
     workspace_context,
 )
@@ -442,7 +442,7 @@ class AgentSystem:
             manager_history.set_messages(manager_messages)
             active = metadata.get("active_turn")
             if active or repaired != messages or tasks.snapshot() != metadata.get("tasks", []):
-                await finish_file_io(asyncio.to_thread(lambda: storage.save_context(
+                await finish_io(asyncio.to_thread(lambda: storage.save_context(
                     repaired, turn_id=(active.get("turn_id") or active.get("id")) if active else None,
                     metadata={"active_turn": None, "interrupted_turn": dict(active, status="interrupted") if active else None,
                               "tasks": tasks.snapshot()},

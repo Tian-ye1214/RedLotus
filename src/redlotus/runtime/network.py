@@ -6,6 +6,7 @@ import inspect
 import json
 import threading
 from collections.abc import Callable, Mapping
+from contextlib import AsyncExitStack
 from copy import deepcopy
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -34,6 +35,7 @@ from redlotus.runtime.config import (
     get_model_and_params,
     settings,
 )
+from redlotus.runtime.resources import finish_io
 
 _local = threading.local()
 _OPENROUTER_LOCK = threading.Lock()
@@ -66,20 +68,14 @@ def get_client(
         clients[key] = client
     return client
 
-async def close_client(key: str) -> None:
-    client = _clients().pop(key, None)
-    if client is not None and not client.is_closed:
-        try:
-            await client.aclose()
-        except Exception as e:
-            logger.debug("关闭 HTTP 客户端 %r 时忽略异常: %s", key, e)
-
 async def close_all_clients() -> None:
-    """Close this loop's clients without touching other Agent threads."""
-    keys = list(_clients())
-    for key in keys:
-        await close_client(key)
+    """Release this loop's clients, including when another release is interrupted."""
+    clients = _clients()
     _local.pools.pop(asyncio.get_running_loop(), None)
+    closing = AsyncExitStack()
+    for client in clients.values():
+        closing.push_async_callback(client.aclose)
+    await finish_io(closing.aclose())
 
 class InputLimitError(ValueError):
     """The prepared input cannot fit the selected gateway's declared limits."""

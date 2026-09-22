@@ -30,7 +30,7 @@ from redlotus.runtime.resources import (
     WorkspaceContext,
     bind_context,
     bind_to_loop,
-    finish_file_io,
+    finish_io,
     workspace_context,
 )
 from redlotus.sessions.context import _USAGE_RECORDER, make_agent_id
@@ -248,8 +248,8 @@ class SessionController:
             self._storage_retry.clear()
             try:
                 if storage is not None:
-                    await finish_file_io(asyncio.to_thread(storage.retry_pending))
-                result = await finish_file_io(asyncio.to_thread(operation))
+                    await finish_io(asyncio.to_thread(storage.retry_pending))
+                result = await finish_io(asyncio.to_thread(operation))
                 if inspect.isawaitable(result):
                     result = await result
                 self.storage_paused = False

@@ -32,7 +32,7 @@ from redlotus.runtime.resources import (
     atomic_write,
     current_workspace,
     file_lock,
-    finish_file_io,
+    finish_io,
     iso_utc_now,
     read_locked_json,
     save_locked_json,
@@ -105,7 +105,7 @@ class MemoryService:
     async def begin_turn(self, session_id, turn_id, user_text, *, references=()):
         if self.owner_memory_allowed and self._injection_snapshot is None:
             async with self.long_term.publication_lock():
-                self._injection_snapshot = await finish_file_io(asyncio.to_thread(
+                self._injection_snapshot = await finish_io(asyncio.to_thread(
                     lambda: self.long_term.get_injection(self.store.all("global", active_only=False))
                 ))
         self.current = self.observations.begin(
@@ -245,7 +245,7 @@ class MemoryService:
                 records = [record for identity in job.records if
                            (record := await asyncio.to_thread(self.store.get, identity)).last_change_id.startswith(job.id + ":")]
                 job.records = [record.id for record in records]
-            await finish_file_io(asyncio.to_thread(self._publish, job, records))
+            await finish_io(asyncio.to_thread(self._publish, job, records))
             if job.window:
                 self.observations.commit(job.window)
             else:

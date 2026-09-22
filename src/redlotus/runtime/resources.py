@@ -213,8 +213,8 @@ def user_skills_dir(workspace=None) -> Path:
     """运行时安装的技能 overlay（可写）；与随包基线技能合并加载。"""
     return runtime_dir(workspace) / "skills"
 
-async def finish_file_io(operation):
-    """Drain a file operation before cancellation releases its owning lock."""
+async def finish_io(operation):
+    """Drain an I/O operation before cancellation releases its owner."""
     import asyncio
 
     task = asyncio.create_task(operation)

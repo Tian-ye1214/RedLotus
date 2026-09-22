@@ -25,7 +25,7 @@ from redlotus.runtime.resources import (
     WorkspaceContext,
     atomic_write,
     atomic_write_json,
-    finish_file_io,
+    finish_io,
     references_dir,
     runtime_dir,
     user_data_dir,
@@ -196,7 +196,7 @@ class DocumentReader:
             ".html": self.html,
             ".htm": self.html,
         }
-        return await finish_file_io(
+        return await finish_io(
             asyncio.to_thread(readers.get(extension, self.text), source, directory)
         )
 
@@ -615,7 +615,7 @@ class ReferenceStore:
         snapshot = directory / ("source" + Path(name).suffix.lower())
         async with AsyncFileLock(directory / ".build.lock", run_in_executor=False):
             if not snapshot.exists():
-                await finish_file_io(
+                await finish_io(
                     asyncio.to_thread(atomic_write, snapshot, data)
                 )
         return ReferenceFile(
@@ -652,12 +652,12 @@ class ReferenceStore:
                     ]
                 else:
                     if reference.media_type.startswith(("image/", "video/", "audio/")):
-                        parts = await finish_file_io(
+                        parts = await finish_io(
                             asyncio.to_thread(self._media_parts, reference)
                         )
                     else:
                         parts = await DocumentReader().read(snapshot, directory)
-                    await finish_file_io(
+                    await finish_io(
                         asyncio.to_thread(
                             atomic_write_json,
                             parts_path,
@@ -667,7 +667,7 @@ class ReferenceStore:
             prepared = reference.model_copy(
                 update={"parts": parts, "parser_version": self.PARSER_VERSION}
             )
-            await finish_file_io(
+            await finish_io(
                 asyncio.to_thread(atomic_write_json, manifest, prepared.manifest())
             )
             return prepared
