@@ -132,7 +132,7 @@ class BotBase:
                 input_controller=state.inputs,
             )
             state.agent.set_ask_user_handler(self._ask_user)
-            state.agent.toolkit.set_task_directory(f"{self.platform_tag}_{session_id[:20]}")
+            state.agent.toolkit.set_task_directory(f"{self.platform_tag}_{session_id}")
         return state.agent
 
     async def _close_session(self, state):

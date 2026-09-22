@@ -285,7 +285,7 @@ def channel_probe(tmp_path, monkeypatch):
             self._session = input_controller or SessionController()
             self.workspace = WorkspaceContext.from_path(tmp_path)
             self.session_key = None
-            self.toolkit = SimpleNamespace(set_task_directory=lambda title: None)
+            self.toolkit = SimpleNamespace(set_task_directory=lambda title: setattr(self, "task_directory", title))
 
         def set_ask_user_handler(self, handler):
             self.handler = handler
@@ -313,9 +313,8 @@ def channel_probe(tmp_path, monkeypatch):
     }})
     monkeypatch.setattr(base, "get_env", lambda *args, **kwargs: None)
     monkeypatch.setattr(base.logger, "session_log_context", lambda *args: nullcontext())
-    monkeypatch.setattr(base.logger, "error", lambda *args: None)
-    monkeypatch.setattr(base.logger, "debug", lambda *args: None)
-    monkeypatch.setattr(base.logger, "warning", lambda *args: None)
+    for level in ("error", "debug", "warning"):
+        monkeypatch.setattr(base.logger, level, lambda *args: None)
     bot = WeChatAgentBot()
     monkeypatch.setattr(bot, "_ensure_session_gc", lambda: None)
 
@@ -470,7 +469,7 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
 
     monkeypatch.setattr(QQ, "extract_media", attachments)
     monkeypatch.setattr(bot, "_is_at_me", lambda event: True)
-    event_data = dict(reply=reply, is_group_msg=lambda: False, user_id="fixture")
+    event_data = dict(reply=reply, is_group_msg=lambda: False, user_id="fixture_shared_prefix_account_A")
     slow = asyncio.create_task(bot._handle_message(SimpleNamespace(
         **event_data, raw_message="first", message=[SimpleNamespace(msg_seg_type="file", file="first.txt", file_id="fixture")],
     )))
@@ -481,9 +480,10 @@ async def test_qq_admits_before_downloading(channel_probe, monkeypatch):
     assert not p.calls, "QQ text overtook the first attachment"
     release.set()
     await slow
-    await asyncio.wait_for(bot._sessions["private_fixture"].inputs.queue.join(), 1)
+    state = bot._sessions["private_" + event_data["user_id"]]
+    await asyncio.wait_for(state.inputs.queue.join(), 1)
     assert [(text, count) for text, count, _ in p.calls] == [("first", 1), ("second", 0)]
-    state = bot._sessions["private_fixture"]
+    assert state.agent.task_directory == "QQ_private_" + event_data["user_id"]
     state.question = asyncio.get_running_loop().create_future()
     await bot._handle_message(SimpleNamespace(**event_data, raw_message="answer", message=[]))
     assert state.question.done() and state.question.result() == "answer"
