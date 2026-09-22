@@ -202,11 +202,12 @@ class SessionController:
             # before allowing a final response to close this turn.
         return messages
 
-    def add_notice(self, content) -> None:
-        self._notices.append(content)
+    def add_notice(self, content, *, context=None) -> None:
+        self._notices.append((context or (self.generation, self.turn_id), content))
 
     def take_notices(self) -> list:
-        notices = list(self._notices)
+        notices = [content for context, content in self._notices
+                   if context == (self.generation, self.turn_id)]
         self._notices.clear()
         return notices
 

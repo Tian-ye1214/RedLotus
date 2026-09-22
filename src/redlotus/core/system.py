@@ -287,10 +287,10 @@ class AgentSystem:
 
     async def stop_current_turn(self) -> str:
         """Stop a user task from any interface and preserve the actual control receipt."""
-        active = self.has_current_turn
+        active, notice_context = self.has_current_turn, (self._session.generation, self._session.turn_id)
         result = await self.cancel_current_turn()
         self.record_control_result(
-            "stop", "current_turn", "cancelled" if active else "not_running", accepted=active
+            "stop", "current_turn", "cancelled" if active else "not_running", accepted=active, context=notice_context
         )
         return result
 
@@ -388,7 +388,7 @@ class AgentSystem:
 
 
 
-    def record_control_result(self, command, target, status, *, accepted):
+    def record_control_result(self, command, target, status, *, accepted, context=None):
         from pydantic_ai.messages import TextContent
 
         from redlotus.runtime.resources import iso_utc_now
@@ -412,7 +412,7 @@ class AgentSystem:
                 TextContent(
                     encoded, metadata={"origin": "runtime_control"}
                 )
-            ]
+            ], context=context
         )
         return receipt
 

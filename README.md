@@ -24,7 +24,7 @@ redlotus
 
 ## Features
 
-The `1.0.1.post1` candidate (release title: `1.0.1-release`) is being validated on `develop`; it has not been released. This release's agreed validation scope excludes Linux, macOS, live QQ/WeChat accounts, and unconfigured model protocols. Those capabilities remain implemented but unverified for this release. See the [current acceptance record](docs/design.md#状态说明).
+The `1.0.1.post1` candidate (release title: `1.0.1-release`) is being validated on `develop`; it has not been released. This release's agreed validation scope excludes Linux, macOS, live QQ/WeChat accounts, and unconfigured model protocols. Those capabilities remain implemented but unverified for this release. Testing startup and upgrades from the old `1.0.1` package has been removed from scope; fresh installation of the new public package and downloaded release artifacts remains required. See the [current acceptance record](docs/design.md#状态说明).
 
 | Feature | Description |
 |---------|-------------|

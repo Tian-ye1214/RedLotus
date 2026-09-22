@@ -363,7 +363,7 @@ class BasicToolkit:
 
         Args:
             name: Path relative to the current project; use WorkDatabase/ for generated artifacts.
-            content: Exact UTF-8 text. Actual LF/CRLF characters are preserved; literal backslash escapes stay literal.
+            content: Text after standard JSON string decoding. Written as UTF-8 with identical characters and line endings, without a second escape-decoding step.
         """
         return self._update_file(name, lambda previous: content)
 

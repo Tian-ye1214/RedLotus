@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 import sys
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
@@ -14,8 +15,11 @@ from pydantic_ai.messages import (
     ModelResponse,
     TextPart,
     ToolSearchCallPart,
+    UserPromptPart,
 )
 from pydantic_ai.usage import RequestUsage
+
+from redlotus.core import history, system as system_module
 
 from redlotus.core.agents import AgentRegistry, SubagentFactory
 from redlotus.core.gateway import RequestPolicy
@@ -99,7 +103,6 @@ def test_config_layers_dynamic_roles_and_minimal_writeback(tmp_path):
 
 
 def test_model_target_options_survive_roundtrip_without_shared_mutation():
-    from dataclasses import asdict
 
     from redlotus.runtime.network import ModelTarget
 
@@ -237,7 +240,6 @@ def test_provider_missing_usage_is_still_unknown():
 
 
 def test_usage_deduplicates_response_identity_across_retries_and_pruning(tmp_path):
-    from dataclasses import replace
     from datetime import timedelta
 
 
@@ -311,7 +313,6 @@ async def test_response_accounting_survives_validation_retry_and_cancellation(tm
     ("compressor", "auxiliary"), ("future_helper", "auxiliary"),
 ])
 async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp_path, monkeypatch, role, category, checkpoint):
-    from redlotus.core import history
 
     compacted = []
     async def compact(messages, **kwargs):
@@ -344,36 +345,34 @@ async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp
     (125, 100, .28, 7, 7, True),
 ])
 async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(monkeypatch, capacity, output, ratio, used, threshold, compresses):
-    from pydantic_ai.messages import UserPromptPart
 
-    from redlotus.core import history as module
 
     inputs, entered, release = [], asyncio.Event(), asyncio.Event()
     config = {"max_context_windows": capacity, "max_tokens": output, "auto_compress_ratio": ratio,
               "compress_head_turns": 0, "compress_tail_turns": 0}
-    monkeypatch.setattr(module, "get_context_config", lambda role: config)
-    monkeypatch.setattr(module, "get_model_and_params", lambda role: ("fixture", {}))
-    monkeypatch.setattr(module, "lookup_model_context", lambda model: 100)
-    monkeypatch.setattr(module, "load_prompt", lambda name: "## Facts\n## Next")
-    monkeypatch.setattr(module.logger, "info", lambda *args: None)
+    monkeypatch.setattr(history, "get_context_config", lambda role: config)
+    monkeypatch.setattr(history, "get_model_and_params", lambda role: ("fixture", {}))
+    monkeypatch.setattr(history, "lookup_model_context", lambda model: 100)
+    monkeypatch.setattr(history, "load_prompt", lambda name: "## Facts\n## Next")
+    monkeypatch.setattr(history.logger, "info", lambda *args: None)
 
     async def compress(**kwargs):
         inputs.append(json.loads(kwargs["user_content"]))
         return "## Facts\nThe answer is 42.\n## Next\nRead the file."
 
-    monkeypatch.setattr(module, "_call_compressor_llm", compress)
+    monkeypatch.setattr(history, "_call_compressor_llm", compress)
     sources = {role: ChatHistory() for role in ("coordinator", "manager")}
     for source in sources.values():
         source.set_messages([ModelRequest([UserPromptPart("calculate 19+23")], instructions="SYSTEM_FIXED"),
                              ModelResponse([TextPart("42")], usage=RequestUsage(input_tokens=used)),
                              ModelRequest([UserPromptPart("continue")], instructions="SYSTEM_FIXED")])
     original = {role: list(source.messages) for role, source in sources.items()}
-    assert module.context_usage_breakdown("coordinator", source.messages)["threshold"] == threshold
-    assert bool(await module.prepare_compression(source, role="coordinator", force=False)) == compresses
+    assert history.context_usage_breakdown("coordinator", source.messages)["threshold"] == threshold
+    assert bool(await history.prepare_compression(source, role="coordinator", force=False)) == compresses
     target = SimpleNamespace(name="fixture", options={"context": {key: value for key, value in config.items() if key != "max_tokens"},
                                                      "settings": {"max_tokens": output}})
     monkeypatch.setitem(config, "max_tokens", 99)
-    assert (await module.compact_request_messages(source.messages, role="coordinator", target=target) is not source.messages) == compresses
+    assert (await history.compact_request_messages(source.messages, role="coordinator", target=target) is not source.messages) == compresses
     inputs.clear()
 
     async def failed_save(candidates):
@@ -382,7 +381,7 @@ async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(mon
         await release.wait()
         raise OSError("injected checkpoint failure")
 
-    task = asyncio.create_task(module.compress_histories(sources, task_state="pending", persist=failed_save, is_current=lambda: True))
+    task = asyncio.create_task(history.compress_histories(sources, task_state="pending", persist=failed_save, is_current=lambda: True))
     await asyncio.wait_for(entered.wait(), 5)
     assert all(source.messages == original[role] for role, source in sources.items())
     assert len(inputs) == 2 and all("SYSTEM_FIXED" not in json.dumps(item) for item in inputs)
@@ -392,14 +391,20 @@ async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(mon
     assert all(source.messages == original[role] for role, source in sources.items())
 
 
-async def test_late_usage_keeps_original_session_and_does_not_wait_after_clear(tmp_path, monkeypatch):
+@pytest.mark.parametrize("discard", [False, True])
+async def test_late_usage_keeps_original_session_and_does_not_wait_after_reset(tmp_path, monkeypatch, discard):
 
     old = SessionFile.create(tmp_path, "usage-project", session_id="old")
     new = SessionFile.create(tmp_path, "usage-project", session_id="new")
     controller = SessionController()
     with controller.usage(old):
         record = current_usage_recorder()
-    controller.reset(discard=True)
+    cancelled_context = controller.generation, controller.turn_id
+    controller.reset(discard=discard)
+    async with controller.turn("independent queued input"):
+        controller.add_notice("cancelled previous input", context=cancelled_context)
+        controller.add_notice("current input notice")
+        assert controller.take_notices() == ["current input notice"]
     response = ModelResponse([TextPart("late")], usage=RequestUsage(input_tokens=9))
     with controller.usage(new):
         await record([response], role="title", invocation="old-title")
@@ -414,8 +419,6 @@ async def test_late_usage_keeps_original_session_and_does_not_wait_after_clear(t
 
 
 async def test_cancelled_child_checkpoint_releases_thread_capacity(tmp_path, monkeypatch):
-    from redlotus.core import system as system_module
-
     system = object.__new__(system_module.AgentSystem)
     system.workspace = WorkspaceContext.from_path(tmp_path)
     system._session_file = None
