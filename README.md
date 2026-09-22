@@ -244,4 +244,4 @@ pyinstaller build.spec
 
 The main package lives in `src/redlotus/`, organized into `runtime`, `sessions`, `core`, `tools`, `memory`, `prompts`, `ui`, and `api`. The `redlotus` command maps to `redlotus.api.base:main`.
 
-The current restructuring and release acceptance are incomplete. Tests must include real API calls through source, installed pip, and packaged entries; isolated fault checks alone are insufficient. See the [development and acceptance rules](docs/development.md).
+The current restructuring and release acceptance are incomplete. Source and independently installed wheel checks pass 234 auxiliary tests each; current real-API validation is blocked by insufficient provider balance. The cache target and strict CRLF copy case have not passed. Tests must include source, daily pip, and packaged entries; builds and isolated fault checks alone are insufficient. See the [acceptance record](docs/design.md#状态说明) and [development rules](docs/development.md).
