@@ -5,6 +5,82 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("failure", [None, "save", "cancel", "compress", "again", "other", "auth", "no_checkpoint"])
+async def test_first_perception_capacity_recovery_preserves_evidence_and_output(monkeypatch, stream, failure):
+    import asyncio
+    import json
+
+    from pydantic_ai import capture_run_messages
+    from pydantic_ai.exceptions import ModelHTTPError
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai.usage import UsageLimits
+
+    from redlotus.core import gateway, history
+    from redlotus.memory.perception import PerceptionTiming
+    from redlotus.runtime.network import ModelTarget
+
+    calls, saved, compressed, timings = [], [], [], []
+    error = ModelHTTPError(status_code=401 if failure == "auth" else 400, model_name="fixture", body={
+        "message": "Bad tool schema" if failure == "other" else "This model's maximum context length is 100 tokens. However, you requested 120 tokens (80 in the messages, 40 in the completion). Please reduce the length of the messages or completion.",
+        "type": "invalid_request_error", "param": None, "code": "invalid_request_error",
+    })
+    async def respond(messages, info):
+        calls.append(list(messages))
+        assert info.model_settings["max_tokens"] == 40
+        assert info.instructions == "SYSTEM_FIXED"
+        if len(calls) == 1 or failure == "again":
+            raise error
+        assert saved and messages == saved[0]
+        return ModelResponse([TextPart("complete")])
+    async def chunks(messages, info):
+        yield (await respond(messages, info)).parts[0].content
+    async def compress(**kwargs):
+        compressed.append(json.loads(kwargs["user_content"])["transcript"])
+        assert "RAW_WINDOW" in compressed[-1] and "SYSTEM_FIXED" not in compressed[-1]
+        if failure == "compress":
+            raise ValueError("compress failed")
+        return "## Facts\nWindow facts retained.\n## Next\nVerify sources."
+    async def persist(messages):
+        if failure == "cancel":
+            raise asyncio.CancelledError()
+        if failure == "save":
+            raise OSError("save failed")
+        saved.append(list(messages))
+    model = FunctionModel(respond, stream_function=chunks, settings={"max_tokens": 40})
+    target = ModelTarget("fixture", "fixture", None, "", json.dumps({
+        "context": {"max_context_windows": 100, "auto_compress_ratio": .9, "compress_head_turns": 0, "compress_tail_turns": 0},
+        "settings": {"max_tokens": 40}, "limits": {"max_files": 1, "max_file_bytes": 1000, "reference_download_timeout_seconds": 2},
+    }), 5)
+    monkeypatch.setattr(gateway, "create_model", lambda *args: model)
+    monkeypatch.setattr(history, "_call_compressor_llm", compress)
+    monkeypatch.setattr(history, "load_prompt", lambda name: "## Facts\n## Next")
+    monkeypatch.setattr(history.logger, "info", lambda *args: None)
+    agent = gateway.create_agent(target, instructions="SYSTEM_FIXED", role="perception", usage_category="auxiliary",
+        persist_context=None if failure == "no_checkpoint" else persist, capabilities=[PerceptionTiming(timings.append)])
+    async def run():
+        if stream:
+            result = await gateway.AgentRunner().run(agent=agent, prompt="RAW_WINDOW", message_history=[], usage_limits=UsageLimits())
+            return result.output
+        return (await agent.run("RAW_WINDOW")).output
+    with capture_run_messages() as messages:
+        if failure:
+            expected = {"save": OSError, "cancel": asyncio.CancelledError, "compress": ValueError}.get(failure, ModelHTTPError)
+            with pytest.raises(expected):
+                await run()
+        else:
+            assert await run() == "complete"
+    retries = failure in (None, "again")
+    assert len(calls) == len(timings) == (2 if retries else 1)
+    assert bool(compressed) == (failure not in ("other", "auth", "no_checkpoint"))
+    assert "RAW_WINDOW" in str(calls[0])
+    if not saved:
+        assert "RAW_WINDOW" in str(messages)
+    else:
+        assert saved[0][0].instructions == "SYSTEM_FIXED"
+
+
 async def test_memory_control_wait_uses_config_without_cancelling_production(tmp_path):
     import asyncio
     import json

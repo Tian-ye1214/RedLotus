@@ -177,7 +177,7 @@ async def prepare_compression(
 ) -> ChatHistory | None:
     """Build a detached candidate; native async model I/O shares cancellation and usage."""
     messages, summary_state = list(history.messages), history.compress_summary_state
-    if len(messages) < 2:
+    if not messages or (len(messages) == 1 and retain_tail):
         return None
 
     ctx = get_context_config(role) if context is None else context
@@ -324,7 +324,7 @@ def _closed_boundaries(messages: list) -> list[int]:
 
 
 async def compact_request_messages(
-    combined, *, role: str, task_state: str = "", target=None, tools=()
+    combined, *, role: str, task_state: str = "", target=None, tools=(), force=False
 ) -> list:
     """Build the bounded model view; original trace persistence belongs to the runner."""
     request = combined[-1]
@@ -335,7 +335,7 @@ async def compact_request_messages(
     )
     threshold = _compression_threshold(limit, context)
     recent_tokens = latest_usage_input_tokens(combined)
-    if recent_tokens is None or recent_tokens < threshold:
+    if not force and (recent_tokens is None or recent_tokens < threshold):
         return combined
     history = ChatHistory()
     history.set_messages(combined)
@@ -345,6 +345,7 @@ async def compact_request_messages(
         force=True,
         task_state=task_state,
         context={**context, "max_context_windows": limit},
+        retain_tail=not force,
     )
     if candidate is None:
         raise CompressionValidationError(

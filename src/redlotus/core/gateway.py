@@ -16,7 +16,7 @@ from pydantic_ai import (
     RunContext,
 )
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UnexpectedModelBehavior
+from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
 from pydantic_ai.messages import (
     FunctionToolResultEvent,
     InstructionPart,
@@ -102,9 +102,31 @@ class RequestPolicy(AbstractCapability):
         return response
 
     async def wrap_model_request(self, ctx, *, request_context, handler):
-        """Remember the live SDK context only once model invocation actually begins."""
-        self._pending_requests[ctx.run_id] = ctx, request_context.messages[-1], len(ctx.messages)
-        return await handler(request_context)
+        """Retry an oversized first durable auxiliary request once, after saving its summary."""
+        for attempt in range(2):
+            self._pending_requests[ctx.run_id] = ctx, request_context.messages[-1], len(ctx.messages)
+            try:
+                return await handler(request_context)
+            except ModelHTTPError as error:
+                if (
+                    attempt or self.usage_category != "auxiliary" or self.persist_context is None
+                    or len(ctx.messages) != 1 or error.status_code != 400
+                    or "auto_compress_ratio" not in self.target.options["context"]
+                    or not isinstance(error.body, dict)
+                    or not str(error.body.get("message", "")).startswith("This model's maximum context length is ")
+                ):
+                    raise
+                self._pending_requests.pop(ctx.run_id, None)
+                from redlotus.core.history import compact_request_messages
+
+                candidate = await compact_request_messages(
+                    request_context.messages, role=self.role, target=self.target, force=True,
+                    task_state=self.task_state() if self.task_state else "",
+                )
+                await self.persist_context(candidate)
+                request_context.messages = candidate
+                request_context = await self.before_model_request(ctx, request_context)
+                ctx.messages[:] = request_context.messages
 
     async def on_run_error(self, ctx, *, error):
         """Retain cancelled request usage without turning control receipts into responses."""
@@ -330,7 +352,7 @@ def create_agent(
 
     capabilities = list(capabilities or [])
     if role and isinstance(model_name, ModelTarget):
-        capabilities.append(
+        capabilities.insert(0,
             RequestPolicy(
                 role,
                 model_name,
