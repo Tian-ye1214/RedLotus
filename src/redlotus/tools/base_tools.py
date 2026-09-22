@@ -301,6 +301,7 @@ class BasicToolkit:
     def read_file(self, name: str) -> str:
         """
         Read the current on-disk version of a project text file.
+        UTF-8 text retains its original LF or CRLF line endings; preserve them for an exact copy.
         Use for source code, generated artifacts, changes since a reference was captured,
         or an explicit reread. Reference blocks already contain the stated snapshot content;
         use read_reference for that immutable version when it is absent from context.
@@ -362,7 +363,7 @@ class BasicToolkit:
 
         Args:
             name: Path relative to the current project; use WorkDatabase/ for generated artifacts.
-            content: Content to write
+            content: Exact UTF-8 text. Actual LF/CRLF characters are preserved; literal backslash escapes stay literal.
         """
         return self._update_file(name, lambda previous: content)
 

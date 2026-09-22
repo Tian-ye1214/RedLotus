@@ -226,6 +226,12 @@ class ModelTarget:
             timeout,
         )
 
+def context_length_exceeded(error) -> bool:
+    """Recognize the capacity rejection observed from the configured service."""
+    return (error.status_code == 400 and isinstance(error.body, dict)
+            and str(error.body.get("message", "")).startswith("This model's maximum context length is "))
+
+
 class CompatibleChatModel(OpenAIChatModel):
     def _map_model_response(self, message):
         mapped = super()._map_model_response(message)

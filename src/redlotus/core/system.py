@@ -102,6 +102,7 @@ class AgentSystem:
             registry=self.registry,
             persist=self._durable_write,
             factory=self._factory,
+            user_inputs=lambda: self._session.user_inputs,
         )
         self._memory.bind_runner(
             self.registry, input_source=lambda: self._session.user_inputs
@@ -696,11 +697,14 @@ class AgentSystem:
     async def execute_task_with_worker(
         self, task_description: str, user_goal: str = "", retry_info: str = ""
     ) -> Tuple[bool, str]:
-        """Delegate one bounded execution task to a factory-managed Worker.
+        """Delegate one bounded task to a Worker, which can answer directly without tools.
+
+        Permission to delegate does not authorize additional tools or side effects.
+        Preserve user restrictions verbatim; do not require a file for a text answer.
 
         Args:
-            task_description: The task, allowed scope and required deliverables.
-            user_goal: The parent goal and constraints needed to interpret the task.
+            task_description: The task within the user's scope; do not add forbidden tools or side effects.
+            user_goal: Parent goal context; the runtime also supplies the original admitted user inputs.
             retry_info: Earlier failure evidence relevant to this attempt.
 
         Returns:

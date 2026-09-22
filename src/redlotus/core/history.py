@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from math import ceil
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
     ModelMessagesTypeAdapter,
     ModelRequest,
@@ -29,6 +30,7 @@ from redlotus.runtime.config import (
 )
 from redlotus.runtime.network import (
     _lookup_openrouter_meta,
+    context_length_exceeded,
     lookup_model_context,
 )
 from redlotus.sessions.context import ChatHistory, _context_summary_metadata
@@ -176,7 +178,13 @@ async def prepare_compression(
     context: dict | None = None,
 ) -> ChatHistory | None:
     """Build a detached candidate; native async model I/O shares cancellation and usage."""
-    messages, summary_state = list(history.messages), history.compress_summary_state
+    # The SDK merges adjacent requests; each complete user part is still an evidence unit.
+    messages = [unit for message in history.messages for unit in (
+        [replace(message, parts=[part]) for part in message.parts]
+        if isinstance(message, ModelRequest) and len(message.parts) > 1
+        and all(isinstance(part, UserPromptPart) for part in message.parts) else [message]
+    )]
+    summary_state = history.compress_summary_state
     if not messages or (len(messages) == 1 and retain_tail):
         return None
 
@@ -196,28 +204,29 @@ async def prepare_compression(
     prev_summary = summary_state
     from redlotus.prompts.message_text import pydantic_messages_to_text
 
-    middle_messages = messages[head_end:tail_start]
-    if prev_summary:
-        # The prior checkpoint is supplied separately below; keep real user text even
-        # if it happens to equal that checkpoint.
-        middle_messages = [
-            message
-            for message in middle_messages
-            if _context_summary_metadata(message) is None
-        ]
-    excerpt = pydantic_messages_to_text(middle_messages)
-
     system_prompt = load_prompt("context_compress_structured_system.md")
-    user_parts = {"transcript": excerpt}
+    user_parts = {}
     if prev_summary:
         user_parts["previous_summary"] = prev_summary
     if task_state and task_state.strip():
         user_parts["task_state"] = task_state.strip()
-    user_content = json.dumps(user_parts, ensure_ascii=False)
-
-    summary_md = await _call_compressor_llm(
-        system_prompt=system_prompt, user_content=user_content
-    )
+    boundaries = [index for index in _closed_boundaries(messages) if head_end < index <= tail_start
+                  and (index == tail_start or any(isinstance(part, UserPromptPart) for part in messages[index].parts))]
+    while True:
+        user_parts["transcript"] = pydantic_messages_to_text([
+            message for message in messages[head_end:tail_start]
+            if _context_summary_metadata(message) is None
+        ])
+        try:
+            summary_md = await _call_compressor_llm(
+                system_prompt=system_prompt, user_content=json.dumps(user_parts, ensure_ascii=False)
+            )
+            break
+        except ModelHTTPError as error:
+            if not context_length_exceeded(error) or len(boundaries) < 2:
+                raise
+            boundaries = boundaries[:len(boundaries) // 2]
+            tail_start = boundaries[-1]
     summary_md = _lint_compression_summary(summary_md)
     retained = messages[:head_end] + messages[tail_start:]
     metadata = {
@@ -345,7 +354,7 @@ async def compact_request_messages(
         force=True,
         task_state=task_state,
         context={**context, "max_context_windows": limit},
-        retain_tail=not force,
+        retain_tail=not force or len(combined) > 1 or len(combined[0].parts) > 1,
     )
     if candidate is None:
         raise CompressionValidationError(

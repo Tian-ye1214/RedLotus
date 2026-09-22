@@ -326,7 +326,7 @@ async def _print_lifecycle_status(system: Any) -> None:
     recent = await system.registry.list_recent_invocations(session) if session else []
     lines = [
         f"Session: {session or '(not started)'}",
-        *(f"[{row.state.value}] {row.agent_id}" for row in agents),
+        *(f"({row.state.value}) {row.agent_id}" for row in agents),
     ]
     lines.append(
         f"Active: {len(active)}; recent completed: {sum(row.state == AgentInvocationState.COMPLETED for row in recent)}; failed/cancelled: {sum(row.state in (AgentInvocationState.FAILED, AgentInvocationState.CANCELLED) for row in recent)}"
@@ -334,7 +334,7 @@ async def _print_lifecycle_status(system: Any) -> None:
     for row in [*active, *recent[-5:]]:
         elapsed = (row.finished_at or time.monotonic()) - row.started_at
         lines.append(
-            f"[{row.state.value}] {row.role} inv={row.invocation_id[:8]} parent={(row.parent_invocation_id or '-')[:8]} turn={row.turn_id} {elapsed:.1f}s"
+            f"({row.state.value}) {row.role} inv={row.invocation_id[:8]} parent={(row.parent_invocation_id or '-')[:8]} turn={row.turn_id} {elapsed:.1f}s"
         )
     print_panel("\n".join(lines), title="Agent 生命周期")
 

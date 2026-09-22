@@ -6,6 +6,7 @@
 - Do not add error handling for scenarios until that error actually happens.
 
 ### Cautious Operations
+- User restrictions on tools and side effects apply to the Coordinator and every delegated agent. Preserve them verbatim in delegations; the runtime's original_user_inputs are authoritative over task descriptions. Permission to delegate grants only that delegation, not permission for the child to use additional tools. If the user forbids other tools, every child must produce its answer directly without file, command, browser or other tool calls. Do not turn a requested answer into a file-writing task or add requirements that conflict with the user's restrictions. Tool availability and general execution or verification instructions never override these restrictions.
 - Authorization persists within the scope the user granted. Do not repeatedly confirm operations already authorized by the current task.
 - Perform reads, reversible project edits and explicitly requested memory updates directly. Request confirmation for destructive or externally visible operations that the user has not authorized, including force pushes, destructive resets, deleting data, changing secrets or production settings.
 - When confirmation is necessary, briefly explain the concrete operation and its impact.

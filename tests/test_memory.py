@@ -1,19 +1,24 @@
 """Version/publication fault checks; live memory acceptance is separate."""
 
+import asyncio
+import json
+import os
+from pathlib import Path
+from concurrent.futures import Future
+from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
 
 import pytest
+from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
 
+@pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("failure", [None, "save", "cancel", "compress", "again", "other", "auth", "no_checkpoint"])
-async def test_first_perception_capacity_recovery_preserves_evidence_and_output(monkeypatch, stream, failure):
-    import asyncio
-    import json
+async def test_first_perception_capacity_recovery_preserves_evidence_and_output(monkeypatch, stream, failure, prepared):
 
     from pydantic_ai import capture_run_messages
-    from pydantic_ai.exceptions import ModelHTTPError
-    from pydantic_ai.messages import ModelResponse, TextPart
     from pydantic_ai.models.function import FunctionModel
     from pydantic_ai.usage import UsageLimits
 
@@ -59,11 +64,12 @@ async def test_first_perception_capacity_recovery_preserves_evidence_and_output(
     monkeypatch.setattr(history.logger, "info", lambda *args: None)
     agent = gateway.create_agent(target, instructions="SYSTEM_FIXED", role="perception", usage_category="auxiliary",
         persist_context=None if failure == "no_checkpoint" else persist, capabilities=[PerceptionTiming(timings.append)])
+    evidence = [ModelRequest([UserPromptPart("RAW_EVIDENCE")])] if prepared else []
     async def run():
         if stream:
-            result = await gateway.AgentRunner().run(agent=agent, prompt="RAW_WINDOW", message_history=[], usage_limits=UsageLimits())
+            result = await gateway.AgentRunner().run(agent=agent, prompt="RAW_WINDOW", message_history=evidence, usage_limits=UsageLimits())
             return result.output
-        return (await agent.run("RAW_WINDOW")).output
+        return (await agent.run("RAW_WINDOW", message_history=evidence)).output
     with capture_run_messages() as messages:
         if failure:
             expected = {"save": OSError, "cancel": asyncio.CancelledError, "compress": ValueError}.get(failure, ModelHTTPError)
@@ -81,10 +87,64 @@ async def test_first_perception_capacity_recovery_preserves_evidence_and_output(
         assert saved[0][0].instructions == "SYSTEM_FIXED"
 
 
+@pytest.mark.parametrize("failure", [None, "minimum", "other"])
+@pytest.mark.parametrize("merged", [False, True])
+async def test_compressor_capacity_reduces_only_complete_prefix(monkeypatch, failure, merged):
+    from pydantic_ai._agent_graph import _clean_message_history
+    from redlotus.core import history
+    from redlotus.sessions.context import ChatHistory
+
+    calls = []
+    original = [ModelRequest([UserPromptPart("EVENT_A")], instructions="SYSTEM_FIXED"),
+                ModelResponse([ToolCallPart("read_file", {}, "pair")]),
+                ModelRequest([ToolReturnPart("read_file", "SOURCE_A", "pair")]),
+                ModelResponse([TextPart("RESULT_A")])]
+    for label in ("B", "C", "D"):
+        original.extend([ModelRequest([UserPromptPart("EVENT_" + label)]), ModelResponse([TextPart("RESULT_" + label)])])
+    if merged:
+        original = _clean_message_history([ModelRequest([UserPromptPart("EVENT_" + label)], instructions="SYSTEM_FIXED") for label in "ABCD"])
+    source = ChatHistory()
+    source.set_messages(original)
+    async def compress(**kwargs):
+        calls.append(json.loads(kwargs["user_content"])["transcript"])
+        if len(calls) == 1 or failure:
+            raise ModelHTTPError(400, "fixture", {"message": "Bad schema" if failure == "other" else "This model's maximum context length is 100 tokens."})
+        return "## Facts\nSOURCE_A\n## Next\nKeep remaining events."
+    monkeypatch.setattr(history, "_call_compressor_llm", compress)
+    monkeypatch.setattr(history, "load_prompt", lambda name: "## Facts\n## Next")
+    monkeypatch.setattr(history.logger, "info", lambda *args: None)
+    pending = history.prepare_compression(source, role="worker", force=True,
+        context={"max_context_windows": 100, "auto_compress_ratio": .8, "compress_head_turns": 0, "compress_tail_turns": 1})
+    if failure:
+        with pytest.raises(ModelHTTPError):
+            await pending
+    else:
+        candidate = await pending
+        assert candidate.messages[0].instructions == "SYSTEM_FIXED"
+        assert ([part.content for message in candidate.messages[1:] for part in message.parts] == ["EVENT_B", "EVENT_C", "EVENT_D"] if merged else candidate.messages[1:] == original[4:])
+        assert "EVENT_B" not in calls[1] and all(text in calls[1] for text in (("EVENT_A",) if merged else ("EVENT_A", "SOURCE_A", "RESULT_A")))
+    assert len(calls) == (1 if failure == "other" else 2) and source.messages == original
+
+
+def test_perception_window_keeps_complete_evidence_units_and_manifest():
+    from pydantic_ai import ImageUrl
+    from redlotus.prompts.prompt import window_prompt_content
+
+    payload = {"session_id": "session", "new_turn_ids": ["A", "B"], "evidence_ids": ["A:u0", "B:t0"],
+               "events": [{"id": "A", "user_inputs": ["original A"], "image_urls": [{"url": "https://example.test/a.png"}]},
+                          {"id": "B", "operations": [{"id": "B:t0", "text": "original B"}]}]}
+    original = json.loads(json.dumps(payload))
+    messages = window_prompt_content(payload)
+    assert len(messages) == 3
+    assert json.loads(messages[0].parts[0].content[0])["events"] == [payload["events"][0]]
+    assert isinstance(messages[0].parts[0].content[1], ImageUrl)
+    assert json.loads(messages[1].parts[0].content[0])["events"][0]["operations"][0]["text"] == "original B"
+    manifest = json.loads(messages[2].parts[0].content[0])
+    assert manifest["evidence_ids"] == ["A:u0", "B:t0"] and manifest["new_turn_ids"] == ["A", "B"]
+    assert "events" not in manifest and payload == original
+
+
 async def test_memory_control_wait_uses_config_without_cancelling_production(tmp_path):
-    import asyncio
-    import json
-    from concurrent.futures import Future
 
     from redlotus.core.system import AgentSystem
     from redlotus.memory.service import MemoryService
@@ -107,7 +167,6 @@ async def test_memory_control_wait_uses_config_without_cancelling_production(tmp
 
 
 async def test_non_owner_turns_count_without_reading_or_producing_personal_memory(tmp_path):
-    import json
 
     from redlotus.memory.records import ObservationStore
     from redlotus.memory.service import MemoryService
@@ -135,8 +194,6 @@ async def test_non_owner_turns_count_without_reading_or_producing_personal_memor
 @pytest.mark.parametrize("switch_at", ["queued", "processing", None])
 async def test_background_perception_keeps_its_scheduled_session(monkeypatch, tmp_path, switch_at):
     import threading
-    from concurrent.futures import Future
-    from unittest.mock import AsyncMock, Mock
 
     from redlotus.memory import service as module
     from redlotus.runtime.resources import WorkspaceContext
@@ -191,7 +248,6 @@ async def test_background_perception_keeps_its_scheduled_session(monkeypatch, tm
 
 @pytest.mark.parametrize("invalidate", [False, True])
 async def test_session_switch_waits_for_old_agents_before_releasing_storage(invalidate):
-    from unittest.mock import AsyncMock, Mock
 
     from redlotus.core.system import AgentSystem
 
@@ -268,8 +324,6 @@ def publication(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("transition", ["load", "clear", "project"])
 async def test_direct_memory_retry_blocks_session_changes(publication, tmp_path, transition):
-    import asyncio
-    from unittest.mock import AsyncMock, Mock
 
     from redlotus.ui.console import AgentCliController
 
@@ -308,8 +362,6 @@ async def test_direct_memory_retry_blocks_session_changes(publication, tmp_path,
 @pytest.mark.parametrize("first_finished", [0, 1])
 @pytest.mark.parametrize("picker", [False, True])
 async def test_memory_retry_cannot_enter_during_session_transition(monkeypatch, first_finished, picker):
-    import asyncio
-    from unittest.mock import AsyncMock
 
     from redlotus.ui.cli_commands import SlashCommands
     from redlotus.ui.console import AgentCliController
@@ -359,9 +411,7 @@ async def test_database_failure_cannot_publish_core_memory(publication, monkeypa
 
 @pytest.mark.parametrize("save_fails", [False, True])
 async def test_perception_compaction_saves_before_adoption_and_binds_usage(publication, monkeypatch, tmp_path, save_fails):
-    from unittest.mock import AsyncMock
 
-    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
     from pydantic_ai.usage import RequestUsage
 
     from redlotus.core import history
@@ -428,8 +478,6 @@ async def test_perception_compaction_saves_before_adoption_and_binds_usage(publi
 
 @pytest.mark.parametrize("newer", [False, True])
 async def test_projection_retry_restores_stage_and_never_replays_model_or_database(publication, monkeypatch, newer):
-    import os
-    from pathlib import Path
 
     p = publication
     replace = os.replace
@@ -491,9 +539,6 @@ async def test_candidate_cannot_replace_text_inside_another_managed_record(publi
 
 
 async def test_projection_failure_receipt_reports_formal_commit(publication, monkeypatch):
-    import asyncio
-    import os
-    from pathlib import Path
 
     p = publication
     replace = os.replace
@@ -514,7 +559,6 @@ async def test_projection_failure_receipt_reports_formal_commit(publication, mon
 
 
 async def test_project_only_manual_memory_never_starts_global_production(publication):
-    import json
 
     from pydantic_ai import Tool
 

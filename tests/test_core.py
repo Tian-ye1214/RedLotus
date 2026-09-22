@@ -631,6 +631,7 @@ async def child_executor(tmp_path, monkeypatch):
         monkeypatch.setattr(module, f"get_{role}_system_prompt", lambda *args: "rebuilt")
     orchestrator = module.WorkerOrchestrator(
         toolkit, None, memory=None, registry=registry, persist=persist, factory=factory,
+        user_inputs=lambda: ["Generate directly; no tools."],
     )
     orchestrator.session_file = SessionFile.create(tmp_path / "child", "project")
     orchestrator.set_session_key(orchestrator.session_file.session_id)
@@ -651,6 +652,7 @@ async def test_child_reuses_prompt_and_commits_compression_before_next_request(c
 
     async def run(self, **kwargs):
         assert captured["instructions"] == "original session instructions"
+        assert "Generate directly; no tools." in kwargs["prompt"][0]
         await captured["persist_context"](candidate)
         assert orchestrator.session_file.role_messages(role, agent_id=agent_id) == candidate
         return SimpleNamespace(output=SubagentResult(status="success", summary="done"), all_messages=lambda: candidate)

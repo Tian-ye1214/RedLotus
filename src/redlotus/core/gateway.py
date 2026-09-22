@@ -34,6 +34,7 @@ from redlotus.runtime.network import (
     InputLimitError,
     ModelInputPolicy,
     ModelTarget,
+    context_length_exceeded,
     create_model,
 )
 from redlotus.sessions.context import agent_context, current_agent_id, current_usage_recorder
@@ -110,10 +111,8 @@ class RequestPolicy(AbstractCapability):
             except ModelHTTPError as error:
                 if (
                     attempt or self.usage_category != "auxiliary" or self.persist_context is None
-                    or len(ctx.messages) != 1 or error.status_code != 400
+                    or ctx.run_step != 1 or not context_length_exceeded(error)
                     or "auto_compress_ratio" not in self.target.options["context"]
-                    or not isinstance(error.body, dict)
-                    or not str(error.body.get("message", "")).startswith("This model's maximum context length is ")
                 ):
                     raise
                 self._pending_requests.pop(ctx.run_id, None)

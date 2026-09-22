@@ -24,6 +24,8 @@ redlotus
 
 ## Features
 
+The `1.0.1.post1` candidate (release title: `1.0.1-release`) is being validated on `develop`; it has not been released. This release's agreed validation scope excludes Linux, macOS, live QQ/WeChat accounts, and unconfigured model protocols. Those capabilities remain implemented but unverified for this release. See the [current acceptance record](docs/design.md#状态说明).
+
 | Feature | Description |
 |---------|-------------|
 | Multi-agent orchestration | The Coordinator selects the execution path. For complex work, the Manager creates dependent tasks and Workers execute them in dependency-aware batches. |

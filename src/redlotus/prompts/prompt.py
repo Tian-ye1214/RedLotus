@@ -143,4 +143,13 @@ get_worker_system_prompt = partial(_build_role_prompt, "worker_system.md")
 get_coordinator_system_prompt = partial(_build_role_prompt, "coordinator_system.md")
 
 
-window_prompt_content = partial(json.dumps, ensure_ascii=False)
+def window_prompt_content(payload):
+    """Keep each complete event separable from the immutable window manifest."""
+    from pydantic_ai import ImageUrl
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    packets = [({"events": [event]}, event.get("image_urls", [])) for event in payload["events"]]
+    packets.append(({key: value for key, value in payload.items() if key != "events"}, []))
+    return [ModelRequest([UserPromptPart([
+        json.dumps(packet, ensure_ascii=False), *(ImageUrl(**image) for image in images),
+    ])]) for packet, images in packets]

@@ -10,7 +10,7 @@ from dataclasses import asdict
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from pydantic_ai import ImageUrl, ModelRetry, ToolReturn, capture_run_messages
+from pydantic_ai import ModelRetry, ToolReturn, capture_run_messages
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -193,7 +193,7 @@ class MemoryPerception:
                 Returns:
                     The source ID and full evidence text; unknown IDs are rejected."""
                 if id not in sources:
-                    raise ModelRetry(json.dumps({"error": "memory_evidence_id", "id": id}))
+                    raise ModelRetry(json.dumps({"error": "memory_evidence_id", "id": id, "valid": list(sources)}))
                 return dict(id=id, text=sources[id])
 
             async def read_reference(id: str, part: int = 0):
@@ -325,16 +325,12 @@ class MemoryPerception:
                     toolsets=[FunctionToolset(tools)],
                 )
                 agent.output_validator(validate)
+                evidence = window_prompt_content({**payload, "evidence_ids": list(sources)})
                 with capture_run_messages() as messages:
                     try:
                         result = await agent.run(
-                            with_runtime_context(
-                                [window_prompt_content(payload), *(
-                                    ImageUrl(**image)
-                                    for event in payload["events"]
-                                    for image in event.get("image_urls", [])
-                                )]
-                            ),
+                            with_runtime_context(evidence[-1].parts[0].content),
+                            message_history=evidence[:-1],
                             usage_limits=get_agent_usage_limits(),
                         )
                     finally:

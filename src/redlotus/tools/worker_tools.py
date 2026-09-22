@@ -111,6 +111,7 @@ class WorkerOrchestrator:
         registry,
         persist,
         factory,
+        user_inputs,
     ):
         self._toolkit = toolkit
         self.memory = memory
@@ -118,6 +119,7 @@ class WorkerOrchestrator:
         self._memory_injection_getter = memory_injection_getter or (lambda: "")
         self._registry = registry
         self._persist = persist
+        self._user_inputs = user_inputs
         self.factory = factory
         self.session_file = None
         self._session_key: str | None = None
@@ -145,6 +147,8 @@ class WorkerOrchestrator:
         target = ModelTarget.for_role(role)
         # Snapshot before starting the thread: no mutable messages or clients cross loops.
         messages = copy.deepcopy(messages_safe_for_new_prompt(history.messages))
+        prompt = [json.dumps({"original_user_inputs": self._user_inputs()}, ensure_ascii=False),
+                  *(prompt if isinstance(prompt, list) else [prompt])]
         memory = self._memory_injection_getter()
         spec = SubagentSpec(
             session_key, turn_id, source_toolkit.workspace, role=role
