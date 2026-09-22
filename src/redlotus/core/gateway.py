@@ -46,6 +46,7 @@ class RequestPolicy(AbstractCapability):
         self.follow_config = follow_config
         self.task_state = task_state
         self.persist_context = persist_context
+        self._pending_requests = {}
 
     async def before_model_request(self, ctx, request_context):
         target = ModelTarget.for_role(self.role) if self.follow_config else self.target
@@ -86,6 +87,7 @@ class RequestPolicy(AbstractCapability):
         return request_context
 
     async def after_model_request(self, ctx, *, request_context, response):
+        self._pending_requests.pop(ctx.run_id, None)
         response.metadata = {
             **(response.metadata or {}),
             "usage_category": self.usage_category,
@@ -98,6 +100,27 @@ class RequestPolicy(AbstractCapability):
             await record([response], role=self.role, invocation=ctx.run_id,
                          agent_id=current_agent_id(), cancelling=bool(asyncio.current_task().cancelling()))
         return response
+
+    async def wrap_model_request(self, ctx, *, request_context, handler):
+        """Remember the live SDK context only once model invocation actually begins."""
+        self._pending_requests[ctx.run_id] = ctx, request_context.messages[-1], len(ctx.messages)
+        return await handler(request_context)
+
+    async def on_run_error(self, ctx, *, error):
+        """Retain cancelled request usage without turning control receipts into responses."""
+        pending = self._pending_requests.pop(ctx.run_id, None)
+        if pending and isinstance(error, asyncio.CancelledError):
+            context, request, start = pending
+            response = next((message for message in context.messages[start:]
+                             if isinstance(message, ModelResponse)
+                             and (message.metadata or {}).get("origin") != "execution_status"), None)
+            if response is None:
+                response = ModelResponse(parts=[], model_name=self.model.model_name,
+                                         provider_name=self.model.system, timestamp=request.timestamp,
+                                         state="interrupted", run_id=ctx.run_id,
+                                         metadata={"usage_request_id": f"{ctx.run_id}:{context.run_step}"})
+            await self.after_model_request(context, request_context=None, response=response)
+        raise error
 
     async def on_model_request_error(self, ctx, *, request_context, error):
         cause = error

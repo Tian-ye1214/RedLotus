@@ -7,6 +7,8 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from pydantic_ai import Agent, ModelRetry
+from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -15,9 +17,15 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.usage import RequestUsage
 
-from redlotus.sessions.context import SubagentResult
+from redlotus.core.agents import AgentRegistry, SubagentFactory
+from redlotus.core.gateway import RequestPolicy
+from redlotus.core.history import latest_usage_input_tokens, read_usage_messages, summarize_messages
+from redlotus.core.tasks import TaskManager
+from redlotus.runtime.resources import WorkspaceContext, bind_to_loop, workspace_context
+from redlotus.sessions.context import ChatHistory, SubagentResult, SubagentSpec, current_usage_recorder, make_agent_id
 from redlotus.sessions.control import SessionController
 from redlotus.sessions.storage import SessionFile
+from redlotus.tools.worker_tools import WorkerOrchestrator
 
 
 @pytest.mark.parametrize(("imports", "blocked"), [
@@ -154,7 +162,6 @@ def test_space_recovery_preserves_active_and_current_sessions(tmp_path):
     import errno
     import os
 
-    from redlotus.runtime.resources import WorkspaceContext, workspace_context
     from redlotus.sessions.cleanup import retry_after_storage_cleanup
 
     (tmp_path / "config.json").write_text(json.dumps({"storage": {
@@ -180,7 +187,6 @@ def test_space_recovery_preserves_active_and_current_sessions(tmp_path):
 
 def test_turn_counts_survive_replay_and_reload(tmp_path):
     from redlotus.memory import records
-    from redlotus.runtime.resources import WorkspaceContext
     from redlotus.ui.cli_commands import list_workspace_snapshots
 
     (tmp_path / "config.json").write_text(
@@ -208,7 +214,6 @@ def test_turn_counts_survive_replay_and_reload(tmp_path):
     ModelResponse([ToolSearchCallPart(tool_name="search", tool_call_id="auto_load_fixture")]),
 ])
 def test_local_receipts_do_not_hide_real_model_usage(receipt):
-    from redlotus.core.history import latest_usage_input_tokens, summarize_messages
 
     response = ModelResponse(
         [TextPart("done")], model_name="fixture", provider_name="fixture",
@@ -222,7 +227,6 @@ def test_local_receipts_do_not_hide_real_model_usage(receipt):
 
 
 def test_provider_missing_usage_is_still_unknown():
-    from redlotus.core.history import latest_usage_input_tokens, summarize_messages
 
     messages = [
         ModelResponse([TextPart("known")], usage=RequestUsage(input_tokens=950000)),
@@ -236,7 +240,6 @@ def test_usage_deduplicates_response_identity_across_retries_and_pruning(tmp_pat
     from dataclasses import replace
     from datetime import timedelta
 
-    from redlotus.core.history import read_usage_messages, summarize_messages
 
     storage = SessionFile.create(tmp_path, "usage-project")
     known = ModelResponse([TextPart("answer")], model_name="fixture", provider_name="fixture",
@@ -255,11 +258,9 @@ def test_usage_deduplicates_response_identity_across_retries_and_pruning(tmp_pat
     assert set(summary.by_agent) == {"title", "compressor"}
 
 
-async def test_response_accounting_survives_validation_retry_and_cancellation(tmp_path):
-    from pydantic_ai import Agent, ModelRetry
-    from pydantic_ai.models.function import FunctionModel
+@pytest.mark.parametrize("concurrent", [1, 2])
+async def test_response_accounting_survives_validation_retry_and_cancellation(tmp_path, concurrent):
 
-    from redlotus.core.gateway import RequestPolicy
 
     storage = SessionFile.create(tmp_path, "usage-project")
     controller, waiting = SessionController(), asyncio.Event()
@@ -267,7 +268,10 @@ async def test_response_accounting_survives_validation_retry_and_cancellation(tm
 
     async def respond(messages, info):
         if responses:
-            waiting.set()
+            responses.append(None)
+            messages[-1].timestamp = responses[0].timestamp
+            if len(responses) == concurrent + 1:
+                waiting.set()
             await asyncio.Future()
         response = ModelResponse([TextPart("invalid")], model_name="fixture", provider_name="fixture",
                                  provider_response_id="billed-before-cancel", usage=RequestUsage(input_tokens=17, output_tokens=3))
@@ -284,17 +288,20 @@ async def test_response_accounting_survives_validation_retry_and_cancellation(tm
         raise ModelRetry("Required summary missing")
 
     with controller.usage(storage):
-        task = asyncio.create_task(agent.run("isolated accounting request"))
+        calls = [asyncio.create_task(agent.run("isolated accounting request")) for _ in range(concurrent)]
         await asyncio.wait_for(waiting.wait(), 5)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        for task in calls:
+            task.cancel()
+        outcomes = await asyncio.gather(*calls, return_exceptions=True)
+        assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
     rows = SessionFile.load(storage.path).usage_responses()
-    assert len(rows) == 1 and rows[0]["role"] == "compressor"
+    assert len(rows) == concurrent + 1 and all(row["role"] == "compressor" for row in rows)
+    assert all(row["usage"]["input_tokens"] == 0 and row["category"] == "auxiliary" for row in rows[1:])
     assert rows[0]["usage"]["input_tokens"] == 17
     assert rows[0]["agent_id"] == f"{storage.session_id}:compressor"
     assert rows[0]["invocation"]
     assert rows[0]["category"] == "auxiliary"
+    assert summarize_messages(read_usage_messages(storage.path)[0], price_resolver=lambda model: None).totals.missing_usage_responses == concurrent
 
 
 @pytest.mark.parametrize("role,category", [
@@ -304,7 +311,6 @@ async def test_response_accounting_survives_validation_retry_and_cancellation(tm
 ])
 async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp_path, monkeypatch, role, category):
     from redlotus.core import history
-    from redlotus.core.gateway import RequestPolicy
 
     compacted = []
     async def compact(messages, **kwargs):
@@ -333,7 +339,6 @@ async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(mon
     from pydantic_ai.messages import UserPromptPart
 
     from redlotus.core import history as module
-    from redlotus.sessions.context import ChatHistory
 
     inputs, entered, release = [], asyncio.Event(), asyncio.Event()
     config = {"max_context_windows": 100, "auto_compress_ratio": .9,
@@ -370,7 +375,6 @@ async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(mon
 
 
 async def test_late_usage_keeps_original_session_and_does_not_wait_after_clear(tmp_path, monkeypatch):
-    from redlotus.sessions.context import current_usage_recorder
 
     old = SessionFile.create(tmp_path, "usage-project", session_id="old")
     new = SessionFile.create(tmp_path, "usage-project", session_id="new")
@@ -393,9 +397,6 @@ async def test_late_usage_keeps_original_session_and_does_not_wait_after_clear(t
 
 async def test_cancelled_child_checkpoint_releases_thread_capacity(tmp_path, monkeypatch):
     from redlotus.core import system as system_module
-    from redlotus.core.agents import SubagentFactory
-    from redlotus.runtime.resources import WorkspaceContext, bind_to_loop
-    from redlotus.sessions.context import SubagentSpec
 
     system = object.__new__(system_module.AgentSystem)
     system.workspace = WorkspaceContext.from_path(tmp_path)
@@ -431,7 +432,6 @@ async def test_cancelled_child_checkpoint_releases_thread_capacity(tmp_path, mon
 
 @pytest.fixture
 def task_plan(tmp_path):
-    from redlotus.core.tasks import TaskManager
 
     (tmp_path / "config.json").write_text('{"agent_run_policy":{"max_task_retries":3}}')
     storage = SessionFile.create(tmp_path / "plan", "isolated-project")
@@ -445,7 +445,6 @@ def task_plan(tmp_path):
 
 
 def test_interrupted_task_restores_unverified_without_replaying_side_effects():
-    from redlotus.core.tasks import TaskManager
 
     manager = TaskManager()
     manager.restore([
@@ -459,7 +458,6 @@ def test_interrupted_task_restores_unverified_without_replaying_side_effects():
 
 
 async def test_resume_uses_new_real_input_and_keeps_completed_results(task_plan):
-    from redlotus.core.tasks import TaskManager
 
     manager, storage, inputs = task_plan
     await manager.create_todo_list(json.dumps([
@@ -503,7 +501,6 @@ async def test_unverified_outcomes_never_enter_automatic_retry(task_plan, status
 
 
 async def test_cancellation_while_saving_does_not_erase_completed_work(task_plan, monkeypatch):
-    from redlotus.tools.worker_tools import WorkerOrchestrator
 
     manager, _, _ = task_plan
     await manager.create_todo_list('[{"id":"A","description":"first"}]')
@@ -533,7 +530,6 @@ async def test_cancellation_while_saving_does_not_erase_completed_work(task_plan
 
 
 async def test_dependency_waits_for_durable_completion(task_plan, monkeypatch):
-    from redlotus.tools.worker_tools import WorkerOrchestrator
 
     manager, storage, _ = task_plan
     await manager.create_todo_list('[{"id":"A","description":"first"},{"id":"B","description":"second","dependencies":["A"]}]')
@@ -583,10 +579,7 @@ def test_release_keeps_blocked_worker_context(tmp_path):
 
 @pytest.fixture
 async def child_executor(tmp_path, monkeypatch):
-    from redlotus.core.agents import AgentRegistry, SubagentFactory
     from redlotus.runtime import logging as logger
-    from redlotus.runtime.resources import WorkspaceContext
-    from redlotus.sessions.context import ChatHistory
     from redlotus.tools import worker_tools as module
 
     (tmp_path / "config.json").write_text(
@@ -634,7 +627,6 @@ async def child_executor(tmp_path, monkeypatch):
 @pytest.mark.parametrize("role", ["worker", "manager"])
 async def test_child_reuses_prompt_and_commits_compression_before_next_request(child_executor, monkeypatch, role):
     module, orchestrator, history, captured = child_executor
-    from redlotus.sessions.context import SubagentResult, make_agent_id
 
     candidate = [ModelRequest([], instructions="original session instructions")]
     agent_id = make_agent_id(orchestrator._session_key, role, "A")
@@ -674,11 +666,8 @@ async def test_child_does_not_send_after_compression_save_failure(child_executor
 
 
 async def test_native_sdk_restoration_does_not_duplicate_deferred_catalog():
-    from pydantic_ai import Agent
     from pydantic_ai.capabilities import Capability
-    from pydantic_ai.models.function import FunctionModel
 
-    from redlotus.core.gateway import RequestPolicy
     from redlotus.prompts.prompt import session_prompt_from_history
 
     requests = []

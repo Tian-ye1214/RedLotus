@@ -485,7 +485,7 @@ class SessionFile(SessionJournal):
         changes = {}
         for message in messages:
             if row := _response_usage(message):
-                identity = ":".join(str(value or "") for value in (
+                identity = (message.metadata or {}).get("usage_request_id") or ":".join(str(value or "") for value in (
                     message.provider_name, message.model_name, message.provider_response_id or message.timestamp.isoformat(),
                 ))
                 legacy = _response_id(message)
