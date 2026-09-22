@@ -663,6 +663,7 @@ async def _run_owned_process(
     """Own one external process from creation through timeout or cancellation."""
 
     kwargs = {
+        "stdin": asyncio.subprocess.DEVNULL,
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
         "cwd": cwd,

@@ -16,11 +16,12 @@ import httpx
 import pytest
 import requests
 
+from redlotus.runtime.resources import WorkspaceContext
+from redlotus.tools.base_tools import PendingReviewStore, generate_image_from_flux
+
 
 @pytest.fixture(params=["\n", "\r\n"])
 def reviewed_file(tmp_path, request):
-    from redlotus.tools.base_tools import PendingReviewStore
-
     path = tmp_path / "review.txt"
     path.write_bytes("a{0}keep{0}z{0}".format(request.param).encode())
     store = PendingReviewStore(threading.Lock())
@@ -67,8 +68,6 @@ def test_reject_all_after_partial_rejection_and_another_write(reviewed_file):
 
 
 def test_review_refuses_external_deletion_of_an_empty_original(tmp_path):
-    from redlotus.tools.base_tools import PendingReviewStore
-
     path = tmp_path / "empty.txt"
     path.touch()
     store = PendingReviewStore(threading.Lock())
@@ -108,8 +107,6 @@ def test_failed_write_preserves_file_and_review_state(reviewed_file, monkeypatch
 
 
 def test_rejecting_new_file_removes_only_the_reviewed_version(tmp_path):
-    from redlotus.tools.base_tools import PendingReviewStore
-
     path = tmp_path / "created.txt"
     store = PendingReviewStore(threading.Lock())
     store.activate(lambda: None)
@@ -303,11 +300,30 @@ async def test_inherited_pipe_failure_obeys_configured_cleanup_deadline(tmp_path
         await asyncio.wait_for(_terminate_process_tree(SimpleNamespace(returncode=0, communicate=inherited_pipe)), .5)
 
 
+@pytest.mark.parametrize("shell", [False, True])
+def test_owned_command_cannot_read_cli_input(interactive_python, tmp_path, shell):
+    (tmp_path / "config.json").write_text('{"lifecycle":{"process_termination_timeout_seconds":2}}')
+    (tmp_path / "command.py").write_text("import sys\nassert sys.stdin.read() == ''\nprint(73*79)\n")
+    result = interactive_python(f'''
+import asyncio, shlex, subprocess, sys
+from redlotus.tools.execution import _run_owned_process
+args = [sys.executable, "-S", "command.py"]
+shell_args = subprocess.list2cmdline(args) if sys.platform == "win32" else shlex.join(args)
+result = asyncio.run(_run_owned_process(
+    shell_args if {shell!r} else args,
+    shell={shell!r}, cwd=".", env=None, timeout=3,
+))
+assert result.returncode == 0
+print(result.stdout, end="")
+''')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "5767"
+
+
 @pytest.mark.parametrize("parallelism", [1, 2])
 async def test_reference_parser_keeps_input_order_and_obeys_its_own_concurrency(tmp_path, monkeypatch, parallelism):
 
     from redlotus.runtime.network import ModelInputPolicy
-    from redlotus.runtime.resources import WorkspaceContext
     from redlotus.sessions.control import load_file_refs
     from redlotus.tools.references import ReferenceStore
 
@@ -376,7 +392,6 @@ async def test_browser_launch_uses_explicit_configuration(tmp_path, monkeypatch,
 async def test_subagent_close_joins_its_thread_without_blocking_the_owner_loop(tmp_path):
 
     from redlotus.core.agents import SubagentHandle
-    from redlotus.runtime.resources import WorkspaceContext
     from redlotus.sessions.context import SubagentSpec
 
     release = threading.Event()
@@ -397,7 +412,6 @@ async def test_subagent_close_joins_its_thread_without_blocking_the_owner_loop(t
 def test_cancelled_close_does_not_keep_the_owner_executor_alive(tmp_path):
 
     from redlotus.core.agents import SubagentHandle
-    from redlotus.runtime.resources import WorkspaceContext
     from redlotus.sessions.context import SubagentSpec
 
     started, release, exited = threading.Event(), threading.Event(), threading.Event()
@@ -438,7 +452,6 @@ async def test_reference_download_updates_its_http_timeout_and_keeps_contents(tm
 
 
     from redlotus.runtime.network import ModelInputPolicy, close_all_clients
-    from redlotus.runtime.resources import WorkspaceContext
     from redlotus.tools.references import ReferenceStore
 
     observed = []
@@ -473,7 +486,6 @@ async def test_image_generation_shares_configured_http_and_preserves_explicit_ar
 
     from redlotus.runtime import logging as logger
     from redlotus.runtime.network import close_all_clients
-    from redlotus.tools.base_tools import generate_image_from_flux
 
     monkeypatch.setattr(logger, "_configured_dir", tmp_path)
     (tmp_path / "config.json").write_text(json.dumps({
@@ -520,7 +532,6 @@ async def test_image_deadline_includes_submission_and_cancels_async_io(tmp_path,
 
     from redlotus.runtime import logging as logger
     from redlotus.runtime.network import close_all_clients
-    from redlotus.tools.base_tools import generate_image_from_flux
 
     monkeypatch.setattr(logger, "_configured_dir", tmp_path)
     (tmp_path / "config.json").write_text(json.dumps({
