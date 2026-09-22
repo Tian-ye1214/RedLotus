@@ -79,6 +79,7 @@ class AgentCliController:
         self._ready.set()
         self._admission_lock = asyncio.Lock()
         self._transition = 0
+        self._active_transitions = 0
         self._snapshot_picker: (
             Callable[[list[WorkspaceSnapshot]], Awaitable[SnapshotSelection]]
             | None
@@ -120,11 +121,14 @@ class AgentCliController:
         """Lock admission throughout discovery, selection and restoring the chosen session."""
         if self.is_transitioning:
             return None
+        self._active_transitions += 1
         self._ready.clear()
         try:
             return await self._choose_current_workspace(state=state, force_picker=force_picker)
         finally:
-            self._ready.set()
+            self._active_transitions -= 1
+            if not self._active_transitions:
+                self._ready.set()
 
     async def _choose_current_workspace(self, *, state=None, force_picker=False):
         generation = self.system._session.generation
@@ -188,11 +192,14 @@ class AgentCliController:
         restore: Callable[[], Awaitable[None]] | None = None,
     ) -> bool:
         """Reset or switch a conversation and always reopen the input admission gate."""
+        self._active_transitions += 1
         self._ready.clear()
         self._transition += 1
         try:
             if prepare is not None and not await prepare():
                 return False
+            if self.system._memory._processing.locked():
+                raise ValueError("记忆重试仍在运行，完成后才能切换或清空会话。")
             if restore is not None:
                 await restore()
             else:
@@ -207,7 +214,9 @@ class AgentCliController:
             print_warning(f"会话切换失败，已保留原会话: {exc}")
             raise
         finally:
-            self._ready.set()
+            self._active_transitions -= 1
+            if not self._active_transitions:
+                self._ready.set()
         return True
 
     async def _prewarm_contexts(self) -> None:

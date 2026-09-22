@@ -19,6 +19,7 @@ async def test_memory_control_wait_uses_config_without_cancelling_production(tmp
     pending = Future()
     memory, system = object.__new__(MemoryService), object.__new__(AgentSystem)
     memory._background = SimpleNamespace(_future=pending)
+    memory._processing = asyncio.Lock()
     system._current_turn, system._memory = None, memory
     try:
         async with asyncio.timeout(.2):
@@ -53,6 +54,98 @@ async def test_non_owner_turns_count_without_reading_or_producing_personal_memor
     assert service.session.completed_turns == 1
     assert service.session.turn(event.id)["turn_id"] == "input-id"
     assert not service.session.pending_jobs()
+
+
+@pytest.mark.parametrize("switch_at", ["queued", "processing", None])
+async def test_background_perception_keeps_its_scheduled_session(monkeypatch, tmp_path, switch_at):
+    import threading
+    from concurrent.futures import Future
+    from unittest.mock import AsyncMock, Mock
+
+    from redlotus.memory import service as module
+    from redlotus.runtime.resources import WorkspaceContext
+
+    service = object.__new__(module.MemoryService)
+    old = SimpleNamespace(session_id="old", completed_turns=20, pending_jobs=lambda: ["old-job"])
+    new = SimpleNamespace(session_id="new", completed_turns=40, pending_jobs=lambda: ["new-job"])
+    service.workspace = WorkspaceContext.from_path(tmp_path)
+    service.owner_memory_allowed, service.last_error = True, ""
+    service.observations, service.evidence = SimpleNamespace(bind=lambda storage: None), SimpleNamespace()
+    service._schedule_lock, service._background_running = threading.Lock(), False
+    service._targets = {"old-job": "old-target"}
+    service._perception_factory = SimpleNamespace(
+        start_background=Mock(return_value=SimpleNamespace(_future=Future())), create_registry=lambda: None,
+        create_agent=None,
+    )
+    service.bind_session(old)
+    monkeypatch.setattr(service, "seal_windows", lambda: None)
+    processed = []
+    producer = SimpleNamespace(last_error="old error", close=AsyncMock())
+    producer.bind_session = lambda storage: setattr(producer, "session", storage)
+
+    def switch_session():
+        service.unbind_session()
+        service.bind_session(new)
+        service._pending_end, service._targets = 40, {"new-job": "new-target"}
+        service.last_error, service._background_running = "new error", True
+
+    async def process_pending(*, through):
+        processed.append((producer.session, through, producer._targets))
+        if switch_at == "processing":
+            switch_session()
+
+    producer.process_pending = process_pending
+    monkeypatch.setattr(module, "MemoryService", lambda **kwargs: producer)
+    monkeypatch.setattr(module, "MemoryPerception", lambda *args, **kwargs: None)
+    service.schedule_processing()
+    spec, run = service._perception_factory.start_background.call_args.args
+    assert spec.session_id == "old"
+    if switch_at == "queued":
+        switch_session()
+    await run()
+    assert processed == ([] if switch_at == "queued" else [(old, 20, {"old-job": "old-target"})])
+    if switch_at:
+        assert service.last_error == "new error" and service._background_running
+        assert service._pending_end == 40 and service._targets == {"new-job": "new-target"}
+    else:
+        assert service.last_error == "old error" and not service._background_running
+    if processed:
+        producer.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("invalidate", [False, True])
+async def test_session_switch_waits_for_old_agents_before_releasing_storage(invalidate):
+    from unittest.mock import AsyncMock, Mock
+
+    from redlotus.core.system import AgentSystem
+
+    system = object.__new__(AgentSystem)
+    old = SimpleNamespace(session_id="old", release_use=Mock())
+    new = SimpleNamespace(session_id="new", project_id="project", acquire_use=Mock(), release_use=Mock())
+    system._session_file, system.workspace = old, SimpleNamespace(project_id="project")
+    system._session, system._shutdown_done = SimpleNamespace(generation=0), False
+    system.registry = SimpleNamespace(ensure_agent=AsyncMock())
+    system._memory = SimpleNamespace(unbind_session=Mock(), reset_injection_snapshot=Mock(), bind_session=Mock())
+    system._orchestrator = SimpleNamespace(set_session_key=Mock())
+
+    async def cancel(identity):
+        assert identity == "old" and system._session_file is old
+        old.release_use.assert_not_called()
+        if invalidate:
+            system._session.generation += 1
+
+    system._factory = SimpleNamespace(cancel_session=AsyncMock(side_effect=cancel))
+    if invalidate:
+        with pytest.raises(ValueError, match="加载已取消"):
+            await system.bind_session("new", storage=new, generation=0)
+        assert system._session_file is old
+        old.release_use.assert_not_called()
+        new.release_use.assert_called_once()
+    else:
+        await system.bind_session("new", storage=new, generation=0)
+        assert system._session_file is new
+        old.release_use.assert_called_once()
+    system._factory.cancel_session.assert_awaited_once_with("old")
 
 
 @pytest.fixture
@@ -97,6 +190,84 @@ def publication(tmp_path, monkeypatch):
                            model_calls=model_calls, memory=memory, original=original, records=records)
 
 
+@pytest.mark.parametrize("transition", ["load", "clear", "project"])
+async def test_direct_memory_retry_blocks_session_changes(publication, tmp_path, transition):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+
+    from redlotus.ui.console import AgentCliController
+
+    service = publication.service
+    service.owner_memory_allowed, service._background = True, None
+    service._processing, service._processor, service._paused = asyncio.Lock(), Mock(), lambda: False
+    service._save_job(publication.job)
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def execute(*args, **kwargs):
+        started.set()
+        await finish.wait()
+        return False
+
+    service._execute = execute
+    pending = asyncio.create_task(service.process_pending(recover=True))
+    system = SimpleNamespace(_memory=service, reset_session=AsyncMock(), switch_workspace=AsyncMock(),
+                             last_rejected_input="keep")
+    controller, history, restore = AgentCliController(system), Mock(), AsyncMock()
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        with pytest.raises(ValueError, match="记忆"):
+            await controller.reset_session(history, workspace=tmp_path if transition == "project" else None,
+                                           restore=restore if transition == "load" else None)
+        assert not await service.wait_idle(timeout=0)
+        assert controller._ready.is_set() and system.last_rejected_input == "keep"
+        system.reset_session.assert_not_awaited()
+        system.switch_workspace.assert_not_awaited()
+        restore.assert_not_awaited()
+        history.reset.assert_not_called()
+    finally:
+        finish.set()
+        await pending
+
+
+@pytest.mark.parametrize("first_finished", [0, 1])
+@pytest.mark.parametrize("picker", [False, True])
+async def test_memory_retry_cannot_enter_during_session_transition(monkeypatch, first_finished, picker):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from redlotus.ui.cli_commands import SlashCommands
+    from redlotus.ui.console import AgentCliController
+
+    memory = SimpleNamespace(short_term_snapshot=None, process_pending=AsyncMock(), _processing=asyncio.Lock())
+    controller = AgentCliController(SimpleNamespace(_memory=memory))
+    entered, finish = [asyncio.Event(), asyncio.Event()], [asyncio.Event(), asyncio.Event()]
+
+    async def restore(index):
+        entered[index].set()
+        await finish[index].wait()
+
+    async def choose(**kwargs):
+        return await controller.reset_session(None, restore=lambda: restore(0))
+
+    monkeypatch.setattr(controller, "_choose_current_workspace", choose)
+    tasks = [asyncio.create_task(controller.enter_current_workspace() if picker else choose())]
+    try:
+        await asyncio.wait_for(entered[0].wait(), 2)
+        tasks.append(asyncio.create_task(controller.reset_session(None, restore=lambda: restore(1))))
+        await asyncio.wait_for(entered[1].wait(), 2)
+        finish[first_finished].set()
+        await tasks[first_finished]
+        assert controller.is_transitioning
+        with pytest.raises(ValueError, match="会话"):
+            await SlashCommands(controller, None, "/STM retry").run()
+        memory.process_pending.assert_not_awaited()
+    finally:
+        for event in finish:
+            event.set()
+        await asyncio.gather(*tasks)
+    assert not controller.is_transitioning
+
+
 async def test_database_failure_cannot_publish_core_memory(publication, monkeypatch):
     p = publication
 
@@ -108,6 +279,75 @@ async def test_database_failure_cannot_publish_core_memory(publication, monkeypa
         await p.service._apply(p.job)
     assert p.memory.read() == p.original and not p.formal
     assert not p.job.done
+
+
+@pytest.mark.parametrize("save_fails", [False, True])
+async def test_perception_compaction_saves_before_adoption_and_binds_usage(publication, monkeypatch, tmp_path, save_fails):
+    from unittest.mock import AsyncMock
+
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+    from pydantic_ai.usage import RequestUsage
+
+    from redlotus.core import history
+    from redlotus.core.gateway import RequestPolicy
+    from redlotus.memory.perception import produce_job
+    from redlotus.runtime.resources import WorkspaceContext
+    from redlotus.sessions.context import current_usage_recorder
+    from redlotus.sessions.storage import SessionFile
+
+    p = publication
+    p.job.request, p.job.result = None, None
+    p.job.perception_config = {"model_role": "worker"}
+    p.service.workspace = WorkspaceContext.from_path(tmp_path)
+    p.service.evidence = SimpleNamespace(collect=AsyncMock(return_value=([], {}, [])))
+    p.service.store.all = lambda **kwargs: []
+    monkeypatch.setattr(p.service, "_cleared_at", lambda scope: "")
+    target = SimpleNamespace(name="fixture", options={"context": {"auto_compress_ratio": .9},
+        "limits": {"max_files": 1, "max_file_bytes": 1000, "reference_download_timeout_seconds": 2}})
+    p.service._targets = {p.job.id: target}
+    storage, requests, recorders = p.service.session, [], []
+    candidate = [ModelRequest([UserPromptPart("retained evidence")], instructions="SYSTEM_FIXED")]
+    monkeypatch.setattr(history, "compact_request_messages", AsyncMock(return_value=candidate))
+    role_file = storage.role_file("perception")
+    if save_fails:
+        def fail(*args, **kwargs):
+            raise OSError("perception checkpoint unavailable")
+        monkeypatch.setattr(role_file, "save_context", fail)
+
+    async def produce(payload, references, **callbacks):
+        recorder = current_usage_recorder()
+        assert recorder is not None
+        recorders.append(recorder)
+        original = [ModelRequest([UserPromptPart("original evidence")], instructions="SYSTEM_FIXED")]
+        request = SimpleNamespace(messages=original, model_request_parameters=SimpleNamespace(
+            function_tools=[], output_tools=[], instruction_parts=[]))
+        policy = RequestPolicy("perception", target, SimpleNamespace(settings={}), usage_category="auxiliary",
+                               persist_context=callbacks["persist_context"])
+        try:
+            await policy.before_model_request(None, request)
+        except OSError:
+            assert request.messages is original
+            raise
+        assert role_file.model_messages(agent_id=p.job.id) == candidate
+        requests.append(request.messages)
+        return p.records.PerceptionResult(records=[], reason="No new fact")
+
+    p.service.perception = SimpleNamespace(produce=produce)
+    if save_fails:
+        with pytest.raises(OSError, match="checkpoint unavailable"):
+            await produce_job(p.service, p.job)
+        assert not requests and p.job.result is None
+    else:
+        await produce_job(p.service, p.job)
+        assert requests == [candidate]
+    assert current_usage_recorder() is None
+    p.service.session = SessionFile.create(tmp_path / "other", "isolated", session_id="other")
+    receipt = ModelResponse([TextPart("summary")], usage=RequestUsage(input_tokens=23, output_tokens=5),
+                            metadata={"usage_category": "auxiliary"})
+    await recorders[0]([receipt], role="compressor", invocation="compression", cancelling=False)
+    rows = storage.usage_responses()
+    assert len(rows) == 1 and rows[0]["role"] == "compressor" and rows[0]["usage"]["input_tokens"] == 23
+    assert not p.service.session.usage_responses()
 
 
 @pytest.mark.parametrize("newer", [False, True])

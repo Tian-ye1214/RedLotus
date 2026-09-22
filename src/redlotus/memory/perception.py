@@ -29,8 +29,8 @@ from redlotus.prompts.prompt import (
 )
 from redlotus.runtime.config import get_agent_usage_limits, settings
 from redlotus.runtime.network import ModelTarget, create_model
-from redlotus.runtime.resources import WorkspaceContext, iso_utc_now
-from redlotus.sessions.context import SubagentSpec
+from redlotus.runtime.resources import WorkspaceContext, bind_context, finish_io, iso_utc_now
+from redlotus.sessions.context import SubagentSpec, _USAGE_RECORDER, make_agent_id
 from redlotus.tools.references import ReferenceFile, ReferenceStore
 
 
@@ -85,6 +85,7 @@ class MemoryPerception:
         config: dict | None = None,
         instructions: str | None = None,
         on_messages: Callable | None = None,
+        persist_context: Callable | None = None,
     ) -> PerceptionResult:
         payload = deepcopy(payload)
         config = deepcopy(config or settings()["memory_perception"])
@@ -319,6 +320,7 @@ class MemoryPerception:
                     output_type=PerceptionResult,
                     role="perception",
                     usage_category="auxiliary",
+                    persist_context=persist_context,
                     capabilities=[PerceptionTiming(on_call)],
                     toolsets=[FunctionToolset(tools)],
                 )
@@ -414,6 +416,7 @@ def target_for_job(job, targets):
 
 
 async def produce_job(service, job):
+    storage = service.session
     config = job.perception_config or settings()["memory_perception"]
     job.timings["preparing_at"] = iso_utc_now()
     service._save_job(job)
@@ -434,7 +437,7 @@ async def produce_job(service, job):
         else "perception",
         previous_error=job.error,
         project=str(service.workspace.root),
-        session_id=service.session.session_id,
+        session_id=storage.session_id,
         events=packets,
         existing_records=[
             row.model_dump(mode="json") for row in job.bases.values()
@@ -478,19 +481,26 @@ async def produce_job(service, job):
     target = target_for_job(job, service._targets)
     job.timings["model_started_at"] = iso_utc_now()
     service._save_job(job)
-    result = await service.perception.produce(
-        payload,
-        references,
-        on_usage=usage,
-        on_search=retrieved,
-        on_call=model_call,
-        target=target,
-        config=config,
-        instructions=job.prompt_snapshot or None,
-        on_messages=lambda messages: service.session.record_usage(
-            messages, role="perception", invocation=job.id
-        ),
-    )
+    with bind_context(_USAGE_RECORDER, lambda messages, cancelling=False, agent_id=None, **metadata: finish_io(
+        asyncio.to_thread(storage.record_usage, messages,
+                          agent_id=agent_id or make_agent_id(storage.session_id, metadata["role"]), **metadata)
+    )):
+        result = await service.perception.produce(
+            payload,
+            references,
+            on_usage=usage,
+            on_search=retrieved,
+            on_call=model_call,
+            target=target,
+            config=config,
+            instructions=job.prompt_snapshot or None,
+            on_messages=lambda messages: storage.record_usage(
+                messages, role="perception", invocation=job.id
+            ),
+            persist_context=lambda messages: finish_io(asyncio.to_thread(
+                storage.role_file("perception").save_context, messages, turn_id=job.id, agent_id=job.id,
+            )),
+        )
     if job.request is not None and not result.request_authorized:
         job.result, job.done = result, True
         service._save_job(job)

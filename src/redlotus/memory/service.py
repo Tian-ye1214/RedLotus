@@ -9,6 +9,7 @@ import threading
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
+from functools import partial
 from typing import Literal
 
 from filelock import AsyncFileLock
@@ -65,17 +66,18 @@ class MemoryService:
 
     def bind_session(self, session):
         """Bind storage only: new/load must never schedule automatic perception."""
-        self.session = session
-        self.observations.bind(session)
-        self.evidence.session = session
+        with self._schedule_lock:
+            self.session = session
+            self.observations.bind(session)
+            self.evidence.session = session
 
     def unbind_session(self):
         """Drop volatile state after the owner has cancelled this session's Agents."""
-        self.session = self.current = None
-        self.observations.session = self.evidence.session = None
-        self.last_error = ""
-        self._context_notices = []
         with self._schedule_lock:
+            self.session = self.current = None
+            self.observations.session = self.evidence.session = None
+            self.last_error = ""
+            self._context_notices = []
             self._background = None
             self._background_running = False
             self._pending_end = 0
@@ -456,7 +458,7 @@ class MemoryService:
                 return
             self._background_running = True
             spec = SubagentSpec(self.session.session_id, None, self.workspace, role="perception")
-            self._background = self._perception_factory.start_background(spec, self._drain_background)
+            self._background = self._perception_factory.start_background(spec, partial(self._drain_background, self.session))
             self._background._future.add_done_callback(self._background_finished)
 
     def _background_finished(self, future):
@@ -464,19 +466,23 @@ class MemoryService:
             if self._background is not None and self._background._future is future:
                 self._background_running = False
 
-    async def _drain_background(self):
+    async def _drain_background(self, storage):
         """Own model/database resources in the admitted thread; never inspect other sessions."""
         producer = MemoryService(workspace=self.workspace, factory=self._perception_factory)
-        producer.bind_session(self.session)
+        producer.bind_session(storage)
         producer.perception = MemoryPerception(self.workspace, None, self._perception_factory.create_registry(), create_agent=self._perception_factory.create_agent)
         try:
             while True:
                 with self._schedule_lock:
+                    if self.session is not storage:
+                        return
                     through = self._pending_end
                     producer._targets = deepcopy(self._targets)
                 await producer.process_pending(through=through)
-                self.last_error = producer.last_error
                 with self._schedule_lock:
+                    if self.session is not storage:
+                        return
+                    self.last_error = producer.last_error
                     if through == self._pending_end:
                         self._background_running = False
                         return
@@ -598,6 +604,8 @@ class MemoryService:
             await self._clear("project")
 
     async def wait_idle(self, timeout):
+        if self._processing.locked():
+            return False
         if self._background is None:
             return True
         future = asyncio.wrap_future(self._background._future)

@@ -304,12 +304,13 @@ async def test_response_accounting_survives_validation_retry_and_cancellation(tm
     assert summarize_messages(read_usage_messages(storage.path)[0], price_resolver=lambda model: None).totals.missing_usage_responses == concurrent
 
 
+@pytest.mark.parametrize("checkpoint", [False, True])
 @pytest.mark.parametrize("role,category", [
     ("coordinator", "main"), ("worker", "agent"), ("manager", "agent"),
     ("perception", "auxiliary"), ("title", "auxiliary"),
     ("compressor", "auxiliary"), ("future_helper", "auxiliary"),
 ])
-async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp_path, monkeypatch, role, category):
+async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp_path, monkeypatch, role, category, checkpoint):
     from redlotus.core import history
 
     compacted = []
@@ -319,11 +320,12 @@ async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp
     monkeypatch.setattr(history, "compact_request_messages", compact)
     target = SimpleNamespace(name="shared-worker-model", protocol="fixture", options={"context": {"auto_compress_ratio": .9},
                              "limits": {"max_files": 1, "max_file_bytes": 1000, "reference_download_timeout_seconds": 2}})
-    policy = RequestPolicy(role, target, SimpleNamespace(settings={}), usage_category=category)
+    policy = RequestPolicy(role, target, SimpleNamespace(settings={}), usage_category=category,
+                           persist_context=compact if checkpoint else None)
     request = SimpleNamespace(messages=[ModelRequest([])], model_request_parameters=SimpleNamespace(
         function_tools=[], output_tools=[], instruction_parts=[]))
     await policy.before_model_request(None, request)
-    assert bool(compacted) == (category != "auxiliary")
+    assert bool(compacted) == (category != "auxiliary" or checkpoint)
     response = ModelResponse([TextPart("receipt")], model_name="shared-worker-model",
                              provider_response_id="same-receipt", usage=RequestUsage(input_tokens=17, output_tokens=3))
     await policy.after_model_request(SimpleNamespace(run_id="first"), request_context=None, response=response)

@@ -126,6 +126,8 @@ class AgentSystem:
         try:
             await self.registry.ensure_agent(session_key, "coordinator")
             await self.registry.ensure_agent(session_key, "manager")
+            if previous is not None and previous is not storage:
+                await self._factory.cancel_session(previous.session_id)
             if generation is not None and (generation != self._session.generation or self._shutdown_done):
                 raise ValueError("加载已取消；目标会话未提交")
             if task_title is not None:

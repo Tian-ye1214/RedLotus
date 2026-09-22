@@ -489,6 +489,8 @@ class SlashCommands:
         render = _format_ltm_snapshot if global_scope else _format_stm_snapshot
         action = self.parts[1].lower() if len(self.parts) > 1 else "show"
         if action == "retry":
+            if self.controller.is_transitioning:
+                raise ValueError("会话正在切换，完成后才能重试记忆处理。")
             await memory.process_pending(recover=True)
         elif action == "show":
             print_markdown_panel(render(await snapshot()), title=label)
