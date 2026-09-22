@@ -335,17 +335,18 @@ async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp
     assert rows[0]["usage"]["input_tokens"] == 17
 
 
-@pytest.mark.parametrize("capacity,output,used,threshold,compresses", [
-    (100, 40, 53, 54, False), (None, 40, 54, 54, True),
-    (100, None, 89, 90, False), (None, None, 90, 90, True),
+@pytest.mark.parametrize("capacity,output,ratio,used,threshold,compresses", [
+    (100, 40, .9, 53, 54, False), (None, 40, .9, 54, 54, True),
+    (100, None, .9, 89, 90, False), (None, None, .9, 90, 90, True),
+    (125, 100, .28, 7, 7, True),
 ])
-async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(monkeypatch, capacity, output, used, threshold, compresses):
+async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(monkeypatch, capacity, output, ratio, used, threshold, compresses):
     from pydantic_ai.messages import UserPromptPart
 
     from redlotus.core import history as module
 
     inputs, entered, release = [], asyncio.Event(), asyncio.Event()
-    config = {"max_context_windows": capacity, "max_tokens": output, "auto_compress_ratio": .9,
+    config = {"max_context_windows": capacity, "max_tokens": output, "auto_compress_ratio": ratio,
               "compress_head_turns": 0, "compress_tail_turns": 0}
     monkeypatch.setattr(module, "get_context_config", lambda role: config)
     monkeypatch.setattr(module, "get_model_and_params", lambda role: ("fixture", {}))

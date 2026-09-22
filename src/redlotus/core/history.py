@@ -46,7 +46,7 @@ class CompressionValidationError(RuntimeError):
 
 def _compression_threshold(capacity, context):
     """Reserve the configured output allowance; unset output remains provider-managed."""
-    return ceil((capacity - (context.get("max_tokens") or 0)) * float(context["auto_compress_ratio"]))
+    return ceil((capacity - (context.get("max_tokens") or 0)) * Decimal(str(context["auto_compress_ratio"])))
 
 
 def context_usage_breakdown(
