@@ -454,5 +454,5 @@ def get_context_profile_roles() -> tuple[str, ...]:
 
 def get_context_config(role: str, *, cfg=None) -> dict[str, Any]:
     _, parameters = get_model_and_params(role, cfg=cfg)
-    fields = ("max_context_windows", "auto_compress_ratio", "compress_head_turns", "compress_tail_turns")
+    fields = ("max_context_windows", "max_tokens", "auto_compress_ratio", "compress_head_turns", "compress_tail_turns")
     return {key: parameters[key] for key in fields if key in parameters}

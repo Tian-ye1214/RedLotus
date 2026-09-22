@@ -7,6 +7,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
+from math import ceil
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -43,6 +44,11 @@ class CompressionValidationError(RuntimeError):
     """压缩摘要或写回消息不满足可恢复检查点契约。"""
 
 
+def _compression_threshold(capacity, context):
+    """Reserve the configured output allowance; unset output remains provider-managed."""
+    return ceil((capacity - (context.get("max_tokens") or 0)) * float(context["auto_compress_ratio"]))
+
+
 def context_usage_breakdown(
     role: str,
     history_messages: list,
@@ -52,7 +58,7 @@ def context_usage_breakdown(
     max_tokens = get_effective_max_context(role=role)
     used = latest_usage_input_tokens(history_messages)
     total = int(used or 0)
-    threshold = int(max_tokens * float(ctx["auto_compress_ratio"]))
+    threshold = _compression_threshold(max_tokens, ctx)
     percent = 0.0 if max_tokens <= 0 else min(100.0, total * 100.0 / max_tokens)
     return {
         "has_usage": used is not None,
@@ -177,7 +183,7 @@ async def prepare_compression(
     ctx = get_context_config(role) if context is None else context
     max_ctx = await get_effective_max_context_async(role=role, context=ctx)
     used = latest_usage_input_tokens(messages)
-    threshold = max_ctx * float(ctx["auto_compress_ratio"])
+    threshold = _compression_threshold(max_ctx, ctx)
 
     if not force and (used is None or used < threshold):
         return None
@@ -322,11 +328,12 @@ async def compact_request_messages(
 ) -> list:
     """Build the bounded model view; original trace persistence belongs to the runner."""
     request = combined[-1]
-    context = target.options["context"] if target else get_context_config(role)
+    context = ({**target.options["context"], "max_tokens": target.options["settings"].get("max_tokens")}
+               if target else get_context_config(role))
     limit = await get_effective_max_context_async(
         model_name=target.name if target else None, role=role, context=context
     )
-    threshold = limit * float(context["auto_compress_ratio"])
+    threshold = _compression_threshold(limit, context)
     recent_tokens = latest_usage_input_tokens(combined)
     if recent_tokens is None or recent_tokens < threshold:
         return combined

@@ -335,15 +335,21 @@ async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp
     assert rows[0]["usage"]["input_tokens"] == 17
 
 
-async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(monkeypatch):
+@pytest.mark.parametrize("capacity,output,used,threshold,compresses", [
+    (100, 40, 53, 54, False), (None, 40, 54, 54, True),
+    (100, None, 89, 90, False), (None, None, 90, 90, True),
+])
+async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(monkeypatch, capacity, output, used, threshold, compresses):
     from pydantic_ai.messages import UserPromptPart
 
     from redlotus.core import history as module
 
     inputs, entered, release = [], asyncio.Event(), asyncio.Event()
-    config = {"max_context_windows": 100, "auto_compress_ratio": .9,
+    config = {"max_context_windows": capacity, "max_tokens": output, "auto_compress_ratio": .9,
               "compress_head_turns": 0, "compress_tail_turns": 0}
     monkeypatch.setattr(module, "get_context_config", lambda role: config)
+    monkeypatch.setattr(module, "get_model_and_params", lambda role: ("fixture", {}))
+    monkeypatch.setattr(module, "lookup_model_context", lambda model: 100)
     monkeypatch.setattr(module, "load_prompt", lambda name: "## Facts\n## Next")
     monkeypatch.setattr(module.logger, "info", lambda *args: None)
 
@@ -355,8 +361,16 @@ async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(mon
     sources = {role: ChatHistory() for role in ("coordinator", "manager")}
     for source in sources.values():
         source.set_messages([ModelRequest([UserPromptPart("calculate 19+23")], instructions="SYSTEM_FIXED"),
-                             ModelResponse([TextPart("42")])])
+                             ModelResponse([TextPart("42")], usage=RequestUsage(input_tokens=used)),
+                             ModelRequest([UserPromptPart("continue")], instructions="SYSTEM_FIXED")])
     original = {role: list(source.messages) for role, source in sources.items()}
+    assert module.context_usage_breakdown("coordinator", source.messages)["threshold"] == threshold
+    assert bool(await module.prepare_compression(source, role="coordinator", force=False)) == compresses
+    target = SimpleNamespace(name="fixture", options={"context": {key: value for key, value in config.items() if key != "max_tokens"},
+                                                     "settings": {"max_tokens": output}})
+    monkeypatch.setitem(config, "max_tokens", 99)
+    assert (await module.compact_request_messages(source.messages, role="coordinator", target=target) is not source.messages) == compresses
+    inputs.clear()
 
     async def failed_save(candidates):
         assert all(candidate.messages[0].instructions == "SYSTEM_FIXED" for candidate in candidates.values())
