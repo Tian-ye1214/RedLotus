@@ -137,10 +137,7 @@ def test_atomic_write_preserves_native_encoding_and_original_on_replace_failure(
     resources.atomic_write(path, content, encoding=encoding)
     assert path.read_bytes() == native.read_bytes()
 
-    def denied(*args):
-        raise PermissionError("isolated replace failure")
-
-    monkeypatch.setattr(resources.os, "replace", denied)
+    monkeypatch.setattr(resources.os, "replace", MagicMock(side_effect=PermissionError("isolated replace failure")))
     with pytest.raises(PermissionError, match="replace failure"):
         resources.atomic_write(path, content[:1], encoding=encoding)
     assert path.read_bytes() == native.read_bytes()
@@ -217,13 +214,17 @@ def test_application_structure_keeps_approved_module_and_effective_line_limits()
     assert len(counts) <= 8 and max(counts.values()) <= 5, dict(counts)
 
 
-async def test_toolset_telemetry_preserves_results_without_execution_policy(tmp_path, monkeypatch):
+@pytest.mark.parametrize("original", ["original", "north\r\nsouth\r\n", "north\nsouth\n", r"north\r\nsouth\r\n", "北\r\n南\n末\r", 'quote"\\\t\0'])
+async def test_toolset_telemetry_preserves_results_without_execution_policy(tmp_path, monkeypatch, original):
     from pydantic_ai import ToolReturn
 
     from redlotus.core.gateway import create_function_toolset
 
     (tmp_path / "config.json").write_text('{"lifecycle":{"trace_history_turns":10},"ui":{"tool_argument_preview_chars":80,"tool_keyword_limit":5,"tool_positional_limit":3}}')
-    result = ToolReturn(return_value="original")
+    (tmp_path / "original.txt").write_bytes(original.encode("utf-8"))
+    result = BasicToolkit.read_file(SimpleNamespace(_readable_path=tmp_path.joinpath), "original.txt")
+    assert isinstance(result, ToolReturn)
+    assert result.return_value == json.loads(result.content[0])["text"] == original
     notices = []
     monkeypatch.setattr(registry.logger, "debug", notices.append)
 
@@ -237,12 +238,12 @@ async def test_toolset_telemetry_preserves_results_without_execution_policy(tmp_
         raise ValueError("actual tool failure")
 
     tools = create_function_toolset([sync_tool, async_tool, failed_tool]).tools
-    with turn_context("telemetry-contract"):
+    with turn_context(str(tmp_path)):
         assert tools["sync_tool"].function() is result
         assert await tools["async_tool"].function() is result
         with pytest.raises(ValueError, match="actual tool failure"):
             tools["failed_tool"].function()
-    events = TRACE_STORE.events_for_turn("telemetry-contract")
+    events = TRACE_STORE.events_for_turn(str(tmp_path))
     assert len(notices) == 3
     assert [(e["tool_name"], e["success"]) for e in events] == [
         ("sync_tool", True), ("async_tool", True), ("failed_tool", False),
@@ -291,11 +292,8 @@ async def test_inherited_pipe_failure_obeys_configured_cleanup_deadline(tmp_path
 
     (tmp_path / "config.json").write_text('{"lifecycle":{"process_termination_timeout_seconds":0.02}}')
 
-    async def inherited_pipe():
-        await asyncio.Event().wait()
-
     with pytest.raises(RuntimeError, match="inherited pipes remain open"):
-        await asyncio.wait_for(_terminate_process_tree(SimpleNamespace(returncode=0, communicate=inherited_pipe)), .5)
+        await asyncio.wait_for(_terminate_process_tree(SimpleNamespace(returncode=0, communicate=asyncio.Event().wait)), .5)
 
 
 @pytest.mark.parametrize("shell", [False, True])

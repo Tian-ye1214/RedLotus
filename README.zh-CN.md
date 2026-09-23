@@ -243,4 +243,4 @@ pyinstaller build.spec
 
 项目主要代码位于 `src/redlotus/`，分为 `runtime`、`sessions`、`core`、`tools`、`memory`、`prompts`、`ui`、`api` 八个模块；命令入口为 `redlotus.api.base:main`。
 
-当前结构整改与发布验收尚未完成。源码和独立安装 wheel 各通过 234 项辅助回归；当前真实 API 验收因服务余额不足中断，缓存目标和严格 CRLF 复制尚未通过。测试必须包含源码、日常 pip 和实际打包入口，成功构建和隔离故障回归不能单独作为通过依据。详见[验收记录](docs/design.md#状态说明)及[开发约定](docs/development.md)。
+当前结构整改与发布验收尚未完成。充值后已恢复真实 API 验收，前一候选四入口的浏览器读取、截图和关闭通过。字符视图修改后源码通过 239 项辅助回归；CRLF 原题最终字节正确，但模型首次写入仍错，新制品与严格复制继续验证。最终长测、缓存目标和发布后验收仍未通过。测试必须包含源码、日常 pip 和实际打包入口，成功构建和隔离故障回归不能单独作为通过依据。详见[验收记录](docs/design.md#状态说明)及[开发约定](docs/development.md)。

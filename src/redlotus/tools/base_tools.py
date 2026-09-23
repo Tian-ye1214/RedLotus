@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import inspect
+import json
 import mimetypes
 import platform as _platform
 import re
@@ -298,10 +299,11 @@ class BasicToolkit:
             content=reference.to_prompt(),
         )
 
-    def read_file(self, name: str) -> str:
+    def read_file(self, name: str) -> str | ToolReturn:
         """
         Read the current on-disk version of a project text file.
         UTF-8 text retains its original LF or CRLF line endings; preserve them for an exact copy.
+        A supplemental JSON text view makes control characters and literal backslashes explicit.
         Use for source code, generated artifacts, changes since a reference was captured,
         or an explicit reread. Reference blocks already contain the stated snapshot content;
         use read_reference for that immutable version when it is absent from context.
@@ -310,10 +312,11 @@ class BasicToolkit:
             name: File name/path
         """
         try:
-            return (
+            content = (
                 self._readable_path(name).read_bytes().decode("utf-8", errors="replace")
                 or "File is empty"
             )
+            return ToolReturn(return_value=content, content=[json.dumps({"text": content}, ensure_ascii=False)])
         except (OSError, ValueError) as exc:
             return f"Error reading '{name}': {exc}"
 
