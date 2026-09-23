@@ -544,15 +544,15 @@ class AgentSystem:
             )
             if self._memory.current is not None:
                 event = self._memory.current
+                event.user_inputs = list(self._session.user_inputs)
                 event.reference_ids = list(
                     dict.fromkeys(
                         [*event.reference_ids, *(ref.id for ref in message.references)]
                     )
                 )
                 await self._durable_write(lambda: self._memory.observations.save(event))
-            self._current_attachments.extend(message.attachments)
             self._current_attachments.extend(
-                part for ref in message.references for part in ref.to_prompt()
+                [*message.attachments, *(part for ref in message.references for part in ref.to_prompt())]
             )
         return [
             *prompts,

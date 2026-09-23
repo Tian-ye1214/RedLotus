@@ -732,7 +732,7 @@
         },
         "auto_compress_ratio": {
           "type": "number",
-          "description": "按服务端输入 Token 触发自动压缩；阈值为（上下文容量－已配置最大输出 Token）×该比例，输出上限缺失或 null 时无法预留服务端决定的输出空间",
+          "description": "按服务端输入 Token 触发自动压缩；阈值为 min(上下文容量×该比例, 上下文容量－已配置最大输出 Token)，输出上限缺失或 null 时无法预留服务端决定的输出空间",
           "exclusiveMinimum": 0,
           "maximum": 1
         },

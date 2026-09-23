@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
@@ -14,7 +15,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-import requests
 from filelock import FileLock, Timeout
 
 from redlotus.core.agents import SubagentHandle
@@ -26,16 +26,6 @@ from redlotus.tools import base_tools, execution, registry
 from redlotus.tools.base_tools import BasicToolkit, PendingReviewStore, generate_image_from_flux
 from redlotus.tools.execution import PlaywrightBrowserSession, _terminate_process_tree
 from redlotus.tools.references import DocumentReader, ReferenceStore
-
-
-@pytest.fixture(params=["\n", "\r\n"])
-def reviewed_file(tmp_path, request):
-    path = tmp_path / "review.txt"
-    path.write_bytes("a{0}keep{0}z{0}".format(request.param).encode())
-    store = PendingReviewStore(threading.Lock())
-    store.activate(lambda: None)
-    store.write(path, path.name, lambda _: "A{0}keep{0}Z{0}".format(request.param))
-    return path, store, request.param
 
 
 @pytest.mark.parametrize("decision", [None, False, True])
@@ -93,18 +83,11 @@ def test_review_refuses_external_deletion_of_an_empty_original(tmp_path):
 
 
 @pytest.mark.parametrize("operation", ["write", "reject"])
-def test_failed_write_preserves_file_and_review_state(reviewed_file, monkeypatch, operation):
+def test_failed_write_preserves_file_and_review_state(reviewed_file, partial_write_failure, operation):
 
     path, store, _ = reviewed_file
     entry = store.get(str(path))
     original = path.read_bytes()
-    original_write = Path.write_bytes
-
-    def fail_write(target, content, *args, **kwargs):
-        original_write(target, content[:1], *args, **kwargs)
-        raise OSError("injected disk failure")
-
-    monkeypatch.setattr(Path, "write_bytes", fail_write)
     with pytest.raises(OSError, match="disk failure"):
         if operation == "write":
             store.write(path, path.name, lambda _: "replacement")
@@ -112,6 +95,7 @@ def test_failed_write_preserves_file_and_review_state(reviewed_file, monkeypatch
             store.decide(entry, 0, True)
     assert path.read_bytes() == original
     assert store.get(str(path)) is entry and not entry.decisions
+    assert set(path.parent.iterdir()) == {path}
 
 
 def test_rejecting_new_file_removes_only_the_reviewed_version(tmp_path):
@@ -130,24 +114,110 @@ def test_rejecting_new_file_removes_only_the_reviewed_version(tmp_path):
 def test_atomic_write_preserves_native_encoding_and_original_on_replace_failure(tmp_path, monkeypatch, content, encoding):
 
     path, native = tmp_path / "owned.bin", tmp_path / "native.bin"
+    legacy = path.with_suffix(".bin.tmp")
+    legacy.write_bytes(b"owner's unrelated temporary file")
     if isinstance(content, str):
         native.write_text(content, encoding=encoding)
     else:
         native.write_bytes(content)
     resources.atomic_write(path, content, encoding=encoding)
     assert path.read_bytes() == native.read_bytes()
+    assert legacy.read_bytes() == b"owner's unrelated temporary file"
+    assert set(tmp_path.iterdir()) == {path, native, legacy}
 
     monkeypatch.setattr(resources.os, "replace", MagicMock(side_effect=PermissionError("isolated replace failure")))
     with pytest.raises(PermissionError, match="replace failure"):
         resources.atomic_write(path, content[:1], encoding=encoding)
     assert path.read_bytes() == native.read_bytes()
+    assert legacy.read_bytes() == b"owner's unrelated temporary file"
+    assert set(tmp_path.iterdir()) == {path, native, legacy}
+
+
+def test_atomic_write_uses_distinct_owned_temporaries_for_concurrent_writers(tmp_path, monkeypatch):
+    path, legacy = tmp_path / "report.txt", tmp_path / "report.txt.tmp"
+    legacy.write_bytes(b"owner")
+    replace, barrier, commit, names = resources.os.replace, threading.Barrier(2), threading.Lock(), []
+
+    def overlap(source, destination):
+        names.append(Path(source))
+        barrier.wait(timeout=3)
+        with commit:  # Staging overlaps; native Windows destination renames are ordered.
+            replace(source, destination)
+
+    monkeypatch.setattr(resources.os, "replace", overlap)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        futures = [workers.submit(resources.atomic_write, path, value) for value in (b"A" * 4096, b"B" * 4096)]
+        for future in futures:
+            future.result(timeout=5)
+    assert len(set(names)) == 2 and all(name.parent == tmp_path for name in names)
+    assert path.read_bytes() in (b"A" * 4096, b"B" * 4096)
+    assert legacy.read_bytes() == b"owner" and set(tmp_path.iterdir()) == {path, legacy}
+
+
+def test_finishing_review_keeps_a_concurrent_worker_version(reviewed_file, monkeypatch):
+    path, store, _ = reviewed_file
+    old = store.get(str(path))
+    for hunk in old.hunks:
+        assert store.decide(old, hunk.index, False)
+    captured, resume = threading.Event(), threading.Event()
+    entries = store.entries
+
+    def snapshot():
+        result = entries()
+        captured.set()
+        assert resume.wait(3)
+        return result
+
+    monkeypatch.setattr(store, "entries", snapshot)
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        pending = worker.submit(store.finish_decided)
+        try:
+            assert captured.wait(3)
+            store.write(path, path.name, lambda previous: previous + "Worker's new version\n")
+            current = store.get(str(path))
+        finally:
+            resume.set()
+        pending.result(timeout=5)
+    assert current is not old and store.get(str(path)) is current and not current.decisions
+    store.finish_decided()
+    assert store.get(str(path)) is current
+    for hunk in current.hunks:
+        assert store.decide(current, hunk.index, False)
+    store.finish_decided()
+    assert store.get(str(path)) is None
+
+
+def test_search_does_not_read_files_beyond_a_project_junction(project_junction):
+    toolkit, link = project_junction
+    assert (link / "secret.txt").read_text() == "boundary-marker outside"
+    with pytest.raises(ValueError, match="Path not allowed"):
+        toolkit._readable_path(str(link / "secret.txt"))
+    result = toolkit.search_in_files("boundary-marker", ".txt")
+    assert "inside.txt:1: boundary-marker inside" in result
+    assert "outside" not in result and "secret.txt" not in result
+
+
+@pytest.mark.parametrize("destination", ["project", "absolute-skill", "skill-alias"])
+async def test_browser_screenshot_preserves_read_only_skills(tool_workspace, destination):
+    toolkit, skill = tool_workspace
+    skill.write_bytes(b"packaged skill")
+    assert toolkit.read_file(str(skill)).return_value == "packaged skill"
+    browser = toolkit._browser_session
+    browser._page = SimpleNamespace(screenshot=AsyncMock(side_effect=lambda path, **kwargs: Path(path).write_bytes(b"screenshot")))
+    name = {"project": "screens/new.png", "absolute-skill": str(skill), "skill-alias": "skills/asset.png"}[destination]
+    if destination == "project":
+        assert "Screenshot saved" in await browser.browser_screenshot.__wrapped__(browser, name, full_page=True)
+        assert (toolkit.workspace.root / name).read_bytes() == b"screenshot"
+        browser._page.screenshot.assert_awaited_once_with(path=str(toolkit.workspace.root / name), full_page=True)
+    else:
+        with pytest.raises(ValueError, match="Path not under current project"):
+            await browser.browser_screenshot.__wrapped__(browser, name)
+        browser._page.screenshot.assert_not_awaited()
+    assert skill.read_bytes() == b"packaged skill"
 
 
 @pytest.mark.parametrize("timeout", [0, .05])
 def test_shared_file_lock_obeys_configured_wait_under_real_contention(tmp_path, timeout):
-    from concurrent.futures import ThreadPoolExecutor
-
-
     path = tmp_path / "owned.json"
 
     def acquire():
@@ -324,34 +394,12 @@ print(result.stdout, end="")
 
 
 @pytest.mark.parametrize("parallelism", [1, 2])
-async def test_reference_parser_keeps_input_order_and_obeys_its_own_concurrency(tmp_path, monkeypatch, parallelism):
-
+async def test_reference_parser_keeps_input_order_and_obeys_its_own_concurrency(reference_inputs, tmp_path, parallelism):
     from redlotus.sessions.control import load_file_refs
 
-    (tmp_path / "config.json").write_text(json.dumps({
-        "input_limits": {"parse_concurrency": parallelism},
-        "storage": {"file_lock_timeout_seconds": 2, "references_dir": "references"},
-    }))
-    paths = [tmp_path / f"input-{n}.txt" for n in range(4)]
-    for path in paths:
-        path.write_text(path.stem, encoding="utf-8")
-    policy = ModelInputPolicy(max_files=4, max_file_bytes=1000, reference_download_timeout_seconds=2)
-    monkeypatch.setattr(ModelInputPolicy, "for_role", lambda role: policy)
-    parse, active, peak = ReferenceStore.parse, 0, 0
-
-    async def observe(self, reference):
-        nonlocal active, peak
-        active += 1
-        peak = max(peak, active)
-        try:
-            await asyncio.sleep(.03)
-            return await parse(self, reference)
-        finally:
-            active -= 1
-
-    monkeypatch.setattr(ReferenceStore, "parse", observe)
+    paths, observed = reference_inputs
     result = await load_file_refs(" ".join(f'@"{path}"' for path in paths), workspace=WorkspaceContext.from_path(tmp_path))
-    assert peak == parallelism and active == 0
+    assert observed == {"peak": parallelism, "active": 0}
     assert [reference.parts[0].text for reference in result] == [path.stem for path in paths]
 
 
@@ -360,19 +408,8 @@ async def test_reference_parser_keeps_input_order_and_obeys_its_own_concurrency(
     (0, False, {"width": 800, "height": 600}, "fr-FR"),
     ("YES", True, {"width": 640, "height": 480}, "zh-CN"),
 ])
-async def test_browser_launch_uses_explicit_configuration(tmp_path, monkeypatch, headless, expected, viewport, locale):
-
-    from playwright import async_api
-
-    (tmp_path / "config.json").write_text(json.dumps({
-        "BROWSER_HEADLESS": headless, "browser": {"viewport": viewport, "locale": locale},
-    }))
-    new_page = AsyncMock(return_value=object())
-    launch = AsyncMock(return_value=SimpleNamespace(new_page=new_page))
-    stop = AsyncMock()
-    start = AsyncMock(return_value=SimpleNamespace(chromium=SimpleNamespace(launch=launch), stop=stop))
-    monkeypatch.setattr(async_api, "async_playwright", lambda: SimpleNamespace(start=start))
-    browser = PlaywrightBrowserSession(None)
+async def test_browser_launch_uses_explicit_configuration(browser_startup, headless, expected, viewport, locale):
+    browser, launch, new_page, stop = browser_startup
     await browser._start()
     launch.assert_awaited_once_with(headless=expected)
     new_page.assert_awaited_once_with(viewport=viewport, locale=locale)
@@ -466,89 +503,29 @@ async def test_reference_download_updates_its_http_timeout_and_keeps_contents(tm
 
 
 @pytest.mark.parametrize("overrides", [{}, {"width": 128, "height": 96, "max_wait_time": 5}])
-async def test_image_generation_shares_configured_http_and_preserves_explicit_arguments(tmp_path, monkeypatch, overrides):
-
-
-    monkeypatch.setattr(logger, "_configured_dir", tmp_path)
-    (tmp_path / "config.json").write_text(json.dumps({
-        "BFL_BASE_URL": "https://fixture.invalid/generate", "BFL_API_KEY": "synthetic-test-key", "input_limits": {"max_redirects": 1},
-        "image_generation": {"width": 64, "height": 32, "max_wait_seconds": 2, "http_timeout_seconds": 3,
-                             "poll_interval_seconds": .01, "progress_every_polls": 1},
-    }))
-    observed, sleeps, polls = [], [], []
-
-    def respond(request):
-        observed.append(request)
-        if request.method == "POST":
-            return httpx.Response(200, json={"id": "fixture", "polling_url": "https://fixture.invalid/poll"})
-        if request.url.path == "/poll":
-            polls.append(True)
-            return httpx.Response(200, json={"status": "Pending"} if len(polls) == 1 else {
-                "status": "Ready", "result": {"sample": "https://fixture.invalid/image"}})
-        if request.url.path == "/image":
-            return httpx.Response(302, headers={"location": "https://cdn.invalid/final-image"})
-        return httpx.Response(200, content=b"complete image", headers={"content-type": "image/png"})
-
-    transport = httpx.MockTransport(respond)
-    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=transport))
-    monkeypatch.setattr(asyncio, "sleep", AsyncMock(side_effect=sleeps.append))
-    with httpx.Client(transport=transport) as legacy:
-        monkeypatch.setattr(requests, "post", legacy.post)
-        monkeypatch.setattr(requests, "get", legacy.get)
-        try:
-            result = await generate_image_from_flux("isolated fixture", **overrides)
-            assert result[:2] == (b"complete image", "image/png")
-            assert json.loads(observed[0].content) == {"prompt": "isolated fixture", "width": overrides.get("width", 64), "height": overrides.get("height", 32)}
-            assert all(request.extensions["timeout"]["read"] == 3 for request in observed)
-            assert sleeps == [.01]
-            assert "x-key" not in observed[-1].headers
-        finally:
-            await close_all_clients()
+async def test_image_generation_shares_configured_http_and_preserves_explicit_arguments(image_responses, overrides):
+    observed, sleeps = image_responses
+    result = await generate_image_from_flux("isolated fixture", **overrides)
+    assert result[:2] == (b"complete image", "image/png")
+    assert json.loads(observed[0].content) == {"prompt": "isolated fixture", "width": overrides.get("width", 64), "height": overrides.get("height", 32)}
+    assert all(request.extensions["timeout"]["read"] == 3 for request in observed)
+    assert sleeps == [.01]
+    assert "x-key" not in observed[-1].headers
 
 
 @pytest.mark.parametrize("phase", ["submission", "poll", "download", "cancel"])
-async def test_image_deadline_includes_submission_and_cancels_async_io(tmp_path, monkeypatch, phase):
-
-
-    monkeypatch.setattr(logger, "_configured_dir", tmp_path)
-    (tmp_path / "config.json").write_text(json.dumps({
-        "BFL_BASE_URL": "https://fixture.invalid/generate", "BFL_API_KEY": "synthetic-test-key", "input_limits": {"max_redirects": 1},
-        "image_generation": {"width": 64, "height": 32, "max_wait_seconds": .02, "http_timeout_seconds": 1,
-                             "poll_interval_seconds": .01, "progress_every_polls": 1},
-    }))
-    stopped = []
-    started = asyncio.Event()
-
-    async def delayed(request):
-        if request.method == "POST" and phase not in {"submission", "cancel"}:
-            return httpx.Response(200, json={"id": "fixture", "polling_url": "https://fixture.invalid/poll"})
-        if request.url.path == "/poll" and phase == "download":
-            return httpx.Response(200, json={"status": "Ready", "result": {"sample": "https://fixture.invalid/image"}})
-        started.set()
-        try:
-            await asyncio.sleep(1)
-        finally:
-            stopped.append(True)
-
-    def legacy_post(*args, **kwargs):
-        time.sleep(.04)
-        return httpx.Response(200, json={}, request=httpx.Request("POST", args[0]))
-
-    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(delayed)))
-    monkeypatch.setattr(requests, "post", legacy_post)
-    try:
-        task = asyncio.create_task(generate_image_from_flux("isolated fixture"))
-        if phase == "cancel":
-            await asyncio.wait_for(started.wait(), .5)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        else:
-            result = await asyncio.wait_for(task, .5)
-            assert "timed out after 0.02 seconds" in result
-        assert stopped == [True]
-    finally:
-        await close_all_clients()
+async def test_image_deadline_includes_submission_and_cancels_async_io(image_deadline, phase):
+    stopped, started = image_deadline
+    task = asyncio.create_task(generate_image_from_flux("isolated fixture"))
+    if phase == "cancel":
+        await asyncio.wait_for(started.wait(), .5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        result = await asyncio.wait_for(task, .5)
+        assert "timed out after 0.02 seconds" in result
+    assert stopped == [True]
 
 
 async def test_browser_updates_separate_action_and_navigation_policies(tmp_path):

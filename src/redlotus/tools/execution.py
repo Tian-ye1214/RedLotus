@@ -796,6 +796,8 @@ class PlaywrightBrowserSession:
         from redlotus.tools.registry import resolve_readable_path
 
         path = resolve_readable_path(name, work_base=self.workspace.root)
+        if not path.is_relative_to(self.workspace.root):
+            raise ValueError(f"Path not under current project: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         await self._page.screenshot(path=str(path), full_page=full_page)
         return f"Screenshot saved: {path}"

@@ -23,13 +23,13 @@ from pydantic_ai.usage import RequestUsage
 
 from redlotus.core import history, system as system_module
 
-from redlotus.core.agents import AgentRegistry, SubagentFactory
+from redlotus.core.agents import SubagentFactory
 from redlotus.core.gateway import RequestPolicy
 from redlotus.core.history import latest_usage_input_tokens, read_usage_messages, summarize_messages
 from redlotus.core.tasks import TaskManager
 from redlotus.runtime.resources import WorkspaceContext, bind_to_loop, workspace_context
 from redlotus.sessions.context import ChatHistory, SubagentResult, SubagentSpec, current_usage_recorder, make_agent_id
-from redlotus.sessions.control import SessionController
+from redlotus.sessions.control import SessionController, UserMessage
 from redlotus.sessions.storage import SessionFile
 from redlotus.tools.worker_tools import WorkerOrchestrator
 
@@ -163,23 +163,39 @@ async def test_http_pools_release_only_their_own_loop(failure, monkeypatch):
     assert parent.is_closed
 
 
-def test_space_recovery_preserves_active_and_current_sessions(tmp_path, journal_policy):
+@pytest.mark.parametrize("state", [
+    "pending", "running", "failed", "cancelled", "unverified", "pending_confirmation", "interrupted",
+])
+def test_space_recovery_preserves_active_and_current_sessions(tmp_path, journal_policy, state):
     import errno
     import os
 
-    from redlotus.sessions.cleanup import retry_after_storage_cleanup
+    from redlotus.sessions.cleanup import _active_cache_projects, retry_after_storage_cleanup
 
     (tmp_path / "config.json").write_text(json.dumps({"storage": {
         "sessions_dir": "sessions", "cleanup": {
-            "enabled": True, "execution_cache": False, "session_retention_days": 1,
+            "enabled": True, "execution_cache": False, "session_retention_days": 7,
         },
     }}), encoding="utf-8")
     workspace = WorkspaceContext.from_path(tmp_path)
+    recoverable = SessionFile.create(tmp_path / "sessions", workspace.project_id, session_id="recoverable")
+    completed = [{"id": "A", "description": "saved", "status": "completed", "artifacts": ["A.txt"]},
+                 {"id": "B", "description": "depends on A", "dependencies": ["A"], "status": "completed"}]
+    recoverable.update(metadata={"tasks": completed})
+    assert not _active_cache_projects(tmp_path / "sessions", workspace.project_id)
+    tasks = [completed[0], dict(completed[1], status="completed" if state == "interrupted" else state)]
+    recoverable.update(metadata={"tasks": tasks, "interrupted_turn": {"id": "turn"} if state == "interrupted" else None})
+    worker_messages = [ModelRequest([UserPromptPart("Continue B after A")], instructions="saved worker context")]
+    worker = recoverable.role_file("worker")
+    worker.save_context(worker_messages, turn_id="turn", agent_id="B")
+    active_projects = _active_cache_projects(tmp_path / "sessions", workspace.project_id)
+    os.utime(recoverable.path, (recoverable.path.stat().st_mtime - 8 * 86400 - 1,) * 2)
     sessions = {name: SessionFile.create(tmp_path / "sessions", workspace.project_id, session_id=name)
                 for name in ("old", "active", "current")}
+    sessions["old"].update(metadata={"tasks": completed})
     sessions["active"].update(metadata={"active_turn": "running"})
     for session in sessions.values():
-        os.utime(session.path, (session.path.stat().st_mtime - 2 * 86400,) * 2)
+        os.utime(session.path, (session.path.stat().st_mtime - 8 * 86400,) * 2)
     retried = []
     with workspace_context(workspace):
         retry_after_storage_cleanup(
@@ -188,6 +204,10 @@ def test_space_recovery_preserves_active_and_current_sessions(tmp_path, journal_
         )
     assert retried == [True] and not sessions["old"].path.exists()
     assert sessions["active"].path.is_file() and sessions["current"].path.is_file()
+    restored = SessionFile.load(recoverable.path)
+    assert restored.metadata["tasks"] == tasks and worker.path.is_file()
+    assert restored.role_messages("worker", agent_id="B") == worker_messages
+    assert workspace.project_id in active_projects
 
 
 def test_turn_counts_survive_replay_and_reload(tmp_path, journal_policy):
@@ -341,10 +361,11 @@ async def test_usage_category_follows_call_purpose_when_reusing_worker_model(tmp
 
 
 @pytest.mark.parametrize("capacity,output,ratio,used,threshold,compresses", [
-    (100, 40, .9, 53, 54, False), (None, 40, .9, 54, 54, True),
+    (100, 40, .9, 59, 60, False), (None, 40, .9, 60, 60, True),
     (100, None, .9, 89, 90, False), (None, None, .9, 90, 90, True),
-    (1024000, 393216, .8, 504627, 504628, False), (1024000, 393216, .8, 504628, 504628, True),
-    (125, 100, .28, 7, 7, True),
+    (1024000, 393216, .8, 630783, 630784, False), (1024000, 393216, .8, 630784, 630784, True),
+    (100, 10, .5, 49, 50, False), (100, 10, .5, 50, 50, True),
+    (25, None, .28, 7, 7, True),
 ])
 async def test_compression_preserves_system_snapshot_and_waits_for_all_saves(monkeypatch, capacity, output, ratio, used, threshold, compresses):
 
@@ -417,12 +438,9 @@ async def test_late_usage_keeps_original_session_and_does_not_wait_after_reset(t
         await asyncio.wait_for(record([response], role="title", invocation="old-title"), 1)
 
 
-async def test_cancelled_child_checkpoint_releases_thread_capacity(tmp_path, monkeypatch, checkpoint_failure):
-    system = object.__new__(system_module.AgentSystem)
-    system.workspace = WorkspaceContext.from_path(tmp_path)
+async def test_cancelled_child_checkpoint_releases_thread_capacity(agent_system, checkpoint_failure):
+    system = agent_system
     system._session_file = checkpoint_failure[0]
-    system._session = SessionController()
-    system.presentation = SimpleNamespace(print_warning=lambda text: None)
     owner_loop = asyncio.get_running_loop()
     persist = bind_to_loop(system._durable_write, owner_loop)
     started = asyncio.Event()
@@ -453,18 +471,38 @@ async def test_cancelled_child_checkpoint_releases_thread_capacity(tmp_path, mon
     await factory.close()
 
 
-@pytest.fixture
-def task_plan(tmp_path, journal_policy):
+async def test_urgent_inputs_reach_reloaded_observation_and_immediate_memory(publication, agent_system, monkeypatch):
+    from redlotus.tools.references import ReferenceFile
 
-    (tmp_path / "config.json").write_text('{"agent_run_policy":{"max_task_retries":3}}')
-    storage = SessionFile.create(tmp_path / "plan", "isolated-project")
-    inputs = {"turn": "first", "texts": ["Plan A, then B; C is independent."]}
+    system, service = agent_system, publication.service
+    system._memory, system._session_file, system._current_attachments = service, service.session, []
+    service._context_notices, service._input_source = [], lambda: system._session.user_inputs
+    inputs = ["Plan the fixture task.", "Remember that I prefer fixture tea.", "Keep that preference globally."]
+    references = [ReferenceFile(id=f"reference-{index}", project_id=service.workspace.project_id, name="fixture.txt",
+        source="fixture", media_type="text/plain", byte_size=0, sha256=str(index), snapshot=service.workspace.root / "fixture.txt")
+        for index in range(2)]
 
-    async def persist(tasks):
-        await asyncio.to_thread(storage.update, metadata={"tasks": tasks})
+    async def produce(owner, job):
+        job.result = publication.records.PerceptionResult(records=[], reason="Offline boundary", request_authorized=False)
+        job.done = True
 
-    manager = TaskManager(persist=persist, input_source=lambda: (inputs["turn"], inputs["texts"]))
-    return manager, storage, inputs
+    publication.model_calls.side_effect = produce
+    monkeypatch.setattr(system_module.logger, "debug", lambda *args: None)
+    async with system._session.turn(inputs[0], turn_id="urgent"):
+        service.current = service.observations.begin(service.session.session_id, "urgent", inputs[0], [references[0].id])
+        for index, text in enumerate(inputs[1:]):
+            message = UserMessage("prepared text", original_text=text, references=[references[index]], attachments=[f"attachment-{index}"])
+            admission = system._session.admit(service.workspace, urgent=True)
+            system._session.queue_urgent(admission, asyncio.sleep(0, result=message))
+        assert len(await system._take_inner_inputs()) == 2
+        service.observations.bind(SessionFile.load(service.session.path))
+        result = json.loads(await service.remember(inputs[1], "global"))
+        events = (*service.observations.read([service.current.id]), *publication.model_calls.call_args.args[1].events)
+        assert result["status"] == "rejected" and len(events) == 2
+        assert [event.user_inputs for event in events] == [inputs, inputs]
+        assert all(event.reference_ids == [ref.id for ref in references] for event in events)
+        assert system._current_attachments == [part for index, ref in enumerate(references)
+                                               for part in [f"attachment-{index}", *ref.to_prompt()]]
 
 
 def test_interrupted_task_restores_unverified_without_replaying_side_effects():
@@ -595,51 +633,6 @@ def test_release_keeps_blocked_worker_context(tmp_path, journal_policy):
     restored = SessionFile.load(storage.path)
     assert restored.model_messages(agent_id="waiting")[0].instructions == "fixed waiting"
     assert restored.model_messages(agent_id="finished") == []
-
-
-@pytest.fixture
-async def child_executor(tmp_path, monkeypatch, journal_policy):
-    from redlotus.runtime import logging as logger
-    from redlotus.tools import worker_tools as module
-
-    (tmp_path / "config.json").write_text(
-        '{"lifecycle":{"invocation_history_per_session":8,"trace_history_turns":10},"storage":{"project_dir":".redlotus"}}', encoding="utf-8",
-    )
-    factory, registry = SubagentFactory(max_concurrent=1), AgentRegistry()
-    captured = {}
-
-    async def close():
-        captured["closed"] = True
-
-    toolkit = SimpleNamespace(
-        workspace=WorkspaceContext.from_path(tmp_path),
-        clone_for_worker=lambda loop: SimpleNamespace(skills_manager=None, close=close),
-    )
-
-    def create(target, **kwargs):
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(module.ModelTarget, "for_role", lambda role: object())
-    monkeypatch.setattr(module, "create_worker_toolsets", lambda *args, **kwargs: ([], []))
-    monkeypatch.setattr(factory, "create_toolset", lambda *args, **kwargs: object())
-    monkeypatch.setattr(module, "get_agent_usage_limits", lambda: None)
-    monkeypatch.setattr(logger, "debug", lambda *args, **kwargs: None)
-    monkeypatch.setattr(factory, "create_agent", create)
-    for role in ("worker", "manager"):
-        monkeypatch.setattr(module, f"get_{role}_system_prompt", lambda *args: "rebuilt")
-    orchestrator = module.WorkerOrchestrator(
-        toolkit, None, memory=None, registry=registry, persist=AsyncMock(side_effect=lambda operation, **kwargs: operation()), factory=factory,
-        user_inputs=lambda: ["Generate directly; no tools."],
-    )
-    orchestrator.session_file = SessionFile.create(tmp_path / "child", "project")
-    orchestrator.set_session_key(orchestrator.session_file.session_id)
-    history = ChatHistory()
-    history.set_messages([ModelRequest([], instructions="original session instructions")])
-    try:
-        yield module, orchestrator, history, captured
-    finally:
-        await factory.close()
 
 
 @pytest.mark.parametrize("role", ["worker", "manager"])

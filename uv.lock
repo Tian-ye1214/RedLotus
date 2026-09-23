@@ -2368,7 +2368,7 @@ wheels = [
 
 [[package]]
 name = "redlotus"
-version = "1.0.1"
+version = "1.0.1.post1"
 source = { editable = "." }
 dependencies = [
     { name = "ddgs" },
@@ -2413,6 +2413,7 @@ browser = [
     { name = "playwright" },
 ]
 build = [
+    { name = "playwright" },
     { name = "pyinstaller" },
 ]
 dev = [
@@ -2449,6 +2450,7 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'viz'", specifier = ">=12.2.0" },
     { name = "playwright", marker = "extra == 'all'", specifier = ">=1.49.0" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.49.0" },
+    { name = "playwright", marker = "extra == 'build'", specifier = ">=1.49.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "pydantic-ai-slim", extras = ["openai", "anthropic", "google"], specifier = "==2.0.0" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.20.0" },

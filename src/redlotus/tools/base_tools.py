@@ -418,7 +418,7 @@ class BasicToolkit:
                 if file_extension and file_path.suffix != file_extension:
                     continue
                 try:
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    with open(self._readable_path(str(file_path)), "r", encoding="utf-8", errors="ignore") as f:
                         for line_num, line in enumerate(f, 1):
                             if keyword.lower() in line.lower():
                                 rel_path = file_path.relative_to(self._base_dir)
@@ -732,8 +732,12 @@ class PendingReviewStore:
 
     def finish_decided(self):
         for entry in self.entries():
-            if all(hunk.index in entry.decisions for hunk in entry.hunks):
-                self.finish(str(entry.path))
+            with self._lock:
+                if self._entries.get(str(entry.path)) is not entry or not all(hunk.index in entry.decisions for hunk in entry.hunks):
+                    continue
+                self._entries.pop(str(entry.path))
+                callback = self._on_change
+            self._notify(callback)
 
     def finish(self, key: str) -> None:
         with self._lock:

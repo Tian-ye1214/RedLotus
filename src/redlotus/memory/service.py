@@ -304,16 +304,16 @@ class MemoryService:
             self._processor({})
             return True
         except Exception as exc:
-            if isinstance(exc, ValueError) and not isinstance(exc, MemoryConflict) and "records_committed_at" not in job.timings:
-                job.result = None
-            job.error = self.last_error = str(exc)
+            if isinstance(exc, ValueError) and "records_committed_at" not in job.timings:
+                job.result, job.searches, job.bases = None, [], {}
+            job.error = self.last_error = str(exc) or type(exc).__name__
             job.failures.append(dict(recorded_at=iso_utc_now(), error=job.error))
             if isinstance(exc, UnexpectedModelBehavior) and str(exc).startswith(
                 "Model token limit ("
             ):
                 job.blocked_recipe = recipe
             self._save_job(job)
-            state = dict(error=str(exc), event_count=self.session.completed_turns)
+            state = dict(error=job.error, event_count=self.session.completed_turns)
             if isinstance(exc, ModelHTTPError) and exc.status_code in (
                 400,
                 401,
@@ -322,7 +322,7 @@ class MemoryService:
             ):
                 state["blocked_route"] = self._route()
             self._processor(state)
-            logger.error("记忆生产未完成，原始事件已保留：%s", exc)
+            logger.error("记忆生产未完成，原始事件已保留：%s", job.error)
             return False
 
     async def remember(self, request: str, scope: Literal["global", "project"]) -> str:

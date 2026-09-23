@@ -108,6 +108,8 @@ def _session_protected(
         return (
             session is None
             or session.metadata.get("active_turn")
+            or session.metadata.get("interrupted_turn")
+            or any(task["status"] != "completed" for task in session.metadata.get("tasks", []))
             or session.pending_jobs()
         )
     except (OSError, ValueError, KeyError, TypeError, Timeout):
@@ -149,19 +151,10 @@ def _active_cache_projects(sessions: Path, project_id: str) -> set[str] | None:
             active.add(session_dir.name)
             continue
         with _locked_session(message) as transaction:
-            if transaction is None:
-                active.add(session_dir.name)
-                continue
-            try:
-                session = _load_cleanup_session(
-                    session_dir, message, transaction, project_id
-                )
-            except (OSError, ValueError, KeyError, TypeError, Timeout):
-                session = None
-            if session is None:
-                active.add(session_dir.name)
-            elif session.metadata.get("active_turn") or session.pending_jobs():
-                active.add(session.project_id)
+            if transaction is None or _session_protected(
+                session_dir, message, transaction, project_id
+            ):
+                active.update((session_dir.name, project_id))
     return active
 
 

@@ -103,7 +103,7 @@ class RequestPolicy(AbstractCapability):
         return response
 
     async def wrap_model_request(self, ctx, *, request_context, handler):
-        """Retry an oversized first durable auxiliary request once, after saving its summary."""
+        """Retry an oversized durable auxiliary request once, after saving its summaries."""
         for attempt in range(2):
             self._pending_requests[ctx.run_id] = ctx, request_context.messages[-1], len(ctx.messages)
             try:
@@ -111,7 +111,7 @@ class RequestPolicy(AbstractCapability):
             except ModelHTTPError as error:
                 if (
                     attempt or self.usage_category != "auxiliary" or self.persist_context is None
-                    or ctx.run_step != 1 or not context_length_exceeded(error)
+                    or not context_length_exceeded(error)
                     or "auto_compress_ratio" not in self.target.options["context"]
                 ):
                     raise

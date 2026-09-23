@@ -15,6 +15,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Iterator
 
 from filelock import FileLock, Timeout
@@ -228,12 +229,13 @@ def atomic_write(path: Path, content: str | bytes, *, encoding: str = "utf-8") -
     """Replace a complete file using native text encoding or unchanged bytes."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    if isinstance(content, str):
-        temporary.write_text(content, encoding=encoding)
-    else:
-        temporary.write_bytes(content)
-    os.replace(temporary, path)
+    with NamedTemporaryFile(
+        dir=path.parent, mode="w" if isinstance(content, str) else "wb",
+        encoding=encoding if isinstance(content, str) else None, delete_on_close=False,
+    ) as temporary:
+        temporary.write(content)
+        temporary.close()
+        os.replace(temporary.name, path)
 
 @contextmanager
 def file_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:

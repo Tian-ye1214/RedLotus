@@ -220,9 +220,9 @@ class MemoryStore:
                     if index.index_key != space:
                         errors.append(f"{name}: embedding model changed during recall.")
                 except Exception as exc:
-                    errors.append(str(exc))
-                    if str(exc) not in self.retrieval_error:
-                        logger.warning("记忆向量召回不可用，保留文本检索：%s", exc)
+                    errors.append(str(exc) or type(exc).__name__)
+                    if errors[-1] not in self.retrieval_error:
+                        logger.warning("记忆向量召回不可用，保留文本检索：%s", errors[-1])
         self.retrieval_error = "; ".join(errors)
         tokens = self.tokens(query)
         matches = sorted(
@@ -267,7 +267,7 @@ class MemoryStore:
                     await index._db.ensure_vector_index()
                 self.last_error = ""
             except Exception as exc:
-                message = str(exc)
+                message = str(exc) or type(exc).__name__
                 if message != self.last_error:
                     logger.warning(
                         "记忆索引更新未完成，正文已保存并等待重试：%s", message

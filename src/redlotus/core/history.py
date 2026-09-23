@@ -47,8 +47,8 @@ class CompressionValidationError(RuntimeError):
 
 
 def _compression_threshold(capacity, context):
-    """Reserve the configured output allowance; unset output remains provider-managed."""
-    return ceil((capacity - (context.get("max_tokens") or 0)) * Decimal(str(context["auto_compress_ratio"])))
+    """Cap the configured input threshold at the space left for maximum output."""
+    return ceil(min(capacity * Decimal(str(context["auto_compress_ratio"])), capacity - (context.get("max_tokens") or 0)))
 
 
 def context_usage_breakdown(
@@ -108,11 +108,10 @@ def _lint_compression_summary(summary_md: str) -> str:
 
     pieces = re.split(r"(?m)^[ \t]*(## [^\n]+?)[ \t]*$", body)
     sections = dict(zip(pieces[1::2], pieces[2::2]))
-    headings = list(sections)
     required = compression_summary_headings()
-    missing = [h for h in required if h not in headings]
+    missing = [h for h in required if h not in sections]
     if missing:
-        errors.append({"error": "compression_headings", "missing": missing, "actual": headings})
+        errors.append({"error": "compression_headings", "missing": missing, "actual": list(sections)})
     else:
         for heading in required:
             if not sections[heading].strip(" \t\r\n-*#>"):
@@ -176,6 +175,7 @@ async def prepare_compression(
     task_state: str | None = None,
     retain_tail: bool = True,
     context: dict | None = None,
+    split: bool = False,
 ) -> ChatHistory | None:
     """Build a detached candidate; native async model I/O shares cancellation and usage."""
     # The SDK merges adjacent requests; each complete user part is still an evidence unit.
@@ -201,33 +201,37 @@ async def prepare_compression(
         return None
     head_end, tail_start = bounds
 
-    prev_summary = summary_state
     from redlotus.prompts.message_text import pydantic_messages_to_text
 
     system_prompt = load_prompt("context_compress_structured_system.md")
-    user_parts = {}
-    if prev_summary:
-        user_parts["previous_summary"] = prev_summary
+    user_parts = {"previous_summary": summary_state} if summary_state else {}
     if task_state and task_state.strip():
         user_parts["task_state"] = task_state.strip()
-    boundaries = [index for index in _closed_boundaries(messages) if head_end < index <= tail_start
-                  and (index == tail_start or any(isinstance(part, UserPromptPart) for part in messages[index].parts))]
-    while True:
-        user_parts["transcript"] = pydantic_messages_to_text([
-            message for message in messages[head_end:tail_start]
-            if _context_summary_metadata(message) is None
-        ])
-        try:
-            summary_md = await _call_compressor_llm(
-                system_prompt=system_prompt, user_content=json.dumps(user_parts, ensure_ascii=False)
-            )
-            break
-        except ModelHTTPError as error:
-            if not context_length_exceeded(error) or len(boundaries) < 2:
-                raise
-            boundaries = boundaries[:len(boundaries) // 2]
-            tail_start = boundaries[-1]
-    summary_md = _lint_compression_summary(summary_md)
+    boundaries = [index for index in _closed_boundaries(messages) if head_end <= index <= tail_start
+                  and (index in (head_end, tail_start) or any(isinstance(part, UserPromptPart) for part in messages[index].parts))]
+
+    async def summarize(boundaries, split=False):
+        if not split or len(boundaries) < 3:
+            try:
+                return await _call_compressor_llm(system_prompt=system_prompt, user_content=json.dumps({
+                    **user_parts, "transcript": pydantic_messages_to_text([
+                        message for message in messages[boundaries[0]:boundaries[-1]]
+                        if _context_summary_metadata(message) is None
+                    ]),
+                }, ensure_ascii=False))
+            except ModelHTTPError as error:
+                if not context_length_exceeded(error) or len(boundaries) < 3:
+                    raise
+        middle = len(boundaries) // 2
+        summaries = await asyncio.gather(
+            summarize(boundaries[:middle + 1]), summarize(boundaries[middle:]), return_exceptions=True,
+        )
+        for summary in summaries:
+            if isinstance(summary, BaseException):
+                raise summary
+        return "\n\n".join(summaries)
+
+    summary_md = _lint_compression_summary(await summarize(boundaries, split))
     retained = messages[:head_end] + messages[tail_start:]
     metadata = {
         "origin": "context_summary", "summary": summary_md,
@@ -354,6 +358,7 @@ async def compact_request_messages(
         force=True,
         task_state=task_state,
         context={**context, "max_context_windows": limit},
+        split=force,
         retain_tail=not force or len(combined) > 1 or len(combined[0].parts) > 1,
     )
     if candidate is None:
