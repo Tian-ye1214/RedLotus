@@ -739,12 +739,6 @@ class PendingReviewStore:
                 callback = self._on_change
             self._notify(callback)
 
-    def finish(self, key: str) -> None:
-        with self._lock:
-            self._entries.pop(key, None)
-            cb = self._on_change
-        self._notify(cb)
-
     def _notify(self, cb: Callable[[], None] | None) -> None:
         if cb is not None:
             cb()
