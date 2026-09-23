@@ -20,6 +20,7 @@ from pydantic_ai.messages import (
     ToolSearchCallPart,
 )
 
+from redlotus.runtime.config import settings
 from redlotus.runtime.resources import (
     conversations_root,
 )
@@ -76,7 +77,7 @@ class SessionFile(SessionJournal):
         header = dict(session_id=identity, project_id=project_id, title=title, input_accounting=1,
                       created_at=datetime.now(timezone.utc).isoformat())
         path.parent.mkdir(parents=True, exist_ok=True)
-        with FileLock(path.with_suffix(".lock")):
+        with FileLock(path.with_suffix(".lock"), timeout=settings()["storage"]["file_lock_timeout_seconds"]):
             if path.exists():
                 raise FileExistsError(path)
             cls._replace_file(path, {**header, "updates": []}, workspace=workspace)
@@ -209,7 +210,7 @@ class SessionFile(SessionJournal):
             path = self.path.with_name(f"model_messages.{role}.json")
             if role == "coordinator":
                 path = self.path.with_name("model_messages.json")
-            with FileLock(path.with_suffix(".lock")) as lock:
+            with FileLock(path.with_suffix(".lock"), timeout=settings()["storage"]["file_lock_timeout_seconds"]) as lock:
                 if not path.exists():
                     if not create:
                         return None

@@ -19,6 +19,30 @@ def isolated_paths(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def journal_policy(tmp_path):
+    (tmp_path / ".env").write_text("storage__file_lock_timeout_seconds=30\n")
+
+
+@pytest.fixture(params=["disk", "coordinator", "worker"])
+def checkpoint_failure(tmp_path, request):
+    from functools import partial
+    from unittest.mock import Mock
+    from filelock import FileLock
+    from redlotus.sessions.storage import SessionFile
+
+    (tmp_path / "config.json").write_text('{"storage":{"file_lock_timeout_seconds":0.05}}')
+    if request.param == "disk":
+        yield None, Mock(side_effect=OSError("injected disk failure")), lambda: None
+        return
+    storage = SessionFile.create(tmp_path / "sessions", "isolated-lock")
+    if request.param == "worker":
+        storage = storage.role_file("worker")
+    with FileLock(storage.path.with_suffix(".lock")) as lock:
+        yield storage, partial(storage.update, metadata={"proof": "unexpected write"}), lock.release
+    assert "proof" not in storage.metadata
+
+
+@pytest.fixture
 def interactive_python(tmp_path):
     """Keep a native host's CLI input pipe open while it runs the test source."""
     def run(source):

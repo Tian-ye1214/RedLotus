@@ -14,6 +14,7 @@ from textwrap import indent
 
 from filelock import FileLock
 
+from redlotus.runtime.config import settings
 from redlotus.sessions.cleanup import _write_with_cleanup
 
 
@@ -27,7 +28,7 @@ class SessionJournal:
     def __init__(self, path, *, lock=None, recover=True, commit_recovery=True, workspace=None):
         self.path = Path(path)
         self.workspace = workspace
-        self._lock = lock or FileLock(self.path.with_suffix(".lock"))
+        self._lock = lock or FileLock(self.path.with_suffix(".lock"), timeout=settings()["storage"]["file_lock_timeout_seconds"])
         self._mutex = threading.RLock()
         self._recover_partial = recover
         self._commit_recovery = commit_recovery

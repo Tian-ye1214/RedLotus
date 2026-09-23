@@ -166,7 +166,7 @@ async def test_memory_control_wait_uses_config_without_cancelling_production(tmp
         await asyncio.sleep(0)
 
 
-async def test_non_owner_turns_count_without_reading_or_producing_personal_memory(tmp_path):
+async def test_non_owner_turns_count_without_reading_or_producing_personal_memory(tmp_path, journal_policy):
 
     from redlotus.memory.records import ObservationStore
     from redlotus.memory.service import MemoryService
