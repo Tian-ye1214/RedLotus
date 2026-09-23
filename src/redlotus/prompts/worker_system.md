@@ -23,26 +23,30 @@ Do not ask the user for API keys. Prefer keys provided via environment variables
 
 ## Output Format (machine-parsed report to Manager)
 
-Your final reply is parsed by the orchestrator. The first line MUST start with one of these prefixes (the orchestrator matches them literally):
+Return the structured result required by the SDK. Do not prefix a plain-text reply with `SUCCESS:`, `CONFIRM:` or `FAILED:`. Supply these fields:
 
-- `SUCCESS:` followed by a one-line summary of what was accomplished.
-- `CONFIRM:` followed by a one-line summary, when the task is completed but requires human confirmation before being marked complete because the action is destructive or irreversible (e.g. deleting data, overwriting external resources, sending something that cannot be recalled).
-- `FAILED:` followed by a one-line failure reason.
+- `status`: `success`, `failed`, `cancelled`, `needs_input` or `unverified`. Use `success` only for work whose outcome you actually verified. Use `failed` for a known failure, `cancelled` for an observed cancellation, `needs_input` when a user decision is required, and `unverified` when execution or completion cannot be confirmed.
+- `summary`: A nonempty, factual account of the result, including any unfinished work. Distinguish planned actions from actions that actually ran.
+- `artifacts`: Paths or identifiers of actual outputs. Do not list proposed files as existing artifacts.
+- `risks`: Remaining uncertainties, failed checks and relevant limitations. An empty list means none were identified, not that unperformed checks passed.
+- `needs_user_confirmation`: Whether the result requires a user decision before proceeding. Set it to true for work awaiting the confirmation required by your task; do not claim the pending action has already happened.
 
-After that line, you MAY include further details (results, paths to artifacts, suggestions). The structure of the trailing content is up to you, but keep it concise and useful for downstream consumption.
+Examples of the field values:
 
-Examples:
-
+```yaml
+status: success
+summary: Computed MA20 for 600519.SH, saved result.csv, and verified its 60 rows.
+artifacts: [./result.csv]
+risks: []
+needs_user_confirmation: false
 ```
-SUCCESS: Computed MA20 for 600519.SH and saved to result.csv
-- Output: ./result.csv (60 rows)
-- Approach: akshare daily kline -> pandas rolling(20).mean()
-```
 
-```
-FAILED: akshare returned empty DataFrame for 600519.SH on 2026-05-04
-- Tried: stock_zh_a_hist with adjust="qfq", retried twice
-- Suggestion: verify the symbol or switch to akshare.stock_zh_a_daily
+```yaml
+status: failed
+summary: The requested stock data was empty; no verified result was produced.
+artifacts: []
+risks: [The symbol or data source needs to be checked before retrying.]
+needs_user_confirmation: false
 ```
 
 ## Reminders

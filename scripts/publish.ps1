@@ -1,74 +1,92 @@
 ﻿<#
 .SYNOPSIS
-    发布 RedLotus 到 PyPI:升版本号 -> 清理 dist -> uv build -> uv publish。
-    token 从项目根 .env 的 PYPI_TOKEN 读取。
+    将已验收、已冻结 SHA256 的 wheel 和 sdist 发布到 PyPI。
 .EXAMPLE
-    .\scripts\publish.ps1 -Version 1.0.1
+    .\scripts\publish.ps1 -Version 1.0.1.post1 -ArtifactDirectory .\accepted-release
 .NOTES
-    前置:在 .env 里加一行   PYPI_TOKEN=pypi-xxxx   (正式 PyPI token)
+    制品目录必须包含 SHA256SUMS.txt。项目版本和制品版本必须一致。
+    PYPI_TOKEN 从项目根 .env 读取；发布不修改版本、不重建或删除制品。
 #>
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Version
+    [ValidateNotNullOrEmpty()]
+    [string]$Version,
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$ArtifactDirectory
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
-$root = Resolve-Path (Join-Path $PSScriptRoot "..")
-Set-Location $root
-
-# 1. 校验版本号格式(语义化:主.次.补丁,可带预发布后缀,如 1.0.1 / 1.1.0 / 2.0.0rc1)
-if ($Version -notmatch '^\d+\.\d+\.\d+([.\-a-zA-Z0-9]+)?$') {
-    throw "版本号格式不对:'$Version'(应形如 1.0.1 / 1.1.0 / 2.0.0)"
+$ErrorActionPreference = 'Stop'
+$root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if ($Version -notmatch '^\d+\.\d+\.\d+([.a-zA-Z0-9]+)?$') { throw "版本号格式不正确: $Version" }
+$artifactRoot = (Resolve-Path -LiteralPath $ArtifactDirectory).Path
+$wheels = @(Get-ChildItem -LiteralPath $artifactRoot -File | Where-Object { $_.Name -like "redlotus-$Version-*.whl" })
+$sdists = @(Get-ChildItem -LiteralPath $artifactRoot -File | Where-Object { $_.Name -eq "redlotus-$Version.tar.gz" })
+if ($wheels.Count -ne 1 -or $sdists.Count -ne 1) { throw '制品目录必须包含指定版本的唯一 wheel 和 sdist' }
+$files = @($wheels[0], $sdists[0])
+$hashes = @(Get-Content -LiteralPath (Join-Path $artifactRoot 'SHA256SUMS.txt'))
+foreach ($file in $files) {
+    $pattern = '^([a-fA-F0-9]{64})\s+\*?' + [regex]::Escape($file.Name) + '$'
+    $entries = @($hashes | Where-Object { $_ -match $pattern })
+    if ($entries.Count -ne 1) { throw "SHA256 清单缺少唯一条目: $($file.Name)" }
+    $expectedHash = [regex]::Match($entries[0], $pattern).Groups[1].Value
+    if ((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -ne $expectedHash) {
+        throw "制品 SHA256 不匹配: $($file.Name)"
+    }
 }
 
-# 2. 改写 pyproject.toml 的 version(与当前同号则拒绝,PyPI 不许重复上传)
-$pyproject = Join-Path $root "pyproject.toml"
-$content = Get-Content $pyproject -Raw
-if ($content -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
-    throw "pyproject.toml 里找不到 version 行"
-}
-$current = $Matches[1]
-if ($current -eq $Version) {
-    throw "版本号未变化($current);PyPI 不允许重复上传同一版本,请换个号"
-}
-$content = $content -replace '(?m)^version\s*=\s*"[^"]+"', "version = `"$Version`""
-[System.IO.File]::WriteAllText($pyproject, $content, (New-Object System.Text.UTF8Encoding $false))
-Write-Host "版本号:$current -> $Version" -ForegroundColor Cyan
+$python = Join-Path $root '.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { $python = (Get-Command python -ErrorAction Stop).Source }
+$checkMetadata = @'
+import email.parser, pathlib, sys, tarfile, tomllib, zipfile
+project, version, wheel, sdist = sys.argv[1:]
+metadata = tomllib.loads(pathlib.Path(project).read_text(encoding='utf-8'))['project']
+if metadata['name'].lower() != 'redlotus' or metadata['version'] != version:
+    raise ValueError('Project name/version mismatch')
+with zipfile.ZipFile(wheel) as archive:
+    names = [name for name in archive.namelist() if name.endswith('.dist-info/METADATA')]
+    if len(names) != 1:
+        raise ValueError('Wheel must contain exactly one METADATA')
+    wheel_metadata = archive.read(names[0]).decode('utf-8')
+with tarfile.open(sdist, 'r:gz') as archive:
+    names = [entry for entry in archive.getmembers() if len(pathlib.PurePosixPath(entry.name).parts) == 2 and entry.name.endswith('/PKG-INFO') and entry.isfile()]
+    if len(names) != 1:
+        raise ValueError('Sdist must contain exactly one root PKG-INFO')
+    sdist_metadata = archive.extractfile(names[0]).read().decode('utf-8')
+for content in (wheel_metadata, sdist_metadata):
+    parsed = email.parser.Parser().parsestr(content)
+    if parsed['Name'].lower() != 'redlotus' or parsed['Version'] != version:
+        raise ValueError('Artifact name/version mismatch')
+'@
+$checkMetadata | & $python - (Join-Path $root 'pyproject.toml') $Version $files[0].FullName $files[1].FullName
+if ($LASTEXITCODE -ne 0) { throw '项目或制品内嵌版本校验失败' }
 
-# 3. 从 .env 读取 PYPI_TOKEN(只取等号后第一段,允许值里含 = / 引号)
-$envFile = Join-Path $root ".env"
-if (-not (Test-Path $envFile)) {
-    throw ".env 不存在;请在项目根 .env 加一行:PYPI_TOKEN=pypi-xxxx"
+$published = $false
+try {
+    Invoke-RestMethod -Uri "https://pypi.org/pypi/RedLotus/$Version/json" | Out-Null
+    $published = $true
 }
+catch {
+    $response = $_.Exception.PSObject.Properties['Response']
+    if (-not $response -or [int]$response.Value.StatusCode -ne 404) { throw }
+}
+if ($published) { throw "PyPI 已存在 RedLotus $Version；不重复上传或覆盖" }
+
 $token = $null
-foreach ($line in Get-Content $envFile) {
+foreach ($line in Get-Content -LiteralPath (Join-Path $root '.env')) {
     if ($line -match '^\s*PYPI_TOKEN\s*=\s*(.+?)\s*$') {
         $token = $Matches[1].Trim('"').Trim("'")
         break
     }
 }
-if ([string]::IsNullOrWhiteSpace($token)) {
-    throw ".env 里没找到 PYPI_TOKEN;请加一行:PYPI_TOKEN=pypi-xxxx"
+if ([string]::IsNullOrWhiteSpace($token) -or -not $token.StartsWith('pypi-')) { throw '.env 缺少有效的 PYPI_TOKEN' }
+$previousToken = $env:UV_PUBLISH_TOKEN
+$uploadPaths = @($files | ForEach-Object { [regex]::Replace($_.FullName, '[*?\[\]]', '[$0]') })
+try {
+    $env:UV_PUBLISH_TOKEN = $token
+    uv publish --no-config --publish-url https://upload.pypi.org/legacy/ --trusted-publishing never @uploadPaths
+    if ($LASTEXITCODE -ne 0) { throw 'uv publish 失败；保留当前制品和版本供核查' }
 }
-if (-not $token.StartsWith("pypi-")) {
-    throw "PYPI_TOKEN 看起来不对(正式 token 以 'pypi-' 开头)"
-}
-
-# 4. 清理旧产物,避免把旧 wheel 一起传上去
-if (Test-Path "dist") { Remove-Item "dist\*" -Force -Recurse }
-
-# 5. 构建
-Write-Host "构建中(uv build)..." -ForegroundColor Cyan
-uv build
-if ($LASTEXITCODE -ne 0) { throw "uv build 失败" }
-
-# 6. 发布
-Write-Host "发布到 PyPI(uv publish)..." -ForegroundColor Cyan
-uv publish --token $token
-if ($LASTEXITCODE -ne 0) { throw "uv publish 失败(版本号已改好,排查后可重跑只发布的步骤)" }
-
-Write-Host ""
-Write-Host "[OK] 已发布 redlotus $Version 到 PyPI" -ForegroundColor Green
-Write-Host "     用户升级:pip install -U redlotus" -ForegroundColor Green
-Write-Host "     记得提交版本号并打 tag:git commit -am `"release: v$Version`"; git tag v$Version" -ForegroundColor DarkGray
+finally { $env:UV_PUBLISH_TOKEN = $previousToken }
+Write-Host "[OK] 已上传 RedLotus $Version 的已验收 wheel 和 sdist；仍需公开安装验收" -ForegroundColor Green

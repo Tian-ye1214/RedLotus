@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/assets/icon.svg" alt="RedLotus icon" width="112" height="112">
-</p>
-
 <h1 align="center">RedLotus</h1>
 
 <p align="center">
@@ -13,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/PyPI-pending-lightgrey.svg" alt="PyPI release pending">
+  <a href="https://pypi.org/project/RedLotus/"><img src="https://img.shields.io/pypi/v/RedLotus" alt="PyPI version"></a>
   <img src="https://img.shields.io/badge/Python-3.12%2B-3776ab.svg" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-555.svg" alt="Platform">
   <a href="https://ai.pydantic.dev/"><img src="https://img.shields.io/badge/built%20with-Pydantic%20AI-7c3aed.svg" alt="Pydantic AI"></a>
@@ -22,21 +18,21 @@
 RedLotus is an AI agent that runs in your terminal. It chooses how to handle each request based on its complexity: work directly, delegate a focused task to one Worker, or ask a Manager to break down and coordinate a larger job. It supports OpenAI-compatible model APIs and includes memory, runtime Skills, file extraction, browser automation, and chat bot integrations.
 
 ```bash
-pip install "redlotus @ git+https://github.com/Tian-ye1214/RedLotus.git"
+python -m pip install --upgrade redlotus
 redlotus
 ```
 
-<p align="center">
-  <img src="docs/assets/terminal.png" alt="RedLotus terminal task example" width="760">
-</p>
-
 ## Features
+
+The release process for `1.0.1.post1` uses the title `1.0.1-release` and preserves the existing `1.0.1` release. Its agreed validation scope excludes Linux, macOS, live QQ/WeChat accounts, and unconfigured model protocols. Those capabilities remain implemented but unverified for this release. Testing startup and upgrades from the old `1.0.1` package is outside this scope. Publication requires source, installed-package, and Windows artifact acceptance, followed by fresh public downloads. See the [build checkpoints](docs/design.md#状态说明) and the corresponding [GitHub release notes](https://github.com/Tian-ye1214/RedLotus/releases) for the final status and artifact hashes.
+
+Before each model request, compression uses reported input tokens and the threshold `ceil(min(configured_ratio * context_capacity, context_capacity - max_output))`. A main, child, or memory request with a durable checkpoint that is rejected for context capacity is split at complete evidence and closed tool-call boundaries for concurrent compression, then retried once after the summaries are saved. Completed tools are not repeated. The capacity rejection is logged with unknown provider usage preserved. Original records and the system prompt remain intact.
 
 | Feature | Description |
 |---------|-------------|
 | Multi-agent orchestration | The Coordinator selects the execution path. For complex work, the Manager creates dependent tasks and Workers execute them in dependency-aware batches. |
 | Goal mode | RedLotus keeps iterating toward a defined goal until it finishes. Additional user input can be incorporated while the goal is running. |
-| Short- and long-term memory | Short-term memory is stored in LanceDB for semantic retrieval. Long-term memory preserves user preferences and assistant working habits across conversations. |
+| Three memory layers | Incremental session records, LLM perception over 20 new user turns, project-scoped episodes and global long-term RAG. MEMORY.md contains the core profile and reusable experience. |
 | Runtime Skills | `SKILL.md` files provide instructions, references, and scripts on demand. Skill directories are rescanned at the start of each user turn, so newly installed skills do not require a restart. |
 | File and media handling | RedLotus can read images and extract content from PDF, Word, Excel, HTML, Markdown, CSV, JSON, and text files. PDF extraction preserves page text, tables, links, and embedded images. |
 | Review workflow and safeguards | The full-screen TUI includes hunk-by-hunk diff review. Runtime safeguards include path sandboxing, dangerous-command blocking, and child-process cleanup. |
@@ -73,47 +69,47 @@ flowchart LR
 
 RedLotus requires Python 3.12 or later and supports Windows, Linux, and macOS.
 
-### Install from GitHub
+### Install or upgrade from PyPI
 
 ```bash
-pip install "redlotus @ git+https://github.com/Tian-ye1214/RedLotus.git"
+python -m pip install --upgrade redlotus
 redlotus
 ```
 
 To install the command in an isolated environment, use `uv`:
 
 ```bash
-uv tool install git+https://github.com/Tian-ye1214/RedLotus.git
+uv tool install redlotus
 ```
 
-After a PyPI release is available, `pip install redlotus` and `uv tool install redlotus` can be used instead.
+Windows x64 builds are available on [GitHub Releases](https://github.com/Tian-ye1214/RedLotus/releases). Extract the onedir ZIP before running `Agent.exe`, or run the onefile EXE. Both use the same user configuration and project session storage as the pip entry point. Existing configuration and memory are preserved on upgrade.
+
+The panel compares each session's API usage with its title, exact Token count and a relative bar. Repeated API context remains in API usage; separately displayed new input is counted only once.
 
 ### Optional dependencies
 
 ```bash
-pip install "redlotus[browser] @ git+https://github.com/Tian-ye1214/RedLotus.git"  # Browser automation
-pip install "redlotus[bots] @ git+https://github.com/Tian-ye1214/RedLotus.git"     # QQ and WeChat bots
-pip install "redlotus[viz] @ git+https://github.com/Tian-ye1214/RedLotus.git"      # Plotting and image tools
-pip install "redlotus[all] @ git+https://github.com/Tian-ye1214/RedLotus.git"      # All optional dependencies
+pip install "redlotus[browser]"  # Browser automation
+pip install "redlotus[bots]"     # QQ and WeChat bots
+pip install "redlotus[viz]"      # Plotting and image tools
+pip install "redlotus[all]"      # All optional dependencies
 ```
 
 Install Chromium before using browser automation:
 
 ```bash
-playwright install chromium
+python -m playwright install chromium
 ```
 
 ## Initial configuration
 
-On first launch, RedLotus creates `config.json` in the platform-specific user configuration directory:
+After pip installation, run `redlotus`. Global configuration lives at `~/.redlotus/config.json`. Optional developer overrides use this field-by-field order: local `src/redlotus/config.json`, local `.env`, then global JSON. The source launcher searches from the checkout root, pip from the current directory, and PyInstaller from the executable's directory. `/config` shows the sources and write target. No parent-directory search or AppData configuration is used.
 
-| Platform | Configuration directory |
-|----------|-------------------------|
-| Windows | `%LOCALAPPDATA%\RedLotus` |
-| Linux | `~/.config/RedLotus` |
-| macOS | `~/Library/Application Support/RedLotus` |
+Nested `.env` fields use JSON names separated by `__`, such as `models__worker__max_tokens=393216`. Numbers, booleans, arrays and objects use JSON values. Host environment variables never override business settings. Interactive startup asks for missing required fields; noninteractive startup reports their paths. No bundled configuration is silently copied or merged. After confirmation, configuration editing writes only the changes to an existing local JSON, otherwise to the global JSON. Cancelling writes nothing. Credentials are never included in packages.
 
-At minimum, configure the model API endpoint and key:
+For isolated tests, `REDLOTUS_CONFIG_FILE`, `REDLOTUS_DOTENV_FILE`, and `REDLOTUS_CONFIG_DIR` explicitly select the three sources. `REDLOTUS_DATA_DIR` isolates global state. Each opened project stores sessions, perception progress, logs, and its user-maintained `AGENT.md` in `.redlotus`; artifacts, dependencies, caches, and immutable reference snapshots belong in `WorkDatabase`. Configuration and all LanceDB memory databases remain in `~/.redlotus`, with project-scoped access. The legacy `%LOCALAPPDATA%/RedLotus` directory is not read, migrated, or recreated.
+
+For a new installation, run `redlotus` to complete the setup dialog, or use the public [field contract](src/redlotus/config.schema.json) to prepare your configuration. It contains types and descriptions, without model choices, credentials or policy defaults. Entering `=role` reuses that role's model name while preserving the target role's connection and policy. `max_context_windows` is edited only in JSON; missing or null values use OpenRouter metadata. The following connection fields are only a fragment, not a complete configuration:
 
 ```json
 {
@@ -122,9 +118,9 @@ At minimum, configure the model API endpoint and key:
 }
 ```
 
-RedLotus accepts OpenAI-compatible APIs. Manager, Worker, Coordinator, and Compressor models can be configured independently. Vector retrieval and reranking use `SILICONFLOW_BASE`, `SILICONFLOW_KEY`, and `RAG_models`.
+Gateways support Pydantic AI's OpenAI Chat, OpenAI Responses, Anthropic Messages and Google adapters. Manager, Worker, Coordinator and Compressor models can be configured independently or select named presets. Memory perception uses the role selected by `memory_perception.model_role`, independently of context compression. Vector retrieval and reranking use `SILICONFLOW_BASE`, `SILICONFLOW_KEY`, `RAG_models` and `rag_service`.
 
-The same values can be supplied through environment variables or a nearby `.env` file. Do not commit configuration files that contain real API keys.
+Named credential references such as `api_key_env` resolve fields in the same three-layer configuration, including the local `.env`; they do not read the host environment or a global `.env`. Direct keys and references follow the same source priority. Do not commit credentials. See [configuration and model routing](docs/design.md).
 
 ## Terminal usage
 
@@ -140,11 +136,17 @@ Common shortcuts:
 
 | Shortcut | Action |
 |----------|--------|
+| `Enter` | Submit normally; pending outer turns appear as dimmed queued messages |
+| `Ctrl+Enter` | Add to the active inner loop at the next model request; start a normal turn when idle |
 | `Shift+Tab` | Switch run mode |
 | `Ctrl+R` | Open the pending-change review |
 | `Ctrl+C` | Stop the current turn |
 | `Ctrl+Q` | Exit |
-| `@path` | Reference a local text file, with Tab completion |
+| `@path` | Reference documents and images, with Tab completion; up to 20 files. Video validation is deferred. |
+
+Supplements appear as ordinary user messages, without an urgency label. The terminal uses Ctrl+Enter to supplement the active turn. If a terminal sends the same code for Ctrl+Enter and Enter, Python cannot distinguish them; the terminal must preserve the modifier. Shift+Tab can still work because it has a separate code. Keyboard diagnostics are for testing only; see [keyboard behavior and verification](docs/design.md#请求执行).
+
+References can be adjacent or separated by punctuation, for example `@review.md,@image.png`. Tab completes the current reference and automatically quotes paths containing spaces or delimiters; `@"path"`, `@'path'`, and `@{path}` also work. Files are deduplicated in first-appearance order. More than 20 distinct files produces an error instead of a partial upload.
 
 <details>
 <summary>Common slash commands</summary>
@@ -154,7 +156,7 @@ Common shortcuts:
 | `/help` | Show help |
 | `/clear` | Clear context and start a new conversation |
 | `/pwd` · `/cd <path>` | Show or change the working directory |
-| `/load` | Load a saved conversation for the current workspace |
+| `/load` | Open the current project's session picker; also available through the TUI session/load button |
 | `/config` · `/context` · `/panel` | Show configuration, context usage, or the runtime overview |
 | `/skills` | List loaded Skills |
 | `/LTM show` · `/STM show` | Show long- or short-term memory |
@@ -188,9 +190,14 @@ New skills are discovered automatically on subsequent user turns.
 
 ## Files and data
 
-- User-level data: logs, LanceDB short-term memory, and long-term memory are stored in the platform user data directory and remain available across workspaces.
-- Workspace data: conversation snapshots are stored in `.redlotus/`, while Agent artifacts are written to `WorkDatabase/` in the current working directory.
-- Changing directories with `/cd` loads the conversation data associated with that workspace.
+- Session traces and perception jobs stay in the project's `.redlotus`; immutable reference snapshots stay in its `WorkDatabase`. Compression changes the model view while retaining the original trace.
+- Project episodes and global records use the configured LanceDB directory under the user's `.redlotus`, with scope/project isolation, vector recall, reranking, and text fallback. Sessions and logs remain in each project's `.redlotus`; references, artifacts, dependencies, and caches stay in its `WorkDatabase`.
+- `MEMORY.md` contains the core profile, environment, constraints and general experience without a fixed character cap. Its complete contents and the system prompt are snapshotted for the session; memory writes do not rewrite that prefix. New confirmed information is consumed through tool results and retrieval, and a new session loads a fresh snapshot.
+- File and command tools use the current project. Generated artifacts go to `WorkDatabase/`. `/cd` cancels the old session before switching context.
+
+Enter queues a separate FIFO turn. Ctrl+Enter adds an urgent supplement to the active turn, together with the completed tool batch at the next request boundary. Child Agents use dedicated threads, event loops, and clients within the configured session limit. Perception processes each set of 20 new user turns in the current session, with three earlier turns for continuity. Opening, loading, or exiting a session does not create a short perception window. Explicit remember requests are handled immediately; failed production remains pending.
+
+Model parameters, retrieval settings and runtime limits are declared in JSON and read as independent copies. See [architecture and migration](docs/design.md) for window-based production and the retained RAG parameters.
 
 ## QQ and WeChat bots
 
@@ -203,11 +210,13 @@ pip install "redlotus[bots] @ git+https://github.com/Tian-ye1214/RedLotus.git"
 Start either integration:
 
 ```bash
-python -m redlotus.API.QQ
-python -m redlotus.API.WeChat
+python -m redlotus.api.QQ
+python -m redlotus.api.WeChat
 ```
 
 QQ integration requires [NapCat](https://github.com/NapNeko/NapCatQQ) with a configured OneBot WebSocket endpoint, bot QQ number, and WebUI token. The WeChat integration prompts for QR-code login at startup.
+
+Personal bot access must be bound in `bot.owner_channels.qq` (private QQ IDs) or `bot.owner_channels.wechat` (wxids). Unbound channels have text-only conversations and no access to personal memory or execution tools. Bots accept `/stop` and `/clear`; their entrypoints collect missing channel policies before connecting. Attachment order has been checked through the adapter and real model API; real account messaging remains pending. See the [binding example](docs/design.md#agent-与工具边界).
 
 ## Development
 
@@ -228,9 +237,13 @@ uv build
 
 Build a PyInstaller application directory:
 
-```bash
+```powershell
 pip install ".[build]"
+$env:PLAYWRIGHT_BROWSERS_PATH="0"
+python -m playwright install chromium
 pyinstaller build.spec
 ```
 
-The main package lives in `src/redlotus/`. The `redlotus` command maps to `redlotus.agent_core.entrypoint:main`.
+The main package lives in `src/redlotus/`, organized into `runtime`, `sessions`, `core`, `tools`, `memory`, `prompts`, `ui`, and `api`. The `redlotus` command maps to `redlotus.api.base:main`.
+
+Restructuring and release acceptance remain incomplete. Real API testing has resumed after funding; browser reading, screenshots, and cleanup passed on all four entries of the preceding candidate. The approved explicit copy_from option preserves UTF-8 source text through the existing review and atomic-write flow. All six source/pip/onedir copy cases ended with exact bytes; two required model self-correction, with their initial errors retained. A later review found unbounded session-lock waits during cancellation. The approved timeout fix passes 242 source auxiliary tests; artifacts and final-candidate acceptance are being updated. The final long-run matrix, cache target, and post-release checks have not passed. Tests must include source, daily pip, and packaged entries; builds and isolated fault checks alone are insufficient. See the [acceptance record](docs/design.md#状态说明) and [development rules](docs/development.md).

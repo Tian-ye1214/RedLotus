@@ -2,6 +2,7 @@
 lib/
 *.env
 .env
+src/redlotus/config.json
 LICENSE
 __pycache__/
 *.pyc
@@ -19,9 +20,11 @@ data/
 .claude/
 .codegraph/
 .redlotus/*
-tests/*
+.pytest_cache/
+.test-runtime/
 src/redlotus/prompts/LongTermMemory/SOUL.md
 src/redlotus/prompts/LongTermMemory/USER.md
 src/redlotus/prompts/LongTermMemory/consolidation_state.json
 src/redlotus/prompts/LongTermMemory/log_sources_state.json
 src/redlotus/API/config.yaml
+src/redlotus/api/config.yaml

@@ -1,20 +1,54 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller onedir：与 main.py 同目录执行
-#   pyinstaller main.spec
+#   pyinstaller build.spec
 
 import os
+from pathlib import Path
 
 from PyInstaller.utils.hooks import copy_metadata
+from playwright.sync_api import sync_playwright
 
-block_cipher = None
 project = os.path.dirname(os.path.abspath(SPEC))
+source_root = Path(project, "src", "redlotus")
+bundle_mode = os.environ.get("REDLOTUS_PYINSTALLER_MODE", "onedir")
+# Playwright's frozen transport uses its package-local browser installation.
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+with sync_playwright() as playwright:
+    if not Path(playwright.chromium.executable_path).is_file():
+        raise SystemExit('Before building: set PLAYWRIGHT_BROWSERS_PATH=0 and run python -m playwright install chromium')
+
+
+def resource_files(source: Path, destination: str):
+    """Collect only the files beneath an explicitly approved resource root."""
+    return [
+        (str(path), str(Path(destination, path.relative_to(source).parent)))
+        for path in source.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.relative_to(source).parts
+        and path.name not in {".env", "config.json"}
+        and path.suffix not in {".pyc", ".pyo"}
+        and not path.name.endswith(".log")
+        and ".log." not in path.name
+    ]
+
+
+datas = [
+    (str(Path(project, "LICENSE")), "."),
+    (str(source_root / "config.schema.json"), "redlotus"),
+    (str(source_root / "api" / "config.yaml.example"), "redlotus/api"),
+    *resource_files(source_root / "tools" / "skills", "redlotus/tools/skills"),
+    *[
+        (str(path), "redlotus/prompts")
+        for path in (source_root / "prompts").glob("*.md")
+    ],
+]
 
 a = Analysis(
     [os.path.join(project, "main.py")],
     pathex=[project, os.path.join(project, "src")],
     binaries=[],
     datas=[
-        (os.path.join(project, "src", "redlotus"), "redlotus"),
+        *datas,
         *copy_metadata("genai_prices"),
         *copy_metadata("pydantic_ai_slim"),
     ],
@@ -22,40 +56,52 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
+    # Optional SDK imports found in a shared development environment: notebook
+    # display, local tensor embeddings, and the unused Hugging Face gateway.
+    # RedLotus uses its configured HTTP embedding service and four SDK protocols;
+    # Skill scripts still run in the configured external interpreter.
+    excludes=["IPython", "torch", "transformers", "huggingface_hub"],
     noarchive=False,
+    optimize=0,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="Agent",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    console=True,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
+if bundle_mode == "onefile":
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        name="Agent",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=True,
+        disable_windowed_traceback=False,
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="Agent",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=True,
+        disable_windowed_traceback=False,
+    )
 
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="Agent",
-)
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="Agent",
+    )

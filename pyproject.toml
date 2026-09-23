@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "RedLotus"
-version = "1.0.0"
+version = "1.0.1.post1"
 description = "红莲极意 · 一个会自己长技能、记得住、能出门的终端 Agent"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "ddgs>=9.14.1",
     "filelock>=3.29.0",
+    "genai-prices==0.0.67",
     "httpx[http2]>=0.28.1",
     "json-repair>=0.59.5",
     "lancedb>=0.30.2",
@@ -19,11 +20,13 @@ dependencies = [
     "openai>=2.32.0",
     "openpyxl>=3.1.5",
     "pandas>=3.0.2",
-    "platformdirs>=4.9.0",
     "prompt-toolkit>=3.0.0",
     "pydantic-ai-slim[openai,anthropic,google]==2.0.0",
     "pymupdf>=1.27.2.3",
     "python-docx>=1.2.0",
+    "python-pptx>=1.0.2",
+    "pillow>=12.2.0",
+    "xlrd>=2.0.1",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
     "requests>=2.33.1",
@@ -36,8 +39,8 @@ dependencies = [
 browser = ["playwright>=1.49.0"]
 bots = ["ncatbot>=4.4.1.post1", "wechatbot-sdk>=0.2.1"]
 viz = ["matplotlib>=3.10.9", "reportlab>=4.5.0", "pillow>=12.2.0"]
-build = ["pyinstaller>=6.20.0"]
-dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0"]
+build = ["pyinstaller>=6.20.0", "playwright>=1.49.0"]
+dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0", "opencv-python-headless>=4.8.0"]
 all = [
     "playwright>=1.49.0",
     "ncatbot>=4.4.1.post1",
@@ -48,10 +51,33 @@ all = [
 ]
 
 [project.scripts]
-redlotus = "redlotus.agent_core.entrypoint:main"
+redlotus = "redlotus.api.base:main"
 
 [tool.setuptools]
-include-package-data = true
+include-package-data = false
+
+[tool.setuptools.package-data]
+redlotus = [
+    "config.schema.json",
+    "prompts/*.md",
+    "tools/skills/**/*",
+    "api/config.yaml.example",
+]
+
+[tool.setuptools.exclude-package-data]
+redlotus = [
+    "config.json",
+    "**/config.json",
+    ".env",
+    "**/.env",
+    "api/config.yaml",
+    "prompts/LongTermMemory/*",
+    "tools/skills/**/.env",
+    "tools/skills/**/*.log",
+    "tools/skills/**/*.log.*",
+    "tools/skills/**/__pycache__/*",
+    "tools/skills/**/*.py[cod]",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

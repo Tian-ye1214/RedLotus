@@ -1,0 +1,316 @@
+"""Worker execution tools, deferred loading and factory-managed delegation."""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+import inspect
+import json
+import uuid
+from typing import Callable
+
+from pydantic_ai.capabilities import Capability
+
+from redlotus.prompts.prompt import (
+    get_manager_system_prompt,
+    get_worker_system_prompt,
+    session_prompt_from_history,
+    with_runtime_context,
+)
+from redlotus.runtime.config import get_agent_usage_limits
+from redlotus.runtime.network import ModelTarget
+from redlotus.runtime.resources import bind_to_loop
+from redlotus.sessions.context import (
+    ChatHistory,
+    SubagentResult,
+    SubagentSpec,
+    messages_safe_for_new_prompt,
+)
+
+
+def worker_tool_groups(toolkit, memory, *, owner_loop=None, include_browser=True) -> dict[str, list]:
+    """List every Worker tool, preserving resident reads and deferred execution groups."""
+    skills, browser = toolkit.skills_manager, toolkit._browser_session
+    memory_tools = (
+        [memory.reader.search_memory, memory.remember, memory.update_memory, memory.delete_memory]
+        if memory.owner_memory_allowed else []
+    )
+    if owner_loop is not None:
+        memory_tools = [bind_to_loop(tool, owner_loop) for tool in memory_tools]
+    return {
+        "core": [
+            toolkit.list_files,
+            toolkit.read_file,
+            toolkit.search_in_files,
+            toolkit.search_web,
+            toolkit.ask_user,
+            toolkit._references.read_reference,
+        ],
+        "file_mutation": [toolkit.write_file, toolkit.edit_file],
+        "execution": [toolkit.run_command, toolkit.execution_environment],
+        "media": [toolkit.generate_image, toolkit.extract_text],
+        "memory": memory_tools,
+        "skills": [
+            skills.list_available_skills,
+            skills.get_skill_instructions,
+            skills.load_skill_resource,
+            skills.refresh_skills,
+            skills.execute_skill_script,
+        ],
+        "browser": [
+            browser.browser_navigate,
+            browser.browser_get_content,
+            browser.browser_screenshot,
+            browser.browser_click,
+            browser.browser_fill,
+            browser.browser_press_key,
+            browser.browser_wait_for_selector,
+            browser.browser_evaluate,
+            browser.browser_close,
+        ] if include_browser else [],
+    }
+
+
+def worker_tools(toolkit, memory) -> list:
+    """Reuse the complete execution set when the Coordinator executes a task directly."""
+    return [tool for tools in worker_tool_groups(toolkit, memory, include_browser=True).values() for tool in tools]
+
+
+def create_worker_toolsets(toolkit, memory, owner_loop, *, include_browser, create_toolset):
+    """Create native SDK capabilities from explicit callables and their own docstrings."""
+    resident, capabilities = [], []
+    groups = worker_tool_groups(toolkit, memory, owner_loop=owner_loop, include_browser=include_browser)
+    for group, tools in groups.items():
+        if not tools:
+            continue
+        identity = "worker_" + group
+        deferred = group != "core"
+        toolset = create_toolset(tools, toolset_id=identity, defer_loading=deferred)
+        if deferred:
+            capabilities.append(Capability(
+                id=identity,
+                description="\n\n".join(f"{tool.__name__}: {inspect.getdoc(tool)}" for tool in tools),
+                toolsets=[toolset],
+                defer_loading=True,
+            ))
+        else:
+            resident.append(toolset)
+    return resident, capabilities
+
+
+class WorkerOrchestrator:
+    """Plan dependencies on the parent loop; execute every child through one factory."""
+
+    def __init__(
+        self,
+        toolkit,
+        task_manager,
+        *,
+        memory,
+        memory_injection_getter: Callable[[], str] | None = None,
+        registry,
+        persist,
+        factory,
+        user_inputs,
+    ):
+        self._toolkit = toolkit
+        self.memory = memory
+        self._task_manager = task_manager
+        self._memory_injection_getter = memory_injection_getter or (lambda: "")
+        self._registry = registry
+        self._persist = persist
+        self._user_inputs = user_inputs
+        self.factory = factory
+        self.session_file = None
+        self._session_key: str | None = None
+
+    def set_session_key(self, session_key: str | None) -> None:
+        self._session_key = session_key
+
+    async def _execute(
+        self,
+        prompt,
+        history: ChatHistory,
+        *,
+        turn_id: str | None,
+        task_id: str,
+        role: str = "worker",
+        planning_tools: tuple = (),
+        include_browser: bool = False,
+    ):
+        if self._session_key is None:
+            raise RuntimeError("Worker requires a bound session")
+        owner_loop = asyncio.get_running_loop()
+        persist = bind_to_loop(self._persist, owner_loop)
+        session_key, session_file = self._session_key, self.session_file
+        source_toolkit, memory_service = self._toolkit, self.memory
+        target = ModelTarget.for_role(role)
+        # Snapshot before starting the thread: no mutable messages or clients cross loops.
+        messages = copy.deepcopy(messages_safe_for_new_prompt(history.messages))
+        prompt = [json.dumps({"original_user_inputs": self._user_inputs()}, ensure_ascii=False),
+                  *(prompt if isinstance(prompt, list) else [prompt])]
+        memory = self._memory_injection_getter()
+        spec = SubagentSpec(
+            session_key, turn_id, source_toolkit.workspace, role=role
+        )
+        invocation = uuid.uuid4().hex
+
+        async def execute_child():
+            toolkit = source_toolkit.clone_for_worker(owner_loop)
+            local_history = ChatHistory()
+            local_history.set_messages(messages)
+            try:
+                if role == "worker":
+                    toolsets, capabilities = create_worker_toolsets(
+                        toolkit, memory_service, owner_loop, include_browser=include_browser, create_toolset=self.factory.create_toolset
+                    )
+                    instructions = session_prompt_from_history(messages) or get_worker_system_prompt(
+                        toolkit.skills_manager, memory
+                    )
+                    output_type = SubagentResult
+                else:
+                    toolsets = [
+                        self.factory.create_toolset(
+                            [bind_to_loop(t, owner_loop) for t in planning_tools], toolset_id="planning"
+                        )
+                    ]
+                    capabilities = []
+                    instructions = session_prompt_from_history(messages) or get_manager_system_prompt(
+                        toolkit.skills_manager, memory
+                    )
+                    output_type = str
+                async def save_context(candidate):
+                    await persist(
+                        lambda: session_file.role_file(role).save_context(
+                            candidate, turn_id=turn_id, agent_id=agent_id, invocation=invocation,
+                        ),
+                        cancelling=bool(asyncio.current_task().cancelling()),
+                    )
+                    if (
+                        session_file is not self.session_file or session_key != self._session_key
+                        or asyncio.current_task().cancelling()
+                    ):
+                        raise asyncio.CancelledError("Child checkpoint belongs to an ended invocation.")
+                    local_history.set_messages(candidate)
+
+                agent = self.factory.create_agent(
+                    target,
+                    instructions=instructions,
+                    toolsets=toolsets,
+                    capabilities=capabilities,
+                    output_type=output_type,
+                    role=role,
+                    persist_context=save_context,
+                )
+
+                async def save_node(run):
+                    await save_context(list(run.all_messages()))
+
+                result = await self.factory.runner.run(
+                    agent=agent,
+                    prompt=with_runtime_context(copy.deepcopy(prompt)),
+                    message_history=local_history.messages,
+                    usage_limits=get_agent_usage_limits(),
+                    on_node=save_node,
+                )
+                return result.output, list(result.all_messages())
+            finally:
+                await toolkit.close()
+
+        async def run_child():
+            return await self.factory.run(spec, execute_child)
+
+        try:
+            agent_id = await self._registry.ensure_agent(
+                session_key, role, task_id
+            )
+            report, returned_messages = await self._registry.run(
+                run_child, agent_id=agent_id, turn_id=turn_id
+            )
+            history.set_messages(returned_messages)
+            return report
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if role != "worker":
+                raise
+            return SubagentResult(
+                status="unverified", summary=f"{type(exc).__name__}: {exc}"
+            )
+
+    async def plan(
+        self, prompt, history: ChatHistory, *, turn_id: str | None, tools: tuple = ()
+    ) -> str:
+        return await self._execute(
+            prompt,
+            history,
+            turn_id=turn_id,
+            task_id="planning",
+            role="manager",
+            planning_tools=tools,
+        )
+
+    async def execute_task_with_worker(
+        self,
+        task_description: str,
+        user_goal: str = "",
+        retry_info: str = "",
+        attachments: list | None = None,
+        *,
+        turn_id: str | None,
+    ) -> tuple[bool, str]:
+        prompt = f"[Delegated task, not a new user preference]\nGoal: {user_goal}\nTask: {task_description}"
+        if retry_info:
+            prompt += f"\nPrevious failure: {retry_info}"
+        content = [prompt, *attachments] if attachments else prompt
+        report = await self._execute(
+            content, ChatHistory(), turn_id=turn_id, task_id=uuid.uuid4().hex[:8],
+            include_browser=True,
+        )
+        return report.success, report.model_dump_json()
+
+    async def _execute_task(
+        self, task, user_goal: str, attachments: list | None, turn_id: str | None
+    ):
+        prompt = json.dumps({
+            "parent_goal_context": user_goal,
+            "completed_dependency_results": {key: self._task_manager.tasks[key].result for key in task.dependencies},
+            "previous_failures": task.failure_history,
+            "assigned_task": {"id": task.id, "description": task.description},
+            "user_follow_up": task.user_updates,
+        }, ensure_ascii=False)
+        content = [prompt, *attachments] if attachments else prompt
+        try:
+            await self._task_manager.start(task)
+            report = await self._execute(
+                content, task.worker_chat_history, turn_id=turn_id, task_id=task.id,
+                include_browser=False,
+            )
+        except asyncio.CancelledError:
+            await self._task_manager.finish(task, SubagentResult(
+                status="cancelled", summary="Cancelled by the owner; completion is unverified.",
+            ))
+            raise
+        await self._task_manager.finish(task, report)
+
+    async def execute_all_tasks_parallel(
+        self, user_goal: str, attachments: list | None = None, *, turn_id: str | None
+    ) -> str:
+        # The factory is the sole concurrency limit; TaskGroup owns cancellation of the batch.
+        while ready := self._task_manager.get_all_ready_tasks():
+            async with asyncio.TaskGroup() as group:
+                for task in ready:
+                    group.create_task(
+                        self._execute_task(task, user_goal, attachments, turn_id)
+                    )
+        return self._task_manager.get_final_summary()
+
+
+def manager_tools(task_manager, toolkit, memory) -> tuple:
+    """List the complete Manager planning tool set; retain owner memory permissions."""
+    return (
+        task_manager.create_todo_list,
+        task_manager.get_todo_list,
+        toolkit.ask_user,
+        *([memory.reader.search_memory] if memory.owner_memory_allowed else []),
+    )
