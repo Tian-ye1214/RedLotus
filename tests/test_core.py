@@ -5,7 +5,9 @@ import json
 import subprocess
 import sys
 from dataclasses import asdict, replace
+from datetime import date
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai import Agent, ModelRetry
@@ -534,11 +536,8 @@ async def test_cancellation_while_saving_does_not_erase_completed_work(task_plan
             saving.set()
             await asyncio.Event().wait()
 
-    async def execute(*args, **kwargs):
-        return SubagentResult(status="success", summary="A written", artifacts=["A.txt"])
-
     monkeypatch.setattr(manager, "_persist", blocked_save)
-    monkeypatch.setattr(orchestrator, "_execute", execute)
+    monkeypatch.setattr(orchestrator, "_execute", AsyncMock(return_value=SubagentResult(status="success", summary="A written", artifacts=["A.txt"])))
     running = asyncio.create_task(orchestrator.execute_all_tasks_parallel("goal", turn_id="first"))
     try:
         await asyncio.wait_for(saving.wait(), 2)
@@ -617,9 +616,6 @@ async def child_executor(tmp_path, monkeypatch):
         clone_for_worker=lambda loop: SimpleNamespace(skills_manager=None, close=close),
     )
 
-    async def persist(operation, **kwargs):
-        return operation()
-
     def create(target, **kwargs):
         captured.update(kwargs)
         return object()
@@ -633,7 +629,7 @@ async def child_executor(tmp_path, monkeypatch):
     for role in ("worker", "manager"):
         monkeypatch.setattr(module, f"get_{role}_system_prompt", lambda *args: "rebuilt")
     orchestrator = module.WorkerOrchestrator(
-        toolkit, None, memory=None, registry=registry, persist=persist, factory=factory,
+        toolkit, None, memory=None, registry=registry, persist=AsyncMock(side_effect=lambda operation, **kwargs: operation()), factory=factory,
         user_inputs=lambda: ["Generate directly; no tools."],
     )
     orchestrator.session_file = SessionFile.create(tmp_path / "child", "project")
@@ -691,7 +687,9 @@ async def test_child_does_not_send_after_compression_save_failure(child_executor
 async def test_native_sdk_restoration_does_not_duplicate_deferred_catalog():
     from pydantic_ai.capabilities import Capability
 
-    from redlotus.prompts.prompt import session_prompt_from_history
+    from redlotus.prompts.prompt import format_prompt_current_time, session_prompt_from_history, with_runtime_context
+
+    assert json.loads(with_runtime_context("first")[1].content)["current_time"] == date.fromisoformat(format_prompt_current_time()).isoformat()
 
     requests = []
 

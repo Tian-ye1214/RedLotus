@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -167,10 +167,7 @@ async def test_first_configuration_commit_uses_the_pending_lock_policy(tmp_path,
 
     from redlotus.api.base import ConfigurationSetup
 
-    answers, observed = iter(["0", "y"]), []
-
-    async def answer(*args, **kwargs):
-        return next(answers)
+    observed = []
 
     class ObservedLock(FileLock):
         def acquire(self, timeout=None, *args, **kwargs):
@@ -178,7 +175,7 @@ async def test_first_configuration_commit_uses_the_pending_lock_policy(tmp_path,
             return super().acquire(timeout, *args, **kwargs)
 
     monkeypatch.setattr(resources, "FileLock", ObservedLock)
-    setup = ConfigurationSetup(answer, emit=lambda text: None)
+    setup = ConfigurationSetup(AsyncMock(side_effect=["0", "y"]), emit=lambda text: None)
     assert not (tmp_path / "global/config.json").exists()
     assert await setup.fill(("storage", "file_lock_timeout_seconds"))
     assert await setup.commit()
@@ -214,17 +211,32 @@ def test_application_structure_keeps_approved_module_and_effective_line_limits()
     assert len(counts) <= 8 and max(counts.values()) <= 5, dict(counts)
 
 
-@pytest.mark.parametrize("original", ["original", "north\r\nsouth\r\n", "north\nsouth\n", r"north\r\nsouth\r\n", "北\r\n南\n末\r", 'quote"\\\t\0'])
+@pytest.mark.parametrize("original", ["", "original", "north\r\nsouth\r\n", "north\nsouth\n", r"north\r\nsouth\r\n", "北\r\n南\n末\r", 'quote"\\\t\0'])
 async def test_toolset_telemetry_preserves_results_without_execution_policy(tmp_path, monkeypatch, original):
     from pydantic_ai import ToolReturn
 
     from redlotus.core.gateway import create_function_toolset
 
-    (tmp_path / "config.json").write_text('{"lifecycle":{"trace_history_turns":10},"ui":{"tool_argument_preview_chars":80,"tool_keyword_limit":5,"tool_positional_limit":3}}')
+    (tmp_path / "config.json").write_text('{"storage":{"runtime_dir":"WorkDatabase/runtime","references_dir":"references"},"lifecycle":{"trace_history_turns":10},"ui":{"tool_argument_preview_chars":80,"tool_keyword_limit":5,"tool_positional_limit":3}}')
     (tmp_path / "original.txt").write_bytes(original.encode("utf-8"))
-    result = BasicToolkit.read_file(SimpleNamespace(_readable_path=tmp_path.joinpath), "original.txt")
+    toolkit = BasicToolkit(None, workspace=WorkspaceContext.from_path(tmp_path), show_diff=MagicMock(return_value=(0, 0, 0)))
+    result = toolkit.read_file("original.txt")
     assert isinstance(result, ToolReturn)
-    assert result.return_value == json.loads(result.content[0])["text"] == original
+    assert result.return_value == json.loads(result.content[0])["text"] == (original or "File is empty")
+    (tmp_path / "copy.txt").write_bytes(b"before\r\n")
+    toolkit._review_store.activate(MagicMock())
+    assert toolkit.write_file("copy.txt", content=original + "ordinary\r\n").startswith("Saved")
+    assert (tmp_path / "copy.txt").read_bytes() == (original + "ordinary\r\n").encode("utf-8")
+    assert toolkit.write_file("copy.txt", copy_from="original.txt").startswith("Saved")
+    assert (tmp_path / "copy.txt").read_bytes() == (tmp_path / "original.txt").read_bytes() == original.encode("utf-8")
+    (tmp_path / "invalid.txt").write_bytes(b"\xff")
+    entry = toolkit._review_store.get(str(tmp_path / "copy.txt"))
+    for arguments in ({}, {"content": original, "copy_from": "original.txt"}, {"copy_from": "missing.txt"}, {"copy_from": "invalid.txt"}):
+        assert toolkit.write_file("copy.txt", **arguments).startswith("Error")
+        assert (tmp_path / "copy.txt").read_bytes() == original.encode("utf-8") and toolkit._review_store.get(str(tmp_path / "copy.txt")) is entry
+    for hunk in entry.hunks:
+        toolkit._review_store.decide(entry, hunk.index, True)
+    assert (tmp_path / "copy.txt").read_bytes() == b"before\r\n"
     notices = []
     monkeypatch.setattr(registry.logger, "debug", notices.append)
 
@@ -274,17 +286,12 @@ async def test_all_external_processes_obey_configured_command_deadline(tmp_path,
         "lifecycle": {"process_termination_timeout_seconds": 2},
         "storage": {"runtime_dir": "WorkDatabase/runtime"},
     }), encoding="utf-8")
-    execute = execution._run_owned_process
-
-    async def verify_timeout(*args, **kwargs):
-        assert kwargs["timeout"] == 1
-        return await execute(*args, **kwargs)
-
-    monkeypatch.setattr(execution, "_run_owned_process", verify_timeout)
+    execute = AsyncMock(wraps=execution._run_owned_process)
+    monkeypatch.setattr(execution, "_run_owned_process", execute)
     with pytest.raises(subprocess.TimeoutExpired) as expired:
         await execution.run_subprocess([sys.executable, "-c", "import time; time.sleep(30)"],
                                        shell=False, cwd=str(tmp_path), timeout=requested)
-    assert expired.value.timeout == 1
+    assert expired.value.timeout == execute.await_args.kwargs["timeout"] == 1
 
 
 async def test_inherited_pipe_failure_obeys_configured_cleanup_deadline(tmp_path):
@@ -360,26 +367,16 @@ async def test_browser_launch_uses_explicit_configuration(tmp_path, monkeypatch,
     (tmp_path / "config.json").write_text(json.dumps({
         "BROWSER_HEADLESS": headless, "browser": {"viewport": viewport, "locale": locale},
     }))
-    calls = []
-
-    async def new_page(**kwargs):
-        calls.append(kwargs)
-        return object()
-
-    async def launch(**kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(new_page=new_page)
-
-    async def stop():
-        calls.append("stopped")
-
-    async def start():
-        return SimpleNamespace(chromium=SimpleNamespace(launch=launch), stop=stop)
-
+    new_page = AsyncMock(return_value=object())
+    launch = AsyncMock(return_value=SimpleNamespace(new_page=new_page))
+    stop = AsyncMock()
+    start = AsyncMock(return_value=SimpleNamespace(chromium=SimpleNamespace(launch=launch), stop=stop))
     monkeypatch.setattr(async_api, "async_playwright", lambda: SimpleNamespace(start=start))
     browser = PlaywrightBrowserSession(None)
     await browser._start()
-    assert calls == [{"headless": expected}, {"viewport": viewport, "locale": locale}]
+    launch.assert_awaited_once_with(headless=expected)
+    new_page.assert_awaited_once_with(viewport=viewport, locale=locale)
+    stop.assert_not_awaited()
 
 
 async def test_subagent_close_joins_its_thread_without_blocking_the_owner_loop(tmp_path):
@@ -492,12 +489,9 @@ async def test_image_generation_shares_configured_http_and_preserves_explicit_ar
             return httpx.Response(302, headers={"location": "https://cdn.invalid/final-image"})
         return httpx.Response(200, content=b"complete image", headers={"content-type": "image/png"})
 
-    async def sleep(delay):
-        sleeps.append(delay)
-
     transport = httpx.MockTransport(respond)
     monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=transport))
-    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(side_effect=sleeps.append))
     with httpx.Client(transport=transport) as legacy:
         monkeypatch.setattr(requests, "post", legacy.post)
         monkeypatch.setattr(requests, "get", legacy.get)
@@ -562,14 +556,10 @@ async def test_browser_updates_separate_action_and_navigation_policies(tmp_path)
 
     observed, navigations = {}, []
 
-    async def goto(url, **kwargs):
-        navigations.append(kwargs.get("timeout", observed.get("navigation")))
-
-    async def title():
-        return "Fixture"
-
     browser = PlaywrightBrowserSession(None)
-    browser._page = SimpleNamespace(url="https://example.invalid", goto=goto, title=title,
+    browser._page = SimpleNamespace(url="https://example.invalid",
+                                   goto=AsyncMock(side_effect=lambda url, **kwargs: navigations.append(kwargs.get("timeout", observed.get("navigation")))),
+                                   title=AsyncMock(return_value="Fixture"),
                                    set_default_timeout=lambda value: observed.update(action=value),
                                    set_default_navigation_timeout=lambda value: observed.update(navigation=value))
     for action, navigation in ((2, 7), (3, 11)):

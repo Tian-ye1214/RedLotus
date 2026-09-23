@@ -304,6 +304,8 @@ class BasicToolkit:
         Read the current on-disk version of a project text file.
         UTF-8 text retains its original LF or CRLF line endings; preserve them for an exact copy.
         A supplemental JSON text view makes control characters and literal backslashes explicit.
+        That view encodes the original string: reuse its decoded text value, not the displayed
+        escape sequences or enclosing quotes. The original tool return is the file content.
         Use for source code, generated artifacts, changes since a reference was captured,
         or an explicit reread. Reference blocks already contain the stated snapshot content;
         use read_reference for that immutable version when it is absent from context.
@@ -360,15 +362,20 @@ class BasicToolkit:
         except (OSError, ValueError) as exc:
             return f"Error updating '{name}': {exc}"
 
-    def write_file(self, name: str, content: str) -> str:
+    def write_file(self, name: str, content: str | None = None, copy_from: str | None = None) -> str:
         """
         Create or overwrite a project file and display the resulting diff.
+        Provide exactly one of content or copy_from. For an exact UTF-8 text copy,
+        choose copy_from to preserve source characters without regenerating them.
 
         Args:
             name: Path relative to the current project; use WorkDatabase/ for generated artifacts.
-            content: Text after standard JSON string decoding. Written as UTF-8 with identical characters and line endings, without a second escape-decoding step.
+            content: String value decoded once from the tool call's JSON. Written as UTF-8 with identical characters and line endings; literal backslashes stay literal.
+            copy_from: Readable UTF-8 source path. Copy its complete text verbatim, including line endings; omit content when using this option.
         """
-        return self._update_file(name, lambda previous: content)
+        if (content is None) == (copy_from is None):
+            return "Error: provide exactly one of content or copy_from."
+        return self._update_file(name, lambda previous: content if copy_from is None else self._readable_path(copy_from).read_bytes().decode("utf-8"))
 
     def edit_file(self, name: str, old_string: str, new_string: str) -> str:
         """

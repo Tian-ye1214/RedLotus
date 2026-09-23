@@ -25,7 +25,7 @@ def format_system_info() -> str:
 
 
 def format_prompt_current_time() -> str:
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.datetime.now().strftime("%Y-%m-%d")
 
 
 def with_runtime_context(content) -> list:
