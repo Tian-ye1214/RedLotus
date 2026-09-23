@@ -592,54 +592,13 @@ async def test_first_use_enters_wizard_and_cancellation_writes_nothing(tmp_path,
     assert path.read_bytes() == before and not (tmp_path / "global/config.json").exists()
 
 
-@pytest.fixture
-def startup_values():
-    """Independently authored non-sensitive answers, never a copy of owner configuration."""
-    return {
-        "models": {
-            "coordinator": {"name": "openai:fixture", "auto_compress_ratio": .8,
-                            "compress_head_turns": 1, "compress_tail_turns": 2},
-            "manager": {"name": "openai:fixture", "auto_compress_ratio": .7,
-                        "compress_head_turns": 0, "compress_tail_turns": 2},
-            "worker": {"name": "openai:fixture", "auto_compress_ratio": .9,
-                       "compress_head_turns": 1, "compress_tail_turns": 1},
-            "compressor": {"name": "openai:fixture"}, "title": {"name": "openai:fixture"},
-        },
-        "BASE_URL": "https://example.invalid/v1", "API_KEY": "not-a-real-key",
-        "MODEL_HTTP_TIMEOUT": 30, "request_limit": None,
-        "agent_run_policy": {"max_concurrent_threads_per_session": 2, "max_command_timeout_seconds": 15, "max_task_retries": 2},
-        "lifecycle": {"invocation_history_per_session": 10, "shutdown_grace_seconds": 2, "process_termination_timeout_seconds": 1, "trace_history_turns": 20},
-        "storage": {"filename_max_chars": 50, "file_lock_timeout_seconds": 0, "project_dir": "data", "sessions_dir": "data/sessions", "project_logs_dir": "data/logs",
-                    "references_dir": "data/references", "runtime_dir": "data/runtime", "state_dir": "",
-                    "cleanup": {"enabled": False, "execution_cache": False, "session_retention_days": 7, "log_retention_days": 7, "session_log_max_bytes": 4096}},
-        "input_limits": {"csv_sniff_chars": 65536, "parse_concurrency": 2, "max_redirects": 1, "defaults": {"max_files": 2, "max_file_bytes": 1024, "reference_download_timeout_seconds": 2}},
-        "memory_perception": {"model_role": "worker", "window_turns": 20, "overlap_turns": 3, "quiescence_wait_timeout_seconds": 2},
-        "short_term_memory": {"db_path": "memory", "table_name": "fixture", "turn_token_limit": 200,
-                              "turn_chunk_overlap_tokens": 20, "vector_search_limit": 5, "final_top_k": 2,
-                              "min_similarity": .4, "use_rerank": False,
-                              "index": {"metric": "cosine", "min_rows": 10, "rebuild_every_n_adds": 10,
-                                        "rows_per_partition": 4, "dimensions_per_sub_vector": 4}},
-        "long_term_memory": {"table_name": "fixture_profile"},
-        "BROWSER_HEADLESS": True,
-        "ui": {"interrupt_repeat_seconds": 2, "status_refresh_seconds": .5, "panel_refresh_seconds": 3, "max_diff_lines": 300,
-               "stream_preview_max_lines": 10, "stream_preview_max_chars": 6000, "recent_session_limit": 20,
-               "max_skipped_files": 5, "file_completion_limit": 50,
-               "tool_argument_preview_chars": 80, "tool_keyword_limit": 5, "tool_positional_limit": 3,
-               "usage_file_limit": 10, "session_error_max_chars": 120},
-        "web_search": {"timeout_seconds": 5, "max_results": 5, "region": "cn-zh", "safesearch": "moderate", "timelimit": None, "backend": "auto"},
-        "image_generation": {"width": 512, "height": 512, "max_wait_seconds": 60, "http_timeout_seconds": 5,
-                             "poll_interval_seconds": .5, "progress_every_polls": 10},
-        "browser": {"viewport": {"width": 900, "height": 700}, "locale": "en-US", "action_timeout_seconds": 2, "navigation_timeout_seconds": 7},
-        "model_metadata": {"url": "https://openrouter.ai/api/v1/models", "timeout": 10,
-                           "supported_thinking_efforts": ["low", "high"]},
-        "rag_service": {"http2": False, "timeout": 10, "embedding_batch_size": 2, "index_batch_size": 2},
-    }
 
 
-@pytest.mark.parametrize("confirm", ["y", "n"])
-async def test_first_use_collects_typed_fields_and_confirms_once(tmp_path, startup_values, confirm):
+@pytest.mark.parametrize("confirm,timelimit", [("y", None), ("y", "d"), ("n", None)])
+async def test_first_use_collects_typed_fields_and_confirms_once(tmp_path, startup_values, confirm, timelimit):
 
 
+    startup_values["web_search"]["timelimit"] = timelimit
     questions, notices, invalid = [], [], set()
 
     async def answer(question, **kwargs):
@@ -664,7 +623,7 @@ async def test_first_use_collects_typed_fields_and_confirms_once(tmp_path, start
     if confirm == "y":
         assert not missing_startup_fields(settings())
         assert settings()["models"]["title"] == startup_values["models"]["title"]
-        assert settings()["storage"]["state_dir"] == ""
+        assert (settings()["storage"]["state_dir"], settings()["web_search"]["timelimit"]) == ("", timelimit)
     else:
         assert not (tmp_path / "global/config.json").exists() and not settings()
 

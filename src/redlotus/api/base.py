@@ -425,6 +425,8 @@ class ConfigurationSetup:
                     raise ValueError("不能为空")
                 if text.startswith("=") and _model_selection_field(path):
                     value = get_model_and_params(text[1:], cfg=self.values)[0]
+                elif text == "null" and "null" in field.get("type", []):
+                    value = None
                 elif field.get("type") == "string" or "string" in field.get("type", []) and path != ("request_limit",):
                     value = text
                 else:
