@@ -30,12 +30,13 @@ from redlotus.ui.console import AgentCliController
 @pytest.mark.parametrize("prepared", [False, True, "internal"])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("failure", [None, "save", "cancel", "compress", "again", "other", "auth", "no_checkpoint"])
-async def test_perception_capacity_recovery_preserves_evidence_and_output(monkeypatch, stream, failure, prepared):
+@pytest.mark.parametrize("role,category", [("coordinator", "main"), ("manager", "agent"), ("worker", "agent"), ("perception", "auxiliary")])
+async def test_durable_capacity_recovery_preserves_evidence_and_output(monkeypatch, stream, failure, prepared, role, category):
 
     from pydantic_ai.models.function import DeltaToolCall, FunctionModel
     from redlotus.runtime.network import ModelTarget
 
-    calls, saved, compressed, timings = [], [], [], []
+    calls, saved, compressed, timings, tools, audit = [], [], [], [], [], []
     error = ModelHTTPError(status_code=401 if failure == "auth" else 400, model_name="fixture", body={
         "message": "Bad tool schema" if failure == "other" else "This model's maximum context length is 100 tokens. However, you requested 120 tokens (80 in the messages, 40 in the completion). Please reduce the length of the messages or completion.",
         "type": "invalid_request_error", "param": None, "code": "invalid_request_error",
@@ -73,10 +74,11 @@ async def test_perception_capacity_recovery_preserves_evidence_and_output(monkey
     monkeypatch.setattr(gateway, "create_model", lambda *args: model)
     monkeypatch.setattr(history, "_call_compressor_llm", compress)
     monkeypatch.setattr(history, "load_prompt", lambda name: "## Facts\n## Next")
-    monkeypatch.setattr(history.logger, "info", lambda *args: None)
+    monkeypatch.setattr(history.logger, "info", lambda message, *args: audit.append((message, args)))
     def read_evidence():
+        tools.append("read_evidence")
         return "RAW_WINDOW"
-    agent = gateway.create_agent(target, instructions="SYSTEM_FIXED", role="perception", usage_category="auxiliary", toolsets=[FunctionToolset([read_evidence])],
+    agent = gateway.create_agent(target, instructions="SYSTEM_FIXED", role=role, usage_category=category, toolsets=[FunctionToolset([read_evidence])],
         persist_context=None if failure == "no_checkpoint" else persist, capabilities=[PerceptionTiming(timings.append)])
     evidence = [ModelRequest([UserPromptPart("RAW_EVIDENCE")])] if prepared else []
     async def run():
@@ -93,7 +95,15 @@ async def test_perception_capacity_recovery_preserves_evidence_and_output(monkey
             assert await run() == "complete"
     retries = failure in (None, "again")
     assert len(calls) == len(timings) == (2 if retries else 1) + (prepared == "internal")
+    assert tools == (["read_evidence"] if prepared == "internal" else [])
+    assert sum(call["usage"] is None for call in timings) == (2 if failure == "again" else 1)
     assert bool(compressed) == (failure not in ("other", "auth", "no_checkpoint"))
+    audit = [json.loads(args[0]) for message, args in audit if "capacity_retry=" in message]
+    assert len(audit) == int(failure not in ("other", "auth", "no_checkpoint"))
+    if audit:
+        assert audit[0] == dict(role=role, model="fixture", invocation=audit[0]["invocation"], run_step=1 + (prepared == "internal"),
+                                status_code=400, attempt=1, message=error.body["message"], usage=None)
+        assert isinstance(audit[0]["invocation"], str) and audit[0]["invocation"]
     assert "RAW_WINDOW" in str(calls[0])
     if not saved:
         assert "RAW_WINDOW" in str(messages)

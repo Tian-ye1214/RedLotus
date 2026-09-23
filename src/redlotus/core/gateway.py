@@ -103,18 +103,21 @@ class RequestPolicy(AbstractCapability):
         return response
 
     async def wrap_model_request(self, ctx, *, request_context, handler):
-        """Retry an oversized durable auxiliary request once, after saving its summaries."""
+        """Retry an oversized durable request once, after saving its summaries."""
         for attempt in range(2):
             self._pending_requests[ctx.run_id] = ctx, request_context.messages[-1], len(ctx.messages)
             try:
                 return await handler(request_context)
             except ModelHTTPError as error:
                 if (
-                    attempt or self.usage_category != "auxiliary" or self.persist_context is None
+                    attempt or self.persist_context is None
                     or not context_length_exceeded(error)
                     or "auto_compress_ratio" not in self.target.options["context"]
                 ):
                     raise
+                logger.info("容量超限，正在压缩并保存后重试 capacity_retry=%s", json.dumps(dict(
+                    role=self.role, model=self.target.name, invocation=ctx.run_id, run_step=ctx.run_step,
+                    status_code=400, attempt=1, message=error.body["message"], usage=None), ensure_ascii=False))
                 self._pending_requests.pop(ctx.run_id, None)
                 from redlotus.core.history import compact_request_messages
 

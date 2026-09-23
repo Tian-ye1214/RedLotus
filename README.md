@@ -24,9 +24,9 @@ redlotus
 
 ## Features
 
-The `1.0.1.post1` candidate (release title: `1.0.1-release`) is being validated on `develop`; it has not been released. This release's agreed validation scope excludes Linux, macOS, live QQ/WeChat accounts, and unconfigured model protocols. Those capabilities remain implemented but unverified for this release. Testing startup and upgrades from the old `1.0.1` package has been removed from scope; fresh installation of the new public package and downloaded release artifacts remains required. See the [current acceptance record](docs/design.md#状态说明).
+The release process for `1.0.1.post1` uses the title `1.0.1-release` and preserves the existing `1.0.1` release. Its agreed validation scope excludes Linux, macOS, live QQ/WeChat accounts, and unconfigured model protocols. Those capabilities remain implemented but unverified for this release. Testing startup and upgrades from the old `1.0.1` package is outside this scope. Publication requires source, installed-package, and Windows artifact acceptance, followed by fresh public downloads. See the [build checkpoints](docs/design.md#状态说明) and the corresponding [GitHub release notes](https://github.com/Tian-ye1214/RedLotus/releases) for the final status and artifact hashes.
 
-Before each model request, compression uses reported input tokens and the threshold `ceil(min(configured_ratio * context_capacity, context_capacity - max_output))`. A durable memory request rejected for context capacity is split at complete evidence and closed tool-call boundaries for concurrent compression, then retried once after the summaries are saved. Original records and the system prompt remain intact; final-candidate API validation is still in progress.
+Before each model request, compression uses reported input tokens and the threshold `ceil(min(configured_ratio * context_capacity, context_capacity - max_output))`. A main, child, or memory request with a durable checkpoint that is rejected for context capacity is split at complete evidence and closed tool-call boundaries for concurrent compression, then retried once after the summaries are saved. Completed tools are not repeated. The capacity rejection is logged with unknown provider usage preserved. Original records and the system prompt remain intact.
 
 | Feature | Description |
 |---------|-------------|
