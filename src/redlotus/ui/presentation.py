@@ -32,7 +32,6 @@ from redlotus.core.history import (
     summarize_messages,
 )
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import settings
 from redlotus.runtime.resources import conversations_root
 from redlotus.sessions.control import UserMessage
 
@@ -97,19 +96,16 @@ class DiffKind(StrEnum):
     DEL = "del"
     MOD = "mod"
     CTX = "ctx"
-    GAP = "gap"
 
 
 @dataclass(frozen=True)
 class DiffStyle:
-    max_lines: int | None = None
     colors: dict[DiffKind, str] = field(
         default_factory=lambda: {
             DiffKind.ADD: "green",
             DiffKind.DEL: "red",
             DiffKind.MOD: "blue",
             DiffKind.CTX: "dim",
-            DiffKind.GAP: "dim italic",
         }
     )
     signs: dict[DiffKind, str] = field(
@@ -118,7 +114,6 @@ class DiffStyle:
             DiffKind.DEL: "-",
             DiffKind.MOD: "~",
             DiffKind.CTX: " ",
-            DiffKind.GAP: " ",
         }
     )
 
@@ -134,16 +129,15 @@ class DiffLine:
     text: str
 
 
-def compute_line_diff(old: str, new: str, *, context: int = 3) -> list[DiffLine]:
-    """按行对比 old→new，返回带类别和行号的 DiffLine 列表；长未改段折叠为 gap。"""
+def compute_line_diff(old: str, new: str) -> list[DiffLine]:
+    """按行对比 old→new，保留所有行及其类别和行号。"""
     old_lines = old.splitlines()
     new_lines = new.splitlines()
     sm = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
-    ops = sm.get_opcodes()
     out: list[DiffLine] = []
-    for idx, (tag, i1, i2, j1, j2) in enumerate(ops):
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
-            out += _equal_block(old_lines, i1, i2, j1, context=context, first=idx == 0, last=idx == len(ops) - 1)
+            out += [DiffLine(DiffKind.CTX, i1 + k + 1, j1 + k + 1, line) for k, line in enumerate(old_lines[i1:i2])]
         elif tag == "insert":
             out += [DiffLine(DiffKind.ADD, None, j1 + k + 1, line) for k, line in enumerate(new_lines[j1:j2])]
         elif tag == "delete":
@@ -152,24 +146,6 @@ def compute_line_diff(old: str, new: str, *, context: int = 3) -> list[DiffLine]
             out += [DiffLine(DiffKind.MOD, i1 + k + 1, None, line) for k, line in enumerate(old_lines[i1:i2])]
             out += [DiffLine(DiffKind.MOD, None, j1 + k + 1, line) for k, line in enumerate(new_lines[j1:j2])]
     return out
-
-
-def _equal_block(old_lines, i1, i2, j1, *, context, first, last) -> list[DiffLine]:
-    n = i2 - i1
-
-    def ctx(off: int) -> DiffLine:
-        return DiffLine(DiffKind.CTX, i1 + off + 1, j1 + off + 1, old_lines[i1 + off])
-
-    top = 0 if first else context
-    bot = 0 if last else context
-    if top + bot >= n:
-        return [ctx(k) for k in range(n)]
-    hidden = n - top - bot
-    return (
-        [ctx(k) for k in range(top)]
-        + [DiffLine(DiffKind.GAP, None, None, f"⋯ {hidden} 行未改动 ⋯")]
-        + [ctx(k) for k in range(n - bot, n)]
-    )
 
 
 def diff_stats(lines: list[DiffLine]) -> tuple[int, int, int]:
@@ -187,8 +163,6 @@ def _gutter_width(lines: list[DiffLine]) -> int:
 
 def _line_text(ln: DiffLine, width: int, signs: dict[DiffKind, str]) -> str:
     sign = signs[ln.kind]
-    if ln.kind is DiffKind.GAP:
-        return f"{sign} {'':>{width}}  {ln.text}"
     no = ln.new_no if ln.new_no is not None else ln.old_no
     return f"{sign} {no:>{width}}  {ln.text}"
 
@@ -196,17 +170,13 @@ def _line_text(ln: DiffLine, width: int, signs: dict[DiffKind, str]) -> str:
 def render_diff(
     lines: list[DiffLine], *, path: str, stats: tuple[int, int, int], style: DiffStyle = DEFAULT_STYLE
 ) -> Panel:
-    """渲染成带行号、彩色、可折叠、超长截断的 rich Panel。"""
+    """完整渲染成带行号和彩色的 rich Panel。"""
     add, dele, mod = stats
     width = _gutter_width(lines)
-    body = Text()
-    max_lines = settings()["ui"]["max_diff_lines"] if style.max_lines is None else style.max_lines
-    for idx, ln in enumerate(lines[:max_lines]):
-        if idx:
-            body.append("\n")
-        body.append(_line_text(ln, width, style.signs), style=style.colors[ln.kind])
-    if len(lines) > max_lines:
-        body.append(f"\n… 还有 {len(lines) - max_lines} 行（已截断）", style=style.colors[DiffKind.GAP])
+    body = Text("\n").join(
+        Text(_line_text(ln, width, style.signs), style=style.colors[ln.kind])
+        for ln in lines
+    )
     title = Text.assemble(
         (f"{path}  ", "bold"),
         (f"+{add} ", style.colors[DiffKind.ADD]),
@@ -332,15 +302,6 @@ def user_text_panel(content, title, *, text_style="bold white", border_style="br
         Text(content or " ", style=text_style), title=title, title_align="left",
         border_style=border_style, padding=(0, 1), expand=False,
     )
-
-
-def model_stream_visible_text(text, policy) -> str:
-    """Bound only the transient preview; the full response remains in the log."""
-    body = text or ""
-    if len(body) > policy["stream_preview_max_chars"]:
-        body = body[-policy["stream_preview_max_chars"]:].lstrip("\n")
-    lines = body.splitlines()
-    return "\n".join(lines[-policy["stream_preview_max_lines"]:]) if len(lines) > policy["stream_preview_max_lines"] else body
 
 
 def print_message(message, *, prefix="", style=""):
@@ -481,7 +442,6 @@ class TaskPanelStats:
 @dataclass
 class RuntimePanelStats:
     session_key: str = "-"
-    active_invocations: int = 0
     active_invocations_error: bool = False
     running_agents: int = 0
     queued_agents: int = 0
@@ -494,7 +454,6 @@ class PanelSnapshot:
     runtime: RuntimePanelStats
     history: PanelHistoryStats
     visible_sessions: list[PanelSessionSummary]
-    include_all: bool = False
 
     @property
     def content(self):
@@ -534,20 +493,17 @@ async def build_panel_snapshot(
     system: Any = None,
     coordinator_history: Any = None,
     manager_history: Any = None,
-    include_all: bool = False,
     cache: PanelSnapshotCache | None = None,
 ) -> PanelSnapshot:
     root = Path(log_root or conversations_root())
     history, sessions = await asyncio.to_thread(
         _collect_history, root, cache or PanelSnapshotCache()
     )
-    visible_sessions = sessions if include_all else sessions[:settings()["ui"]["recent_session_limit"]]
     runtime = await _collect_runtime(system, coordinator_history, manager_history)
     return PanelSnapshot(
         runtime=runtime,
         history=history,
-        visible_sessions=visible_sessions,
-        include_all=include_all,
+        visible_sessions=sessions,
     )
 
 
@@ -558,7 +514,7 @@ def render_panel(snapshot: PanelSnapshot) -> Panel:
         _render_kpis(snapshot),
         _render_runtime(runtime),
         _render_distribution(history),
-        _render_sessions(snapshot.visible_sessions, include_all=snapshot.include_all),
+        _render_sessions(snapshot.visible_sessions),
     ]
     if history.skipped_count:
         parts.append(_render_skipped(history))
@@ -571,14 +527,12 @@ def _collect_history(
 ) -> tuple[PanelHistoryStats, list[PanelSessionSummary]]:
     history = PanelHistoryStats()
     sessions: dict[str, PanelSessionSummary] = {}
-    max_skipped_files = settings()["ui"]["max_skipped_files"]
     files = sorted(log_root.rglob(MODEL_MESSAGES_GLOB), key=str)
     for path in files:
         summary = cache.load(path)
         if isinstance(summary, str):
             history.skipped_count += 1
-            if len(history.skipped_files) < max_skipped_files:
-                history.skipped_files.append(summary)
+            history.skipped_files.append(summary)
             continue
         date, topic = summary.meta["date"], summary.meta["topic"]
         history.file_count += 1
@@ -629,7 +583,6 @@ async def _collect_runtime(
         try:
             runtime.running_agents, runtime.queued_agents = system._factory.activity(system.session_key)
             runtime.running_agents += int(system._session.active)
-            runtime.active_invocations = runtime.running_agents
         except Exception:
             runtime.active_invocations_error = True
     return runtime
@@ -727,12 +680,9 @@ def _session_total_tokens(session: PanelSessionSummary) -> int:
     return session.input_tokens + session.output_tokens
 
 
-def _render_sessions(
-    sessions: list[PanelSessionSummary], *, include_all: bool
-) -> Table:
+def _render_sessions(sessions: list[PanelSessionSummary]) -> Table:
     """Compare labeled session totals without implying continuous time or quota progress."""
-    scope = "全部" if include_all else f"最近 {settings()['ui']['recent_session_limit']} 个"
-    table = Table(title=f"会话 API 用量 · {scope} · 最近活动优先", expand=True, show_lines=True)
+    table = Table(title="会话 API 用量 · 全部 · 最近活动优先", expand=True, show_lines=True)
     table.add_column("时间 / 会话", min_width=12, ratio=1, overflow="fold")
     table.add_column("相对用量", width=12, overflow="crop", no_wrap=True)
     table.add_column("API 总 Token", justify="right", min_width=13, no_wrap=True)
@@ -789,10 +739,14 @@ def _fmt_int(value: int) -> str:
 
 
 def handle_turn_error(e: Exception) -> None:
-    from redlotus.runtime.network import InputLimitError
+    from redlotus.runtime.network import InputLimitError, is_transport_interruption
 
     if isinstance(e, InputLimitError):
         print_warning(str(e))
+        return
+    if is_transport_interruption(e):
+        print_warning(f"模型响应中断: {e}")
+        logger.error("详细信息:\n%s", traceback.format_exc(), file_only=True)
         return
     if isinstance(e, ModelHTTPError):
         body = e.body or {}

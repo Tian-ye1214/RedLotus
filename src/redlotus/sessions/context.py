@@ -1,17 +1,48 @@
 """Conversation history, execution identity and recoverable outcome contracts."""
 from __future__ import annotations
 
+import json
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Literal
+from typing import Any, Callable, Literal, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.messages import ModelRequest, ToolReturnPart
 
-from redlotus.runtime.config import settings
 from redlotus.runtime.resources import WorkspaceContext, bind_context
+from redlotus.prompts.prompt import with_runtime_context
+
+if TYPE_CHECKING:
+    from redlotus.tools.references import ReferenceFile
+
+
+@dataclass
+class UserMessage:
+    """User prompt text plus optional pydantic-AI multimodal content."""
+
+    text: str
+    attachments: list = field(default_factory=list)
+    original_text: str | None = None
+    references: list[ReferenceFile] = field(default_factory=list)
+    resume: dict | None = None
+
+    def to_prompt(self):
+        """Pass original requirements and explicitly labelled reference data together."""
+        if self.resume is not None:
+            from pydantic_ai.messages import TextContent
+            return [*([] if self.resume.get('submitted', True) else with_runtime_context([self.text])),
+                    TextContent(json.dumps({'command': 'resume', 'turn_id': self.resume['turn_id']}, ensure_ascii=False),
+                                metadata={'origin': 'runtime_control'}),
+                    *(item['text'] for item in self.resume['supplements']),
+                    *(part for ref in self.references if not self.resume.get('submitted', True) or any(ref.id in row.get('reference_ids', []) for row in self.resume['supplements']) for part in ref.to_prompt())]
+        parts = [self.text]
+        for reference in self.references:
+            parts.extend(reference.to_prompt())
+        parts.extend(self.attachments)
+        return with_runtime_context(parts)
+
 
 
 def _part_kind(part) -> str:
@@ -163,6 +194,7 @@ execution_role = partial(bind_context, _execution_role)
 _CURRENT_TURN_ID: ContextVar[str | None] = ContextVar("agent_turn_id", default=None)
 _CURRENT_AGENT_ID: ContextVar[str | None] = ContextVar("agent_id", default=None)
 _USAGE_RECORDER: ContextVar[Any] = ContextVar("usage_recorder", default=None)
+_CANCELLING_WRITE: ContextVar[Callable[[], bool] | None] = ContextVar("cancelling_write", default=None)
 current_usage_recorder = _USAGE_RECORDER.get
 
 
@@ -183,12 +215,10 @@ agent_context = partial(bind_context, _CURRENT_AGENT_ID)
 
 
 class TurnTraceStore:
-    def __init__(self, max_turns: int | None = None) -> None:
+    def __init__(self) -> None:
         self._events: dict[str, list[dict[str, Any]]] = {}
-        self._max_turns = max_turns
 
     def record(self, turn_id: str | None, kind: str, **fields: Any) -> None:
-        self._max_turns = settings()["lifecycle"]["trace_history_turns"] if self._max_turns is None else self._max_turns
         key = turn_id or "unbound"
         event = {
             "at": time.time(),
@@ -196,11 +226,6 @@ class TurnTraceStore:
             **fields,
         }
         self._events.setdefault(key, []).append(event)
-        while len(self._events) > self._max_turns:
-            oldest = next(iter(self._events))
-            if oldest == key:
-                break
-            del self._events[oldest]
 
     def events_for_turn(self, turn_id: str) -> list[dict[str, Any]]:
         return list(self._events.get(turn_id, []))

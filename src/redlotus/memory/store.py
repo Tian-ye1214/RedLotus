@@ -8,6 +8,7 @@ import json
 import re
 from copy import deepcopy
 from datetime import timedelta
+from functools import cached_property
 from pathlib import Path
 
 import lancedb
@@ -17,7 +18,7 @@ from pydantic_ai import ToolReturn
 from redlotus.memory.records import CREDENTIAL_PATTERN, MemoryConflict, MemoryRecord
 from redlotus.memory.retrieval import RAG, missing_rag_settings
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import missing_rag_api_keys, settings
+from redlotus.runtime.config import missing_rag_api_keys, settings, config_value
 from redlotus.runtime.resources import file_lock, iso_utc_now
 from redlotus.tools.references import ReferenceStore
 
@@ -29,24 +30,29 @@ class MemoryStore:
 
     def __init__(self, workspace):
         self.workspace = workspace
-        config = deepcopy(settings())
-        self.indexes = {
-            "project": RAG(
-                config["short_term_memory"], project_id=workspace.project_id
-            ),
-            "global": RAG(
-                {
-                    **config["short_term_memory"],
-                    "table_name": config["long_term_memory"]["table_name"],
-                },
-                project_id="__global__",
-            ),
-        }
-        self.path = Path(self.indexes["project"]._db.db_path)
         self._db = None
         self._index_lock = asyncio.Lock()
         self.last_error = ""
         self.retrieval_error = ""
+
+    @cached_property
+    def indexes(self):
+        config = settings()
+        global_config = deepcopy(config_value(config, ("short_term_memory",), purpose="项目记忆检索和索引参数", kind=dict))
+        global_config["table_name"] = config_value(config, ("long_term_memory", "table_name"), purpose="全局记忆数据库表名", kind=str)
+        return {
+            "project": RAG(
+                config_value(config, ("short_term_memory",), purpose="项目记忆检索和索引参数", kind=dict), project_id=self.workspace.project_id
+            ),
+            "global": RAG(
+                global_config,
+                project_id="__global__",
+            ),
+        }
+
+    @cached_property
+    def path(self):
+        return Path(self.indexes["project"]._db.db_path)
 
     def _table(self):
         if self._db is None:
@@ -171,7 +177,7 @@ class MemoryStore:
     def rag_unavailable_reason(self, scope=None):
         """Describe incomplete optional-RAG setup without attempting a request."""
         names = [scope] if scope else self.indexes
-        use_rerank = any(self.indexes[name].config["use_rerank"] for name in names)
+        use_rerank = any(config_value(self.indexes[name].config, ("use_rerank",), purpose="是否使用记忆重排服务", kind=bool, choices=(True, False)) for name in names)
         missing = missing_rag_settings(
             use_rerank=use_rerank,
             configuration=settings(),
@@ -229,7 +235,7 @@ class MemoryStore:
             records, key=lambda row: len(tokens & self.tokens(row.text())), reverse=True
         )
         ranked.extend(row.id for row in matches if tokens & self.tokens(row.text()))
-        limit = int(self.indexes["project"].config["final_top_k"])
+        limit = int(config_value(self.indexes["project"].config, ("final_top_k",), purpose="记忆检索最终返回条数", kind=int))
         return [by_id[key] for key in dict.fromkeys(ranked)][:limit]
 
     async def reconcile(self):
@@ -246,7 +252,7 @@ class MemoryStore:
                         if row["indexed"] != row["body_hash"] + index.index_key
                         or row["id"] not in indexed
                     ]
-                    batch_size = int(settings()["rag_service"]["index_batch_size"])
+                    batch_size = int(config_value(settings(), ('rag_service', 'index_batch_size'), purpose="每批恢复索引的记录数量", kind=int))
                     for start in range(0, len(pending), batch_size):
                         batch = pending[start : start + batch_size]
                         vectors = await index.prepare_records(
@@ -333,7 +339,7 @@ class MemoryStore:
         )
 
     async def close(self):
-        await asyncio.gather(*(index.close() for index in self.indexes.values()))
+        await asyncio.gather(*(index.close() for index in self.__dict__.get("indexes", {}).values()))
         self._db = None
 
     def materialize(self, job, draft, index, cleared_at):

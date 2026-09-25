@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import json
 import mimetypes
 import os
 import re
-import shutil
 import signal
 import sys
 import threading
-import time
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -20,28 +17,21 @@ from redlotus.runtime import config as app_config
 from redlotus.runtime import logging as logger
 from redlotus.runtime.config import (
     ConfigError,
-    _frozen,
     _model_selection_field,
-    _validate_config,
-    config_field,
     config_file,
     config_source_summary,
     config_value,
-    get_env,
     get_model_and_params,
-    load_config,
-    missing_startup_fields,
     settings,
     update_config,
 )
 from redlotus.runtime.network import close_all_clients
-from redlotus.sessions.control import UserMessage
 
 if TYPE_CHECKING:
     from redlotus.core.system import AgentSystem
 from redlotus.runtime.resources import WorkspaceContext, current_workspace
 from redlotus.sessions.context import ChatHistory
-from redlotus.sessions.control import InputAdmission, SessionController
+from redlotus.sessions.control import InputAdmission, SessionController, UserMessage
 from redlotus.tools import registry as tool_telemetry
 
 
@@ -62,7 +52,6 @@ class ChatSession:
     question: asyncio.Future | None = None
     question_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
-    touched: float = field(default_factory=time.monotonic)
 
 
 class BotBase:
@@ -79,26 +68,12 @@ class BotBase:
     )
     _MIME_MAP: dict[str, str] = {}
 
-    # Legacy named fields still resolve through the three-layer configuration.
-    _ENV_AGENT_TIMEOUT: str = ""
-    _ENV_SEND_TIMEOUT: str = ""
-    _ENV_SESSION_IDLE_TTL: str = ""
-
     def __init__(self):
         self._sessions: dict[str, ChatSession] = {}
-        self._gc_task = None
         self._released = False
-        self._policy = settings()["bot"]
         self._agent_ctx = contextvars.ContextVar(
             f"{type(self).__name__}_context", default=None
         )
-        for source, target in (
-            (self._ENV_AGENT_TIMEOUT, "agent_run_timeout_seconds"),
-            (self._ENV_SEND_TIMEOUT, "send_reply_timeout_seconds"),
-            (self._ENV_SESSION_IDLE_TTL, "session_idle_ttl_seconds"),
-        ):
-            if source and (value := get_env(source, warn=False)):
-                self._policy[target] = float(value)
 
     platform_tag: str
     session_prefix: str
@@ -110,16 +85,6 @@ class BotBase:
             self._sessions[session_id] = state
         return self._sessions[session_id]
 
-    def _is_owner_session(self, session_id):
-        platform = self.platform_tag.lower()
-        prefix = {"qq": "private_", "wechat": "wx_"}.get(platform)
-        owners = settings().get("bot", {}).get("owner_channels", {}).get(platform, [])
-        return bool(
-            prefix
-            and session_id.startswith(prefix)
-            and session_id[len(prefix) :] in map(str, owners)
-        )
-
     def _agent_for_session(self, session_id):
         from redlotus.core.system import AgentSystem
         from redlotus.ui import presentation
@@ -128,9 +93,11 @@ class BotBase:
         if state.agent is None:
             state.agent = AgentSystem(
                 presentation=presentation,
-                owner_memory_allowed=self._is_owner_session(session_id),
+                owner_memory_allowed=False,
                 input_controller=state.inputs,
             )
+            logger.activate_log_dir(logger.prepare_log_dir(state.agent.workspace))
+            logger.prune_old_logs()
             state.agent.set_ask_user_handler(self._ask_user)
             state.agent.toolkit.set_task_directory(f"{self.platform_tag}_{session_id}")
         return state.agent
@@ -161,25 +128,6 @@ class BotBase:
         finally:
             state.ready.set()
 
-    def _ensure_session_gc(self):
-        if self._policy["session_idle_ttl_seconds"] > 0 and (
-            self._gc_task is None or self._gc_task.done()
-        ):
-            self._gc_task = asyncio.create_task(self._session_gc_loop())
-
-    async def _session_gc_loop(self):
-        while True:
-            await asyncio.sleep(self._policy["session_gc_interval_seconds"])
-            for identity, state in list(self._sessions.items()):
-                if (
-                    not state.inputs.queue.current
-                    and not state.inputs.queue.pending
-                    and time.monotonic() - state.touched > self._policy["session_idle_ttl_seconds"]
-                ):
-                    self._sessions.pop(identity, None)
-                    await self._close_session(state)
-            logger.prune_old_logs()
-
     def _submit_turn(self, identity, state, turn):
         turn = replace(turn, admission=state.inputs.admit(
             WorkspaceContext.from_path(current_workspace()),
@@ -193,47 +141,17 @@ class BotBase:
     async def _consume_turn(self, identity, state, turn):
         await state.ready.wait()
         try:
-            result = await asyncio.wait_for(
-                self._run_turn(identity, state, turn), self._policy["agent_run_timeout_seconds"]
-            )
-        except asyncio.CancelledError:
-            raise
+            result = await self._run_turn(identity, state, turn)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             logger.error("[%s] Agent 请求失败: %s", self.platform_tag, error)
             result = f"本轮执行失败（输入 {turn.admission.id}），未完成的操作不能视为成功：{error}"
-        finally:
-            state.touched = time.monotonic()
         if self._sessions.get(identity) is state:
             try:
-                await self._safe_send(turn.send_reply, result)
+                await turn.send_reply(result)
             except Exception as exc:
                 logger.error("[%s] 回复发送未确认，未自动重发: %s", self.platform_tag, exc)
                 raise
-
-    def _split_reply(self, text):
-        chunks = []
-        while len(text) > self._policy["reply_max_chars"]:
-            window = text[: self._policy["reply_max_chars"]]
-            cut = next(
-                (
-                    pos
-                    for separator in ("\n\n", "\n", " ")
-                    if (pos := window.rfind(separator)) > 0
-                ),
-                len(window),
-            )
-            chunks.append(text[:cut].rstrip())
-            text = text[cut:].lstrip()
-        return [*chunks, text] if text else chunks
-
-    async def _safe_send(self, send_reply, text):
-        """Send each chunk once; a missing acknowledgement is not failed delivery."""
-        for chunk in self._split_reply(text):
-            try:
-                await asyncio.wait_for(send_reply(chunk), self._policy["send_reply_timeout_seconds"])
-            except TimeoutError as exc:
-                raise TimeoutError("发送确认超时，送达状态未知；未自动重发。") from exc
 
     def guess_download_mime(self, *, filename="", media_type_key=""):
         return mimetypes.guess_type(filename)[0] or self._MIME_MAP.get(
@@ -246,7 +164,7 @@ class BotBase:
         async def send():
             if self._sessions.get(identity) is state:
                 try:
-                    await self._safe_send(turn.send_reply, text)
+                    await turn.send_reply(text)
                 except Exception as exc:
                     logger.error("[%s] 通知发送失败: %s", self.platform_tag, exc)
 
@@ -284,8 +202,8 @@ class BotBase:
                 return None
             state.question = asyncio.get_running_loop().create_future()
             try:
-                await self._safe_send(turn.send_reply, question)
-                return await asyncio.wait_for(state.question, self._policy["question_timeout_seconds"] if timeout is None else timeout)
+                await turn.send_reply(question)
+                return await (state.question if timeout is None else asyncio.wait_for(state.question, timeout))
             except TimeoutError:
                 return None
             finally:
@@ -296,14 +214,13 @@ class BotBase:
         if not session_id or self._released:
             return
         state = self._session(session_id)
-        state.touched = time.monotonic()
         if user_text == "/stop":
             if state.agent:
                 await state.agent.stop_current_turn()
             else:
                 state.inputs.reset()
                 await state.inputs.queue.cancel()
-            await self._safe_send(send_reply, "已停止当前任务，保留会话记录。")
+            await send_reply("已停止当前任务，保留会话记录。")
             return
         if (
             user_text in self.RESET_COMMANDS
@@ -313,38 +230,27 @@ class BotBase:
             await self._reset_session(
                 session_id, preserve_queue=user_text in self.END_TASK_COMMANDS
             )
-            await self._safe_send(send_reply, "已结束当前任务并清空上下文。")
+            await send_reply("已结束当前任务并清空上下文。")
             return
         if state.question and not state.question.done() and not (prepare or message.attachments or message.references):
             state.question.set_result(user_text)
-            state.agent._session.user_inputs.append(user_text)
             return
         if not user_text and not message.attachments and not message.references and prepare is None:
             return
-        app_config.reload_config()
         if missing := app_config.missing_main_api_keys():
-            await self._safe_send(send_reply, "缺少模型接口配置：" + ", ".join(missing))
-            return
-        if state.inputs.queue.maxsize and len(state.inputs.queue.pending) >= state.inputs.queue.maxsize:
-            await self._safe_send(
-                send_reply, f"待处理消息已达上限 {state.inputs.queue.maxsize}，请稍后再试。"
-            )
+            await send_reply("缺少模型接口配置：" + ", ".join(missing))
             return
         self._submit_turn(
             session_id,
             state,
             QueuedTurn(message, send_reply, asyncio.get_running_loop(), prepare),
         )
-        await self._safe_send(send_reply, "✓ 收到，正在处理…")
-        self._ensure_session_gc()
+        await send_reply("✓ 收到，正在处理…")
 
     async def release_all_resources_async(self):
         if self._released:
             return
         self._released = True
-        if self._gc_task:
-            self._gc_task.cancel()
-            await asyncio.gather(self._gc_task, return_exceptions=True)
         sessions, self._sessions = list(self._sessions.values()), {}
         await asyncio.gather(*(self._close_session(state) for state in sessions))
         await close_all_clients()
@@ -356,6 +262,8 @@ class BotBase:
 async def ask_configuration(question: str, *, secret=False):
     """Read a startup answer with the same hidden-key contract as the TUI dialog."""
     from prompt_toolkit import PromptSession
+    from prompt_toolkit.application import get_app_session
+    from prompt_toolkit.input.typeahead import store_typeahead
     from prompt_toolkit.key_binding import KeyBindings
 
     bindings = KeyBindings()
@@ -364,7 +272,14 @@ async def ask_configuration(question: str, *, secret=False):
     def cancel(event):
         event.app.exit(result=None)
 
-    return await PromptSession(key_bindings=bindings).prompt_async(question, is_password=secret)
+    # The TERM=dumb shortcut bypasses password masking; keep the session renderer.
+    session = PromptSession(
+        key_bindings=bindings, output=get_app_session().output
+    )
+    answer = await session.prompt_async(question, is_password=secret)
+    # A pending Esc must survive the previous prompt's cancelled input-flush task.
+    store_typeahead(session.input, session.input.flush_keys())
+    return answer
 
 def configuration_prompt_available() -> bool:
     """Return whether the default first-use dialog can safely open a terminal prompt."""
@@ -385,64 +300,51 @@ class ConfigurationSetup:
     def assign(values, path, value):
         node = values
         for key in path[:-1]:
-            if isinstance(node.get(key), str) and path[:1] == ("models",) and key == path[1]:
-                node[key] = {"preset": node[key]}
             node = node.setdefault(key, {})
         node[path[-1]] = deepcopy(value)
 
-    def connection_paths(self, role="coordinator"):
-        """Use the selected role's credential reference, not an unrelated global API key."""
-        _, parameters = get_model_and_params(role, cfg=self.values)
-        gateway = parameters.get("gateway")
-        if not gateway:
-            return [("BASE_URL",), ("API_KEY",)]
-        selected = self.values["gateways"][gateway]
-        # Edit an explicit gateway key when present; otherwise retain its named reference.
-        key = (selected["api_key_env"],) if selected.get("api_key_env") and not selected.get("api_key") else ("gateways", gateway, "api_key")
-        return [("gateways", gateway, "base_url"), key]
+    def connection_paths(self):
+        return [("BASE_URL",), ("API_KEY",)]
 
     async def fill(self, path):
-        """Validate one field, retaining previous input until the whole dialog succeeds."""
+        """Edit only model parameters and connection fields; never collect runtime policies."""
         key = ".".join(path)
+        model = _model_selection_field(path)
+        connection = path in rag_configuration_paths() or path in self.connection_paths()
+        if not model and not connection:
+            raise ConfigError(f"配置向导仅支持模型与连接字段；请在 {config_file()} 编辑 {key}")
         current = config_value(self.values, path)
-        field = config_field(path)
-        secret = "key" in path[-1].lower() or "token" in path[-1].lower() or any(
-            gateway.get("api_key_env") == path[-1] for gateway in self.values.get("gateways", {}).values()
-        )
+        secret = connection and ("key" in path[-1].lower() or "token" in path[-1].lower())
+        can_keep = isinstance(current, str) and bool(current.strip())
         shown = ("已填写" if current else "空") if secret else str(current if current is not None else "空")
-        hint = "回车保留"
-        if _model_selection_field(path) and path[0] == "models":
+        hint = "回车保留" if can_keep else "必须填写"
+        if not can_keep:
+            hint += "；作用：" + ("选择调用的模型" if model else "连接服务的地址或认证凭据") + "；类型：字符串；可选值：无枚举限制"
+        if model and path[0] == "models":
             hint += "；输入 =角色名 复用模型名，保留本角色的连接与策略"
         while True:
-            answer = await self.ask(f"{key}（当前 {shown}；{hint}；{field.get('description', '')}；Esc 取消）：", secret=secret)
+            answer = await self.ask(f"{key}（当前 {shown}；{hint}；Esc 取消）：", secret=secret)
             if answer is None or answer == "\x1b":
                 return False
             text = answer.strip()
-            if not text and current not in (None, ""):
+            if not text and can_keep:
                 return True
+            if not text:
+                self.emit(f"{key} 不能为空。")
+                continue
             try:
-                if not text and not field.get("allow_empty"):
-                    raise ValueError("不能为空")
-                if text.startswith("=") and _model_selection_field(path):
-                    value = get_model_and_params(text[1:], cfg=self.values)[0]
-                elif text == "null" and "null" in field.get("type", []):
-                    value = None
-                elif field.get("type") == "string" or "string" in field.get("type", []) and path != ("request_limit",):
-                    value = text
-                else:
-                    try:
-                        value = json.loads(text)
-                    except json.JSONDecodeError:
-                        value = text
-                if "url" in path[-1].lower() or path[-1] == "SILICONFLOW_BASE":
+                value = get_model_and_params(text[1:], cfg=self.values)[0] if text.startswith("=") and model else text
+                if connection and ("url" in path[-1].lower() or path[-1] == "SILICONFLOW_BASE"):
                     parsed = urlsplit(value)
                     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                        raise ValueError("请输入完整的 http/https 服务地址")
+                        self.emit(f"{key} 需要完整的 http/https 服务地址。")
+                        continue
                 candidate = deepcopy(self.values)
                 self.assign(candidate, path, value)
-                _validate_config(candidate, config_file())
+                if path[0] == "models":
+                    get_model_and_params(path[1], cfg=candidate)
             except (ValueError, KeyError, TypeError):
-                self.emit(f"{key} 无效：请按字段类型填写；模型复用需指定已配置的角色。")
+                self.emit(f"{key} 无效：请检查模型参数或引用的角色名称。")
                 continue
             self.values = candidate
             self.changes[path] = value
@@ -458,60 +360,41 @@ class ConfigurationSetup:
         def apply(values):
             for path, value in self.changes.items():
                 self.assign(values, path, value)
-        update_config(apply, lock_timeout=self.values["storage"]["file_lock_timeout_seconds"])
+        update_config(apply)
         return True
 
-
-def python_tool_startup_notice() -> str | None:
-    """Explain an optional frozen-build Python requirement without blocking chat."""
-    if not _frozen():
-        return None
-    if any(shutil.which(name) for name in ("python", "python3", "py")):
-        return None
-    return (
-        "未发现外部 Python：纯聊天仍可使用；Python/pip 工具暂不可用。"
-        "请将现有 Python 加入 PATH 后重启。"
-    )
 
 def rag_configuration_paths():
     """Connection and model fields exposed by the existing RAG configuration dialog."""
     return [("SILICONFLOW_BASE",), ("SILICONFLOW_KEY",), ("RAG_models", "embedding"), ("RAG_models", "reranker")]
 
-async def prepare_startup_configuration(*, required=(), ask=None, emit=print) -> bool:
-    """Collect missing typed fields before constructing Agents; never silently fill policy values."""
+async def prepare_startup_configuration(*, ask=None, emit=print) -> bool:
+    """Collect model names and credentials without inventing runtime configuration."""
     setup = ConfigurationSetup(ask, emit)
     interactive = ask is not None or configuration_prompt_available()
     emit(f"配置修改目标: {config_file()}\n读取来源: {config_source_summary()}")
     try:
-        while missing := missing_startup_fields(setup.values, required):
-            if not interactive:
-                raise ConfigError(f"非交互启动缺少必填配置 {', '.join('.'.join(path) for path in missing)}；请编辑 {config_file()}")
-            if not await setup.fill(missing[0]):
-                return False
-        paths = dict.fromkeys(path for role in setup.values["models"] for path in setup.connection_paths(role))
-        for path in paths:
-            if str(config_value(setup.values, path) or "").strip():
+        models = config_value(setup.values, ("models",), purpose="已有 Agent 角色与模型选择", kind=dict)
+        if not isinstance(models, dict) or not models:
+            raise ConfigError(f"请在 {config_file()} 中提供 models 配置对象")
+        for role in models:
+            try:
+                get_model_and_params(role, cfg=setup.values)
+            except ConfigError as exc:
+                if not exc.missing or not interactive:
+                    raise
+                if not await setup.fill(exc.path):
+                    return False
+        for path in setup.connection_paths():
+            try:
+                config_value(setup.values, path, purpose="连接模型服务的地址或认证凭据", kind=str)
                 continue
-            if not interactive:
-                raise ConfigError(f"非交互启动缺少必填配置 {'.'.join(path)}；请编辑 {config_file()}")
+            except ConfigError as exc:
+                if not exc.missing or not interactive:
+                    raise
             if not await setup.fill(path):
                 return False
-        missing_rag = [path for path in rag_configuration_paths() if not str(config_value(setup.values, path) or "").strip()]
-        if missing_rag and interactive:
-            choice = await setup.ask("现在配置 RAG 向量检索吗？y 配置 / n 稍后（回车稍后；Esc 取消）：")
-            if choice is None or choice == "\x1b":
-                return False
-            if choice.strip().lower() in {"y", "yes", "是"}:
-                for path in missing_rag:
-                    if not await setup.fill(path):
-                        return False
-        elif missing_rag:
-            emit("RAG 尚未配置；可先聊天，使用 /api embedding 补齐向量检索配置。")
-        if not await setup.commit():
-            return False
-        if notice := python_tool_startup_notice():
-            emit(notice)
-        return True
+        return await setup.commit()
     except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
         emit("配置已取消，未保存本次填写内容。")
         return False
@@ -558,35 +441,33 @@ async def run_cli(system=None):
     from redlotus.ui.console import AgentCliController
 
     if system is None:
-        load_config()
         system = AgentSystem(presentation=presentation)
     stop_event = asyncio.Event()
     install_stop_handlers(stop_event)
     try:
         await AgentCliController(system).run_interactive(stop_event=stop_event)
     finally:
-        await system.shutdown()
-        await close_all_clients()
+        seconds = config_value(settings(), ('lifecycle', 'shutdown_grace_seconds'), kind=(int, float))
+        deadline = ExitDeadline(seconds) if seconds is not None else None
+        if deadline is not None:
+            deadline.start()
+        try:
+            await system.shutdown()
+            await close_all_clients()
+        finally:
+            if deadline is not None:
+                deadline.close()
     return system
 
 def main(channel=None) -> None:
     """Configure the selected transport before constructing its runtime."""
     try:
-        load_config()
-        if not asyncio.run(prepare_startup_configuration(required=("bot",) if channel else ())):
+        if not asyncio.run(prepare_startup_configuration()):
             return
         if channel:
             channel().run()
             return
-        from redlotus.core.system import AgentSystem
-        from redlotus.ui import presentation
-
-        deadline = ExitDeadline(settings()["lifecycle"]["shutdown_grace_seconds"])
-        try:
-            system = AgentSystem(presentation=presentation, exit_deadline=deadline)
-            asyncio.run(run_cli(system))
-        finally:
-            deadline.close()
+        asyncio.run(run_cli())
     except ConfigError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(2) from None

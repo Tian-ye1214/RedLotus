@@ -18,7 +18,7 @@ from redlotus.prompts.prompt import (
     with_runtime_context,
 )
 from redlotus.runtime.config import get_agent_usage_limits
-from redlotus.runtime.network import ModelTarget
+from redlotus.runtime.network import ModelTarget, is_transport_interruption
 from redlotus.runtime.resources import bind_to_loop
 from redlotus.sessions.context import (
     ChatHistory,
@@ -232,7 +232,7 @@ class WorkerOrchestrator:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if role != "worker":
+            if role != "worker" or is_transport_interruption(exc):
                 raise
             return SubagentResult(
                 status="unverified", summary=f"{type(exc).__name__}: {exc}"
@@ -290,6 +290,10 @@ class WorkerOrchestrator:
             await self._task_manager.finish(task, SubagentResult(
                 status="cancelled", summary="Cancelled by the owner; completion is unverified.",
             ))
+            raise
+        except Exception as exc:
+            if is_transport_interruption(exc):
+                await self._task_manager.finish(task, SubagentResult(status="unverified", summary=f"{type(exc).__name__}: {exc}"))
             raise
         await self._task_manager.finish(task, report)
 

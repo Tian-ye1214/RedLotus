@@ -21,7 +21,7 @@ from pydantic_ai.messages import (
 from redlotus.prompts.message_text import split_messages_into_turns
 from redlotus.prompts.prompt import load_prompt
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import settings
+from redlotus.runtime.network import is_transport_interruption
 from redlotus.sessions.context import ChatHistory
 from redlotus.sessions.control import UserMessage
 
@@ -46,17 +46,12 @@ class Task(TaskDefinition):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     status: TaskStatus = TaskStatus.PENDING
     result: str = ""
-    retry_count: int = 0
     failure_history: list[str] = Field(default_factory=list)
     worker_chat_history: ChatHistory = Field(default_factory=ChatHistory, exclude=True)
     artifacts: list[str] = Field(default_factory=list)
     tool_summaries: list[str] = Field(default_factory=list)
     input_cursor: tuple[str | None, int] = (None, 0)
     user_updates: list[str] = Field(default_factory=list)
-
-    @property
-    def max_retries(self):
-        return settings()["agent_run_policy"]["max_task_retries"]
 
 
 class TaskManager:
@@ -162,7 +157,7 @@ class TaskManager:
         await self.save()
 
     async def finish(self, task, report):
-        """Persist one outcome; only a confirmed failure enters automatic retry."""
+        """Persist one outcome and retain evidence of confirmed failures."""
         task.result = report.model_dump_json()
         task.artifacts = list(dict.fromkeys([*task.artifacts, *report.artifacts]))
         task.tool_summaries.extend(report.risks)
@@ -177,9 +172,6 @@ class TaskManager:
             task.status = TaskStatus.PENDING_CONFIRMATION
         if task.status == TaskStatus.FAILED:
             task.failure_history.append(task.result)
-            task.retry_count += 1
-            if task.retry_count <= task.max_retries:
-                task.status = TaskStatus.PENDING
         await self.save()
 
     async def resume(self, task_id):
@@ -200,11 +192,11 @@ class TaskManager:
         return self.get_todo_list()
 
     def get_todo_list(self) -> str:
-        """Return each planned task's status, dependencies, retry count and total progress."""
+        """Return each planned task's status, dependencies and total progress."""
         if not self.tasks:
             return "Task list is empty"
         lines = [
-            f"[{task.status.value}] {task.id}: {task.description} deps={task.dependencies} retries={task.retry_count}/{task.max_retries}"
+            f"[{task.status.value}] {task.id}: {task.description} deps={task.dependencies}"
             for task in self.tasks.values()
         ]
         done = sum(task.status == TaskStatus.COMPLETED for task in self.tasks.values())
@@ -293,6 +285,8 @@ class TaskManager:
             presentation.show_model_output(final_text, title="最终报告")
             report = final_text.strip() or final_summary.strip()
         except Exception as exc:
+            if is_transport_interruption(exc):
+                raise
             logger.warning("Manager summary unavailable: %s", exc)
             report = final_summary
         return (
@@ -393,10 +387,12 @@ async def run_goal_loop(
     original_goal = message.text or ""
     previous_output = ""
     missing_marker = False
-    iteration = 0
+    continuation = message.resume
+    iteration = continuation['goal_iteration'] if continuation else 0
 
     while True:
-        iteration += 1
+        if not continuation:
+            iteration += 1
         if set_iteration is not None:
             set_iteration(iteration)
 
@@ -414,7 +410,7 @@ async def run_goal_loop(
             parse_result = parse_goal_output(raw_output)
             return parse_result.cleaned_text
 
-        prompt_message = replace(message, text=prompt_text)
+        prompt_message = replace(message, text=prompt_text, resume=continuation)
         _history, output = await system.run_agent_system(
             prompt_message,
             history,
@@ -426,6 +422,7 @@ async def run_goal_loop(
         parsed = parse_result or parse_goal_output(output)
         previous_output = summarize_last_coordinator_turn(_history.messages) or output
         missing_marker = parsed.missing_marker
+        continuation = None
 
         if parsed.signal == GoalSignal.DONE:
             return

@@ -36,6 +36,7 @@ from redlotus.runtime.network import (
     ModelTarget,
     context_length_exceeded,
     create_model,
+    is_transport_interruption,
 )
 from redlotus.sessions.context import agent_context, current_agent_id, current_usage_recorder
 
@@ -133,7 +134,7 @@ class RequestPolicy(AbstractCapability):
     async def on_run_error(self, ctx, *, error):
         """Retain cancelled request usage without turning control receipts into responses."""
         pending = self._pending_requests.pop(ctx.run_id, None)
-        if pending and isinstance(error, asyncio.CancelledError):
+        if pending and (isinstance(error, asyncio.CancelledError) or is_transport_interruption(error)):
             context, request, start = pending
             response = next((message for message in context.messages[start:]
                              if isinstance(message, ModelResponse)
@@ -153,6 +154,16 @@ class RequestPolicy(AbstractCapability):
                 raise cause
             cause = cause.__cause__
         raise error
+
+
+def coordinator_stream_handler(system):
+    if not system.presentation.supports_model_stream():
+        return None
+    session, generation = system.session_key, system._session.generation
+    return system.presentation.TextEventStreamHandler(
+        title="Coordinator",
+        is_current=lambda: (system.session_key, system._session.generation) == (session, generation),
+    )
 
 
 class AgentRunner:
@@ -190,10 +201,8 @@ class AgentRunner:
                         if on_node:
                             # Audit the pending tool batch before a compressor changes the model view.
                             run.ctx.state.message_history.append(node.request)
-                            try:
-                                await on_node(run)
-                            finally:
-                                run.ctx.state.message_history.pop()
+                            await on_node(run)
+                            run.ctx.state.message_history.pop()
                         if before_request:
                             await before_request(run, node)
 

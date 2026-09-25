@@ -6,14 +6,12 @@ import os
 import re
 import unicodedata
 from collections.abc import Iterator
-from dataclasses import field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from redlotus.prompts.prompt import with_runtime_context
-from redlotus.runtime.config import settings
+from redlotus.prompts.message_text import message_has_user_prompt
 from redlotus.runtime.network import ModelInputPolicy
-from redlotus.runtime.resources import current_workspace
 
 if TYPE_CHECKING:
     from redlotus.tools.references import ReferenceFile
@@ -22,18 +20,21 @@ import asyncio
 import inspect
 from collections import deque
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from uuid import uuid4
+
+from filelock import AsyncFileLock, Timeout
 
 from redlotus.runtime import logging as logger
 from redlotus.runtime.resources import (
     WorkspaceContext,
     bind_context,
     bind_to_loop,
+    current_workspace,
     finish_io,
     workspace_context,
 )
-from redlotus.sessions.context import _USAGE_RECORDER, make_agent_id
+from redlotus.sessions.context import UserMessage as UserMessage
+from redlotus.sessions.context import _CANCELLING_WRITE, _USAGE_RECORDER, make_agent_id
 
 
 @dataclass(frozen=True)
@@ -49,20 +50,20 @@ class InputAdmission:
 class TurnQueue:
     """FIFO work admission; cancelling one turn never kills the queue consumer."""
 
-    def __init__(self, maxsize=0):
+    def __init__(self):
         self.pending = deque()
-        self.maxsize = maxsize
         self.current = None
+        self.current_data = None
         self.worker = None
+        self.ready = asyncio.Event()
+        self.ready.set()
 
-    def submit(self, work, *, data=None):
-        if self.maxsize and len(self.pending) >= self.maxsize:
-            raise asyncio.QueueFull
+    def submit(self, work, *, data=None, first=False):
         result = asyncio.get_running_loop().create_future()
         result.add_done_callback(
             lambda done: None if done.cancelled() else done.exception()
         )
-        self.pending.append((work, result, data))
+        (self.pending.appendleft if first else self.pending.append)((work, result, data))
         if self.worker is None or self.worker.done():
             self.worker = asyncio.create_task(self._consume())
         return result
@@ -70,7 +71,10 @@ class TurnQueue:
     async def _consume(self):
         try:
             while self.pending:
-                work, result, _ = self.pending.popleft()
+                await self.ready.wait()
+                if not self.pending:
+                    break
+                work, result, self.current_data = self.pending.popleft()
                 if result.cancelled():
                     continue
                 self.current = asyncio.create_task(work())
@@ -87,12 +91,14 @@ class TurnQueue:
                         result.set_exception(exc)
                 finally:
                     self.current = None
+                    self.current_data = None
         finally:
             self.worker = None
 
     def discard(self):
         while self.pending:
             self.pending.popleft()[1].cancel()
+        self.ready.set()
 
     async def join(self):
         while self.worker and not self.worker.done():
@@ -113,6 +119,7 @@ class SessionController:
     def __init__(self) -> None:
         self.queue = TurnQueue()
         self._storage_retry = asyncio.Event()
+        self._write_lock = asyncio.Lock()
         self.storage_paused = False
         self._compression_future = None
         self._turn_lock = asyncio.Lock()
@@ -127,9 +134,115 @@ class SessionController:
         self.accepting_urgent = False
         self.task: asyncio.Task | None = None
         self.user_inputs: list[str] = []
+        self.recorded_input_ids: set[str] = set()
+        self.paused = None
+        self.control_busy = False
+        self.pending_inputs = {}
+
+    async def save_pause(self, system):
+        paused, storage = self.paused, system._session_file
+        if paused and storage:
+            paused['queued'] = [data for _, result, data in self.queue.pending if not result.cancelled()]
+            try:
+                await self.write(lambda: storage.update(metadata={'paused_turn': paused}), storage=storage, cancelling=True)
+            except asyncio.CancelledError as exc:
+                if isinstance(exc.__cause__, OSError):
+                    raise exc.__cause__
+                raise
+
+    def restore_pause(self, storage):
+        self.paused = storage.metadata.get('paused_turn')
+        if self.paused:
+            self.queue.ready.clear()
+
+    async def pause(self, system, *, reason):
+        if self.control_busy or self.paused or not system.has_current_turn:
+            return False
+        turn = system._current_turn
+        if turn and turn['task'].done():
+            return False
+        message = turn['message'] if turn else None
+        request = self.queue.current_data or ({'text': message.original_text or message.text, 'id': turn['turn_id'],
+                                             'goal_mode': turn['mode'] == 'goal'} if turn else None)
+        if request is None:
+            return False
+        self.control_busy = True
+        self.queue.ready.clear()
+        generation = self._generation
+        inherited = message.resume['supplements'] if message and message.resume else []
+        pending = list({row['id']: row for row in [*inherited, *self.pending_inputs.values()]}.values())
+        preparations = tuple(self._preparations)
+        job = system._memory.current or (turn.get('observation') if turn else None)
+        self.paused = dict(request=request, reason=reason, turn_id=turn['turn_id'] if turn else None,
+                           goal_iteration=turn['goal_iteration'] if turn else 0,
+                           user_inputs=list(self.user_inputs) if turn else [request['text']], reference_ids=list(job.reference_ids) if job else [ref.id for ref in message.references] if message else [],
+                           supplements=pending, queued=[])
+        try:
+            if reason == 'user':
+                await system.cancel_current_turn()
+                await self.queue.cancel()
+            elif turn:
+                self.reset()
+                await system._orchestrator.factory.cancel_turn(turn['turn_id'])
+            await asyncio.gather(*preparations, return_exceptions=True)
+            if generation != self._generation:
+                return False
+            self.paused['supplements'] = [row for row in pending if not row.get('delivered')]
+            if system._session_file is None:
+                await system.bind_session(uuid4().hex, generation=self.generation)
+            if turn:
+                self.paused['submitted'] = any(message_has_user_prompt(item) for item in system._session_file.read_turn(turn['turn_id']))
+                if self.paused['submitted']:
+                    self.paused['supplements'] = [row for row in self.paused['supplements'] if row['id'] not in {old['id'] for old in inherited}]
+            await self.save_pause(system)
+            return True
+        finally:
+            self.control_busy = False
+            system.presentation.update_output('refresh_status')
+
+    async def resume_inputs(self, system, message):
+        await system._durable_write(lambda: system._session_file.record_input(message.resume['request'].get('id') or message.resume['turn_id'], message))
+        for row in message.resume['supplements']:
+            if not row.get('recorded'):
+                self.pending_inputs[row['id']] = row
+                await system.record_user_input(row['id'], UserMessage(row['text'], references=[
+                    ref for ref in message.references if ref.id in row.get('reference_ids', [])]))
+        job = system._memory.current
+        job.user_inputs = list(self.user_inputs)
+        await system._durable_write(lambda: system._memory.observations.save(job))
+
+    async def take_inputs(self, system):
+        prompts = []
+        batch = await self.take_urgent()
+        for admission, message in batch:
+            await system.record_user_input(admission.id, message)
+            prompts.append(message.to_prompt())
+            logger.debug(
+                "input consumed id=%s sequence=%s turn=%s",
+                admission.id,
+                admission.sequence,
+                admission.turn_id,
+            )
+            system._current_attachments.extend(
+                [*message.attachments, *(part for ref in message.references for part in ref.to_prompt())]
+            )
+        for admission, _ in batch:
+            if row := self.pending_inputs.get(admission.id):
+                row['consumed'] = True
+        return [
+            *prompts,
+            *self.take_notices(),
+            *system._memory.take_context_notices(),
+        ]
+
+    def commit_inputs(self):
+        for row in [*self.pending_inputs.values(), *(self.paused['supplements'] if self.paused else [])]:
+            if row.get('consumed'):
+                row['delivered'] = True
+                self.pending_inputs.pop(row['id'], None)
 
     @asynccontextmanager
-    async def turn(self, text: str, *, turn_id: str | None = None):
+    async def turn(self, text: str, *, turn_id: str | None = None, user_inputs=None):
         generation = self._turn_generation
         # asyncio.Lock admits waiters in FIFO order, preserving each prompt boundary.
         async with self._turn_lock:
@@ -139,7 +252,9 @@ class SessionController:
             self.turn_id = turn_id or uuid4().hex
             self.open_inbox()
             self.task = asyncio.current_task()
-            self.user_inputs = [text]
+            self.user_inputs = list(user_inputs) if user_inputs is not None else [text]
+            self.pending_inputs.clear()
+            self.recorded_input_ids.clear()
             try:
                 yield
             finally:
@@ -153,6 +268,22 @@ class SessionController:
     def generation(self):
         """UI callbacks also expire when their current task is stopped."""
         return self._generation, self._turn_generation
+
+    def consume_recorded_input(self, identity, message, context, event):
+        """Apply one durable input to its original turn and observation."""
+        if context != (self.generation, self.turn_id) or identity in self.recorded_input_ids:
+            return False
+        self.recorded_input_ids.add(identity)
+        if identity == self.turn_id:
+            return False  # The outer turn seeded its first input before persistence.
+        self.user_inputs.append(message.original_text if message.original_text is not None else message.text)
+        if identity in self.pending_inputs:
+            self.pending_inputs[identity]['recorded'] = True
+        if event is None or event.turn_id != self.turn_id:
+            return False
+        event.user_inputs = list(self.user_inputs)
+        event.reference_ids = list(dict.fromkeys([*event.reference_ids, *(ref.id for ref in message.references)]))
+        return True
 
     def admit(self, workspace, *, urgent=False, input_id=None) -> InputAdmission:
         self._sequence += 1
@@ -221,10 +352,13 @@ class SessionController:
         self._turn_generation += 1
         if discard:
             self._generation += 1
+            self.paused = None
+            self.queue.ready.set()
         self.close_inbox()
         for task in tuple(self._preparations):
             task.cancel()
         self._urgent.clear()
+        self.pending_inputs.clear()
         self._notices.clear()
 
 
@@ -245,19 +379,39 @@ class SessionController:
 
     async def write(self, operation, *, storage=None, cancelling=False):
         """Hold failed checkpoints until new input, but never wait during cancellation."""
+        owner = asyncio.current_task()
+
+        def checkpoint(action):
+            try:
+                return action()
+            except OSError:
+                self.storage_paused = True
+                raise
+
+        async def attempt():
+            async with self._write_lock:
+                with bind_context(_CANCELLING_WRITE, lambda: cancelling or owner.cancelling()):
+                    if storage is not None:
+                        await finish_io(asyncio.to_thread(checkpoint, storage.retry_pending))
+                    result = await finish_io(asyncio.to_thread(checkpoint, operation))
+                    if inspect.isawaitable(result):
+                        result = await result
+                self.storage_paused = False
+                return result
+
         while True:
             self._storage_retry.clear()
             try:
-                if storage is not None:
-                    await finish_io(asyncio.to_thread(storage.retry_pending))
-                result = await finish_io(asyncio.to_thread(operation))
-                if inspect.isawaitable(result):
-                    result = await result
-                self.storage_paused = False
-                return result
+                try:
+                    return await (finish_io(attempt()) if cancelling or owner.cancelling() else attempt())
+                except Timeout as exc:
+                    if cancelling or owner.cancelling():
+                        raise
+                    async with AsyncFileLock(exc.lock_file, run_in_executor=False):
+                        pass
             except OSError as exc:
                 self.storage_paused = True
-                if cancelling or asyncio.current_task().cancelling():
+                if cancelling or owner.cancelling():
                     raise asyncio.CancelledError() from exc
                 logger.warning(f"保存失败，任务已暂停，输入已保留: {exc}。恢复存储后提交普通输入重试。")
                 await self._storage_retry.wait()
@@ -293,23 +447,6 @@ class SessionController:
             if self._compression_future is future:
                 self._compression_future = None
 
-
-@dataclass
-class UserMessage:
-    """User prompt text plus optional pydantic-AI multimodal content."""
-
-    text: str
-    attachments: list = field(default_factory=list)
-    original_text: str | None = None
-    references: list[ReferenceFile] = field(default_factory=list)
-
-    def to_prompt(self):
-        """Pass original requirements and explicitly labelled reference data together."""
-        parts = [self.text]
-        for reference in self.references:
-            parts.extend(reference.to_prompt())
-        parts.extend(self.attachments)
-        return with_runtime_context(parts)
 
 
 def user_message_from_cli_input(raw_input: str) -> UserMessage:
@@ -489,14 +626,17 @@ def parse_file_paths(text: str, *, root: Path | None = None) -> list[Path]:
 
 
 async def load_file_refs(
-    text: str, *, role: str = "coordinator", workspace: WorkspaceContext | None = None
+    text: str, *, role: str = "coordinator", workspace: WorkspaceContext | None = None, captured=None
 ) -> list[ReferenceFile]:
     from redlotus.tools.references import ReferenceStore
 
     workspace = workspace or WorkspaceContext.from_path(current_workspace())
+    store = ReferenceStore(workspace)
+    if captured is not None and 'reference_ids' in captured:
+        return list(await asyncio.gather(*(store.parse(store.load(key)) for key in captured['reference_ids'])))
     paths = parse_file_paths(text, root=workspace.root)
-    policy = ModelInputPolicy.for_role(role)
-    if len(paths) > policy.max_files:
+    policy = ModelInputPolicy.for_role(role) if paths else None
+    if paths and len(paths) > policy.max_files:
         raise ValueError(
             f"最多引用 {policy.max_files} 个文件，本次引用 {len(paths)} 个。"
         )
@@ -513,20 +653,20 @@ async def load_file_refs(
             )
     if errors:
         raise ValueError("引用文件失败：\n" + "\n".join(errors))
-    policy.check(sizes)
-    store = ReferenceStore(workspace)
-    captured = await asyncio.gather(
-        *(store.capture_file(path, policy=policy) for path in paths)
-    )
-    slots = asyncio.Semaphore(settings()["input_limits"]["parse_concurrency"])
-
+    if paths:
+        policy.check(sizes)
+    async def capture():
+        snapshots = await asyncio.gather(*(store.capture_file(path, policy=policy) for path in paths))
+        if captured is not None:
+            captured['reference_ids'] = [ref.id for ref in snapshots]
+        return snapshots
+    snapshots = await finish_io(capture())
     async def read(reference):
-        async with slots:
-            try:
-                return await store.parse(reference)
-            except Exception as exc:
-                raise ValueError(f"引用文件 {reference.name} 解析失败：{exc}") from exc
+        try:
+            return await store.parse(reference)
+        except Exception as exc:
+            raise ValueError(f"引用文件 {reference.name} 解析失败：{exc}") from exc
 
-    return list(await asyncio.gather(*(read(reference) for reference in captured)))
+    return list(await asyncio.gather(*(read(reference) for reference in snapshots)))
 
 

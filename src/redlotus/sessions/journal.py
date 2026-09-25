@@ -6,20 +6,30 @@ import hashlib
 import json
 import os
 import re
-import threading
 from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path
 from textwrap import indent
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
-from redlotus.runtime.config import settings
 from redlotus.sessions.cleanup import _write_with_cleanup
+from redlotus.sessions.context import _CANCELLING_WRITE
 
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+@contextmanager
+def _journal_lock(lock):
+    """Let the owner loop wait for contended checkpoint locks outside its writer."""
+    cancelled = _CANCELLING_WRITE.get()
+    was_cancelled = cancelled is not None and cancelled()
+    with lock.acquire(blocking=cancelled is None):
+        if not was_cancelled and cancelled is not None and cancelled():
+            raise Timeout(lock.lock_file)
+        yield lock
 
 
 class SessionJournal:
@@ -28,8 +38,7 @@ class SessionJournal:
     def __init__(self, path, *, lock=None, recover=True, commit_recovery=True, workspace=None):
         self.path = Path(path)
         self.workspace = workspace
-        self._lock = lock or FileLock(self.path.with_suffix(".lock"), timeout=settings()["storage"]["file_lock_timeout_seconds"])
-        self._mutex = threading.RLock()
+        self._lock = lock or FileLock(self.path.with_suffix(".lock"))
         self._recover_partial = recover
         self._commit_recovery = commit_recovery
         self.recovered_partial_write = False
@@ -46,7 +55,7 @@ class SessionJournal:
 
 
     def _read(self):
-        with self._mutex, self._lock:
+        with _journal_lock(self._lock):
             previous_views = self._views
             previous_records = getattr(self, "_records", {})
             data, self.recovered_partial_write = self._inspect(self.path.read_bytes())
@@ -215,8 +224,8 @@ class SessionJournal:
 
     @contextmanager
     def _locked_state(self):
-        """Hold the thread/file locks and refresh once before reading or updating state."""
-        with self._mutex, self._lock:
+        """Hold the journal lock and refresh once before reading or updating state."""
+        with _journal_lock(self._lock):
             self._refresh()
             yield
 
@@ -326,7 +335,7 @@ class SessionJournal:
         """Settle an uncertain previous write before admitting another transaction."""
         for child in list(self._roles.values()):
             child.retry_pending()
-        with self._mutex, self._lock:
+        with _journal_lock(self._lock):
             pending = self._pending_update
             if pending is None:
                 return

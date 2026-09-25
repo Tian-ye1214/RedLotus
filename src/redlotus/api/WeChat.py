@@ -16,8 +16,6 @@ if TYPE_CHECKING:
 
 
 class WeChatAgentBot(BotBase):
-    _ENV_AGENT_TIMEOUT = "WECHAT_AGENT_TIMEOUT_S"
-    _ENV_SEND_TIMEOUT = "WECHAT_SEND_REPLY_TIMEOUT_S"
     _MIME_MAP = {
         "image": "image/jpeg",
         "voice": "audio/mpeg",

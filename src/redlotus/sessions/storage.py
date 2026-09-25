@@ -20,11 +20,10 @@ from pydantic_ai.messages import (
     ToolSearchCallPart,
 )
 
-from redlotus.runtime.config import settings
 from redlotus.runtime.resources import (
     conversations_root,
 )
-from redlotus.sessions.journal import SessionJournal, _json
+from redlotus.sessions.journal import SessionJournal, _journal_lock, _json
 
 
 def _response_id(message):
@@ -77,7 +76,7 @@ class SessionFile(SessionJournal):
         header = dict(session_id=identity, project_id=project_id, title=title, input_accounting=1,
                       created_at=datetime.now(timezone.utc).isoformat())
         path.parent.mkdir(parents=True, exist_ok=True)
-        with FileLock(path.with_suffix(".lock"), timeout=settings()["storage"]["file_lock_timeout_seconds"]):
+        with _journal_lock(FileLock(path.with_suffix(".lock"))):
             if path.exists():
                 raise FileExistsError(path)
             cls._replace_file(path, {**header, "updates": []}, workspace=workspace)
@@ -93,7 +92,7 @@ class SessionFile(SessionJournal):
             return None
         status = info.get("status") or (
             "active" if info.get("active_turn") else "interrupted"
-            if info.get("interrupted_turn") else "completed"
+            if info.get("interrupted_turn") or info.get("paused_turn") else "completed"
             if info.get("completed_turns", 0) else "new"
         )
         record = {
@@ -168,7 +167,7 @@ class SessionFile(SessionJournal):
 
     def acquire_use(self):
         """Protect this loaded instance from cleanup until its owner releases it."""
-        with self._mutex, self._lock:
+        with _journal_lock(self._lock):
             if self._use_lock is None:
                 if not self.path.is_file():
                     raise FileNotFoundError(f"会话恢复文件已不存在: {self.path}")
@@ -180,7 +179,7 @@ class SessionFile(SessionJournal):
 
     def release_use(self):
         """Release only this instance's ownership marker, including repeated shutdown."""
-        with self._mutex, self._lock:
+        with _journal_lock(self._lock):
             if self._use_lock is not None:
                 self._use_lock.release()
                 Path(self._use_lock.lock_file).unlink(missing_ok=True)
@@ -204,19 +203,20 @@ class SessionFile(SessionJournal):
             raise ValueError(f"Invalid session role: {role}")
         if role == self.role:
             return self
-        with self._mutex:
+        if role in self._roles:
+            return self._roles[role]
+        path = self.path.with_name(f"model_messages.{role}.json")
+        if role == "coordinator":
+            path = self.path.with_name("model_messages.json")
+        with _journal_lock(FileLock(path.with_suffix(".lock"))) as lock:
             if role in self._roles:
                 return self._roles[role]
-            path = self.path.with_name(f"model_messages.{role}.json")
-            if role == "coordinator":
-                path = self.path.with_name("model_messages.json")
-            with FileLock(path.with_suffix(".lock"), timeout=settings()["storage"]["file_lock_timeout_seconds"]) as lock:
-                if not path.exists():
-                    if not create:
-                        return None
-                    header = {key: self.header[key] for key in ("session_id", "project_id", "title", "created_at")}
-                    self._replace_file(path, dict(header, role=role, updates=[]), workspace=self.workspace)
-                child = SessionFile.load(path, lock=lock, workspace=self.workspace)
+            if not path.exists():
+                if not create:
+                    return None
+                header = {key: self.header[key] for key in ("session_id", "project_id", "title", "created_at")}
+                self._replace_file(path, dict(header, role=role, updates=[]), workspace=self.workspace)
+            child = SessionFile.load(path, lock=lock, workspace=self.workspace)
             if child.session_id != self.session_id or child.project_id != self.project_id or child.role != role:
                 raise ValueError(f"Role journal belongs to another session: {path}")
             self._roles[role] = child

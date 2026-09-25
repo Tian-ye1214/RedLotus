@@ -11,6 +11,7 @@ import mimetypes
 import os
 import shutil
 import tempfile
+from functools import cached_property
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -19,7 +20,6 @@ from filelock import AsyncFileLock
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import BinaryContent
 
-from redlotus.runtime.config import get_env, settings
 from redlotus.runtime.network import ModelInputPolicy
 from redlotus.runtime.resources import (
     WorkspaceContext,
@@ -112,7 +112,6 @@ class OfficeConverter:
     @staticmethod
     def executable() -> str:
         candidates = [
-            get_env("LIBREOFFICE_PATH", warn=False),
             shutil.which("soffice.com"),
             shutil.which("soffice"),
             str(
@@ -125,7 +124,7 @@ class OfficeConverter:
             if value and Path(value).is_file():
                 return value
         raise ValueError(
-            "DOC/PPT 转换需要 LibreOffice；请安装或设置 LIBREOFFICE_PATH。"
+            "DOC/PPT 转换需要 LibreOffice。"
         )
 
     async def convert(self, source: Path, target_format: str, directory: Path) -> Path:
@@ -221,7 +220,7 @@ class DocumentReader:
     def csv(self, source: Path, directory: Path) -> list[ReferencePart]:
         text = self.decode(source.read_bytes())
         try:
-            dialect = csv.Sniffer().sniff(text[:settings()["input_limits"]["csv_sniff_chars"]], delimiters=",;\t|")
+            dialect = csv.Sniffer().sniff(text, delimiters=",;\t|")
         except csv.Error:
             dialect = csv.excel
         rows = list(csv.reader(io.StringIO(text), dialect))
@@ -230,11 +229,13 @@ class DocumentReader:
     def html(self, source: Path, directory: Path) -> list[ReferencePart]:
         from lxml import etree, html
 
-        root = html.fromstring(
+        root = html.document_fromstring(
             self.decode(source.read_bytes()).encode("utf-8"),
             parser=html.HTMLParser(encoding="utf-8"),
         )
         etree.strip_elements(root, "script", "style", with_tail=False)
+        for link in root.xpath(".//a[@href]"):
+            link.tail = f" ({link.get('href')})" + (link.tail or "")
         tables = []
         for number, table in enumerate(root.xpath("self::table | .//table"), 1):
             rows = [
@@ -243,8 +244,6 @@ class DocumentReader:
             ]
             tables.append(ReferencePart.from_text(rows, locator=f"HTML table {number}"))
             table.drop_tree()
-        for link in root.xpath(".//a[@href]"):
-            link.tail = f" ({link.get('href')})" + (link.tail or "")
         for element in root.iter():
             if element.tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
                 element.text = "#" * int(element.tag[1]) + " " + (element.text or "")
@@ -385,6 +384,7 @@ class DocumentReader:
     def slides(self, source: Path, directory: Path) -> list[ReferencePart]:
         from pptx import Presentation
         from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from pptx.shapes.placeholder import PlaceholderPicture
 
         parts = []
         for number, slide in enumerate(Presentation(source).slides, 1):
@@ -416,7 +416,7 @@ class DocumentReader:
                         parts.append(
                             ReferencePart.from_text(values, locator=f"{locator}, chart")
                         )
-                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE or isinstance(shape, PlaceholderPicture):
                         target = (
                             directory
                             / f"slide-{number}-image-{shape.shape_id}.{shape.image.ext}"
@@ -487,11 +487,16 @@ def reference_message_data(value, *, restore=False, workspace=None):
 
 
 class ReferenceStore:
-    PARSER_VERSION = 4
+    PARSER_VERSION = 5
 
     def __init__(self, workspace: WorkspaceContext, root: Path | None = None):
         self.workspace = workspace
-        self.root = root or references_dir(workspace)
+        if root is not None:
+            self.root = root
+
+    @cached_property
+    def root(self):
+        return references_dir(self.workspace)
 
     async def prepare_message(self, message):
         import base64
@@ -572,10 +577,9 @@ class ReferenceStore:
 
         if urlsplit(url).scheme not in ("https", "http"):
             raise ValueError("Remote references require HTTP(S)")
-        redirects = settings()["input_limits"]["max_redirects"]
         client = get_client(
-            f"reference_download:{policy.reference_download_timeout_seconds}:{redirects}",
-            lambda: httpx.AsyncClient(timeout=policy.reference_download_timeout_seconds, max_redirects=redirects, follow_redirects=True),
+            "reference_download",
+            lambda: httpx.AsyncClient(follow_redirects=True),
         )
         async with client.stream("GET", url) as response:
             response.raise_for_status()
@@ -621,7 +625,7 @@ class ReferenceStore:
                 await finish_io(
                     asyncio.to_thread(atomic_write, snapshot, data)
                 )
-        return ReferenceFile(
+        reference = ReferenceFile(
             id=identity,
             project_id=self.workspace.project_id,
             name=name,
@@ -631,6 +635,12 @@ class ReferenceStore:
             sha256=digest,
             snapshot=snapshot,
         )
+        manifest = self.root / 'manifests' / f'{identity}.json'
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        async with AsyncFileLock(str(manifest) + '.lock', run_in_executor=False):
+            if not manifest.exists():
+                await finish_io(asyncio.to_thread(atomic_write_json, manifest, reference.manifest()))
+        return reference
 
     async def parse(self, reference: ReferenceFile) -> ReferenceFile:
         manifest = self.root / "manifests" / f"{reference.id}.json"

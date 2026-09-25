@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from redlotus.api.base import BotBase, main
 from redlotus.api.qq_media_helpers import extract_media, iter_segments
-from redlotus.runtime.config import get_env, user_config_dir
+from redlotus.runtime.config import user_config_dir
 from redlotus.sessions.control import UserMessage
 
 if TYPE_CHECKING:
@@ -17,8 +17,6 @@ if TYPE_CHECKING:
 
 
 class QQBot(BotBase):
-    _ENV_AGENT_TIMEOUT = "QQ_AGENT_TIMEOUT_S"
-    _ENV_SEND_TIMEOUT = "QQ_SEND_REPLY_TIMEOUT_S"
     _FILE_ALLOW_EXT = frozenset(
         {
             ".png",
@@ -54,10 +52,6 @@ class QQBot(BotBase):
             raise ValueError(f"[QQ] 缺少 NapCat 配置文件: {config_path}；请按 api/config.yaml.example 填写。")
         os.environ["NCATBOT_CONFIG_PATH"] = str(config_path)
         from ncatbot.core import BotClient
-        from ncatbot.utils import config
-
-        if uin := get_env("QQBOT_ID", warn=False):
-            config.set_bot_uin(uin)
         self._doctor()
         self._bot_client = BotClient()
         adapter = self._bot_client.adapter
@@ -115,8 +109,7 @@ class QQBot(BotBase):
         uin = str(config.bt_uin or "")
         if uin in ("", "None", "123456"):
             raise ValueError(
-                "[QQ] 机器人 QQ 号未配置。请设置环境变量 QQBOT_ID，"
-                f"或在 {config_path} 中填写 bt_uin。"
+                f"[QQ] 机器人 QQ 号未配置。请在 {config_path} 中填写 bt_uin。"
             )
         token = config.napcat.webui_token
         if config.napcat.enable_webui and not strong_password_check(token):

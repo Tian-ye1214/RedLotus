@@ -21,7 +21,7 @@ from redlotus.runtime import config as app_config
 from redlotus.runtime import logging as logger
 from redlotus.runtime.resources import session_data_dir
 from redlotus.sessions.context import ChatHistory
-from redlotus.sessions.control import load_file_refs, user_message_from_cli_input
+from redlotus.sessions.control import UserMessage, load_file_refs, user_message_from_cli_input
 from redlotus.ui.cli_commands import (
     SlashCommands,
     WorkspaceSnapshot,
@@ -117,14 +117,19 @@ class AgentCliController:
             return await legacy_pick_snapshot(snapshots, self._legacy_repl.read_line)
         return SnapshotSelection(SnapshotAction.CANCEL)
 
-    async def enter_current_workspace(self, *, state=None, force_picker=False):
+    async def enter_current_workspace(self, *, state=None, force_picker=False, workspace=None):
         """Lock admission throughout discovery, selection and restoring the chosen session."""
         if self.is_transitioning:
             return None
         self._active_transitions += 1
         self._ready.clear()
         try:
-            return await self._choose_current_workspace(state=state, force_picker=force_picker)
+            if workspace is not None:
+                await self.reset_session(state.history, workspace=workspace)
+            result = await self._choose_current_workspace(state=state, force_picker=force_picker)
+            if not force_picker or result is not None:
+                self._prepare_session_logs()
+            return result
         finally:
             self._active_transitions -= 1
             if not self._active_transitions:
@@ -134,6 +139,8 @@ class AgentCliController:
         generation = self.system._session.generation
         state = state or getattr(self, "_active_session_state", None)
         if state is None:
+            return None
+        if not force_picker and app_config.config_value(app_config.settings(), ("storage", "sessions_dir"), kind=str) is None:
             return None
         snapshots = await asyncio.to_thread(
             list_workspace_snapshots,
@@ -183,6 +190,93 @@ class AgentCliController:
     def new_session_state(self) -> CliSessionState:
         return CliSessionState(history=ChatHistory())
 
+    async def pause_current_turn(self):
+        async with self._admission_lock:
+            if self.is_transitioning:
+                return False
+            return await self.system._session.pause(self.system, reason='user')
+
+    def _restore_paused_queue(self, state):
+        session = self.system._session
+        if session.paused and not session.queue.pending:
+            for row in session.paused['queued']:
+                admission = session.admit(self.system.workspace, input_id=row.get('id'))
+                self._queue_input(row['text'], state, admission, goal_mode=row['goal_mode'], references=None, wait_for_turn=False, data=row)
+
+    async def resume_current_turn(self, state):
+        system, session = self.system, self.system._session
+        async with self._admission_lock:
+            if self.is_transitioning or session.control_busy or not session.paused:
+                return False
+            session.control_busy = True
+            saved = session.paused
+            generation, storage = session._generation, system._session_file
+            try:
+                from redlotus.sessions.context import repair_interrupted_tool_calls
+                message = UserMessage(saved['request']['text'], resume=saved)
+                message.references = await load_file_refs(message.text, workspace=system.workspace, captured={'reference_ids': saved['reference_ids']})
+                for row in saved['supplements']:
+                    message.references.extend(await load_file_refs(row['text'], workspace=system.workspace, captured=row))
+                if generation != session._generation or session.paused is not saved:
+                    return False
+                state.history.set_messages(repair_interrupted_tool_calls(state.history.messages))
+                self._restore_paused_queue(state)
+                await session.save_pause(system)
+                if generation != session._generation or storage is not system._session_file or session.paused is not saved:
+                    return False
+                async def resume():
+                    if generation != session._generation or storage is not system._session_file:
+                        return
+                    try:
+                        if saved['turn_id'] is None:
+                            admission = session.admit(system.workspace, input_id=saved['request'].get('id'))
+                            return await self._start_user_turn_from_raw_input(message.text, state, wait_for_turn=True,
+                                goal_mode=saved['request']['goal_mode'], references=None, admission=admission, input_data=saved['request'])
+                        task = system._start_user_turn(message, state.history, goal_mode=saved['request']['goal_mode'])
+                        if task is None:
+                            raise RuntimeError('当前任务尚未停止，无法恢复')
+                        system.record_control_result('resume', saved['turn_id'], 'running', accepted=True)
+                        await task
+                    finally:
+                        if generation == session._generation and storage is system._session_file and not session.paused:
+                            await system._durable_write(lambda: storage.update(metadata={'paused_turn': None}))
+                        update_output('refresh_status')
+                session.queue.submit(resume, data=saved['request'], first=True)
+                session.paused = None
+                session.queue.ready.set()
+                return True
+            finally:
+                session.control_busy = False
+                update_output('refresh_status')
+
+    def _queue_input(self, raw_input, state, admission, *, goal_mode, references, wait_for_turn, data=None):
+        data = data if data is not None else {'text': raw_input, 'id': admission.id, 'goal_mode': goal_mode}
+        future = self.system._session.queue.submit(
+            lambda: self._start_user_turn_from_raw_input(raw_input, state, wait_for_turn=True,
+                goal_mode=goal_mode, references=references, admission=admission, input_data=data), data=data)
+        def input_finished(done):
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                if references is not None:
+                    references.cancel()
+            except Exception as error:
+                if references is not None:
+                    references.cancel()
+                if not wait_for_turn:
+                    self.system._handle_turn_error(error)
+            finally:
+                update_output('refresh_status')
+        future.add_done_callback(input_finished)
+        return future
+
+    def _prepare_session_logs(self):
+        try:
+            logger.activate_log_dir(logger.prepare_log_dir(self.system.workspace))
+            logger.prune_old_logs()
+        except (OSError, app_config.ConfigError) as exc:
+            print_warning(f"日志清理未完成: {exc}")
+
     async def reset_session(
         self,
         history: ChatHistory,
@@ -210,6 +304,8 @@ class AgentCliController:
                 history.reset()
             update_output("clear_context_usage")
             self.system.last_rejected_input = None
+            if self._active_transitions == 1:
+                self._prepare_session_logs()
         except Exception as exc:
             print_warning(f"会话切换失败，已保留原会话: {exc}")
             raise
@@ -226,7 +322,6 @@ class AgentCliController:
     async def prepare_session(self) -> tuple[str, ...]:
         print_startup_logo()
         print_repl_welcome()
-        app_config.reload_config()
         missing = app_config.missing_main_api_keys()
         if missing:
             print_warning(
@@ -287,15 +382,17 @@ class AgentCliController:
         goal_mode: bool = False,
         references,
         admission,
+        input_data=None,
     ) -> str:
         system = self.system
         await self._ready.wait()
         if not system._session.accepts(admission):
-            references.cancel()
+            if references is not None:
+                references.cancel()
             return "continue"
         await self._publish_context_usage(state.history)
         try:
-            file_refs = await references
+            file_refs = await references if references is not None and not references.cancelled() else await load_file_refs(raw_input, workspace=admission.workspace, captured=input_data)
         except (OSError, ValueError) as exc:
             self.system.last_rejected_input = raw_input
             print_warning(str(exc))
@@ -311,7 +408,8 @@ class AgentCliController:
             )
 
         if state.is_first_input:
-            await system.bind_session(uuid4().hex)
+            if system.session_key is None:
+                await system.bind_session(uuid4().hex)
             with system._session.usage(system._session_file):
                 task_name = await generate_task_title(raw_input)
             if not system._session.accepts(admission):
@@ -357,7 +455,6 @@ class AgentCliController:
 
         if (command := raw_input.lower()) in self.EXIT_COMMANDS:
             self.system._session.queue.discard()
-            await self.system.shutdown()
             print_success("Bye.")
             return "break"
 
@@ -376,10 +473,10 @@ class AgentCliController:
         async with self._admission_lock:
             if transition != self._transition or not self._ready.is_set():
                 return "continue"
+            self._restore_paused_queue(state)
             admission = self.system._session.admit(
                 self.system.workspace, urgent=urgent, input_id=input_id
             )
-            app_config.reload_config()
             if missing := app_config.missing_main_api_keys():
                 print_warning(
                     "缺少主模型 API 配置: "
@@ -387,17 +484,22 @@ class AgentCliController:
                     + "。请先输入 /api，或在 .env/config.json 中配置。"
                 )
                 return "continue"
+            data = {'text': raw_input, 'id': admission.id, 'goal_mode': goal_mode}
             references = asyncio.create_task(
-                load_file_refs(raw_input, workspace=admission.workspace)
+                load_file_refs(raw_input, workspace=admission.workspace, captured=data)
             )
-            references.add_done_callback(
-                lambda done: None if done.cancelled() else done.exception()
-            )
+            self.system._session._preparations.add(references)
+            references.add_done_callback(self.system._session._preparations.discard)
+            references.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            if self.system._session.paused:
+                await references
+            if transition != self._transition or not self._ready.is_set() or not self.system._session.accepts(admission):
+                return 'continue'
             if admission.urgent:
                 await self.system.add_urgent_message(
                     user_message_from_cli_input(raw_input),
                     admission=admission,
-                    references=references,
+                    references=references, input_data=data,
                 )
                 return "continue"
             logger.debug(
@@ -405,28 +507,9 @@ class AgentCliController:
                 admission.id,
                 admission.sequence,
             )
-            future = self.system._session.queue.submit(
-                lambda: self._start_user_turn_from_raw_input(
-                    raw_input,
-                    state,
-                    wait_for_turn=True,
-                    goal_mode=goal_mode,
-                    references=references,
-                    admission=admission,
-                ),
-                data=raw_input,
-            )
-            def input_finished(done):
-                try:
-                    done.result()
-                except asyncio.CancelledError:
-                    references.cancel()
-                except Exception as error:
-                    references.cancel()
-                    if not wait_for_turn:
-                        self.system._handle_turn_error(error)
-
-            future.add_done_callback(input_finished)
+            future = self._queue_input(raw_input, state, admission, goal_mode=goal_mode,
+                                       references=references, wait_for_turn=wait_for_turn, data=data)
+            await self.system._session.save_pause(self.system)
         if wait_for_turn:
             await future
         return "continue"
@@ -446,7 +529,6 @@ class AgentCliController:
         missing = await self.prepare_session()
         if missing:
             await interactive_set_api()
-            app_config.reload_config()
             if not app_config.missing_main_api_keys():
                 await self._prewarm_contexts()
         state = self.new_session_state()
@@ -473,9 +555,7 @@ class AgentCliController:
                 print_warning(question)
                 pending_answer = asyncio.get_running_loop().create_future()
                 try:
-                    answer = await pending_answer
-                    self.system._session.user_inputs.append(answer)
-                    return answer
+                    return await pending_answer
                 finally:
                     pending_answer = None
 
@@ -519,4 +599,3 @@ class AgentCliController:
             for task in line_handlers:
                 task.cancel()
             await asyncio.gather(*line_handlers, return_exceptions=True)
-            await self.system.shutdown()

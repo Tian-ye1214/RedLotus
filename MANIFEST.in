@@ -1,5 +1,4 @@
 include README.md
-include src/redlotus/config.schema.json
 global-exclude config.json
 global-exclude .env
 recursive-include src/redlotus/prompts *.md

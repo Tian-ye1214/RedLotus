@@ -27,7 +27,7 @@ from redlotus.prompts.prompt import (
     window_prompt_content,
     with_runtime_context,
 )
-from redlotus.runtime.config import get_agent_usage_limits, settings
+from redlotus.runtime.config import get_agent_usage_limits, settings, config_value
 from redlotus.runtime.network import ModelTarget, create_model
 from redlotus.runtime.resources import WorkspaceContext, bind_context, finish_io, iso_utc_now
 from redlotus.sessions.context import SubagentSpec, _USAGE_RECORDER, make_agent_id
@@ -88,8 +88,8 @@ class MemoryPerception:
         persist_context: Callable | None = None,
     ) -> PerceptionResult:
         payload = deepcopy(payload)
-        config = deepcopy(config or settings()["memory_perception"])
-        target = target or ModelTarget.for_role(config["model_role"])
+        config = deepcopy(config or config_value(settings(), ("memory_perception",), purpose="记忆感知角色与回合窗口参数", kind=dict))
+        target = target or ModelTarget.for_role(config_value(config, ("model_role",), purpose="记忆感知使用的已配置模型角色", kind=str))
         instructions = instructions or load_prompt("memory_perception_system.md")
         spec = SubagentSpec(
             payload["session_id"],
@@ -389,8 +389,8 @@ class MemoryJob(BaseModel):
 def target_for_job(job, targets):
     if job.id in targets:
         return targets[job.id]
-    config = job.perception_config or settings()["memory_perception"]
-    current = ModelTarget.for_role(config["model_role"])
+    config = job.perception_config or config_value(settings(), ("memory_perception",), purpose="记忆感知角色与回合窗口参数", kind=dict)
+    current = ModelTarget.for_role(config_value(config, ("model_role",), purpose="记忆感知使用的已配置模型角色", kind=str))
     if not job.model_snapshot:
         return current
     snapshot = dict(job.model_snapshot)
@@ -413,7 +413,7 @@ def target_for_job(job, targets):
 
 async def produce_job(service, job):
     storage = service.session
-    config = job.perception_config or settings()["memory_perception"]
+    config = job.perception_config or config_value(settings(), ("memory_perception",), purpose="记忆感知角色与回合窗口参数", kind=dict)
     job.timings["preparing_at"] = iso_utc_now()
     service._save_job(job)
     packets, job.sources, references = await service.evidence.collect(job.events)

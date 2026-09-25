@@ -4,11 +4,9 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
-from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
@@ -26,10 +24,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.suggester import Suggester
-from textual.widgets import Input, Label, OptionList, ProgressBar, RichLog, Static
+from textual.widgets import Button, Footer, Input, Label, OptionList, ProgressBar, RichLog, Static
 from textual.widgets.option_list import Option
 
 from redlotus.runtime.config import (
+    config_value,
     get_agent_roles,
     role_supported_thinking_efforts,
     settings,
@@ -56,7 +55,7 @@ COMMAND_HELP = {
     "/config": "查看配置摘要",
     "/context": "查看上下文 token 用量分解与压缩阈值",
     "/usage": "查看用量与计费统计，可指定日志路径",
-    "/panel": "查看工作区运行和历史总览；--all 显示全部会话",
+    "/panel": "查看工作区运行和全部会话的历史总览",
     "/LTM": "show / clear / retry：查看、清空或重试全局长期记忆",
     "/STM": "show / clear / retry：查看、清空或重试当前项目情景记忆",
     "/pwd": "查看当前项目目录",
@@ -106,14 +105,6 @@ def completion_for_input(text: str) -> InputCompletion | None:
         prefix = text[len("/agent ") :]
         if " " not in prefix:
             return InputCompletion(kind="agent_role", prefix=prefix)
-        role, selected = prefix.split(" ", 1)
-        if " " not in selected:
-            return InputCompletion(
-                kind="literal_choice",
-                prefix=selected,
-                choices=tuple(settings().get("model_presets", {})),
-                role=role,
-            )
         return None
 
     if text.startswith("/effort "):
@@ -208,7 +199,7 @@ def _iter_file_completions(fragment: str, *, at_mode: bool):
 
     match = prefix.casefold() if os.name == "nt" else prefix
     matching = (child for child in children if (child.name.casefold() if os.name == "nt" else child.name).startswith(match))
-    for child in islice(matching, settings()["ui"]["file_completion_limit"]):
+    for child in matching:
         try:
             candidate = child.relative_to(current_workspace()).as_posix()
         except ValueError:
@@ -227,29 +218,11 @@ def _iter_file_completions(fragment: str, *, at_mode: bool):
         )
 
 
-def _history_path() -> Path:
+def _history_path() -> Path | None:
+    if not os.getenv("REDLOTUS_DATA_DIR") and config_value(settings(), ("storage", "state_dir"), ..., kind=(str, type(None))) is ...:
+        return None
     (base := user_data_dir()).mkdir(parents=True, exist_ok=True)
     return base / "history"
-
-
-def create_prompt_session() -> PromptSession:
-    kb = KeyBindings()
-
-    @kb.add("c-c", eager=True)
-    def _interrupt(event) -> None:
-        if event.app.current_buffer.text:
-            # 有内容：仅清空当前行，不退出
-            return event.app.current_buffer.reset()
-        # Use a regular exception so the input task cannot abort the event loop.
-        event.app.exit(exception=InterruptedError())
-
-    return PromptSession(
-        history=FileHistory(str(_history_path())),
-        completer=AgentCompleter(),
-        complete_while_typing=False,
-        key_bindings=kb,
-        interrupt_exception=InterruptedError,
-    )
 
 
 class InteractiveRepl:
@@ -264,17 +237,30 @@ class InteractiveRepl:
         self.prompt = prompt
         self._session: PromptSession | None = None
         self._interrupt_hits = 0
-        self._last_interrupt_at = 0.0
         self._on_interrupt_during_handler = on_interrupt_during_handler
+
+    def _create_prompt_session(self) -> PromptSession:
+        kb = KeyBindings()
+
+        @kb.add("c-c", eager=True)
+        def _interrupt(event) -> None:
+            if event.app.current_buffer.text:
+                self._interrupt_hits = 0
+                return event.app.current_buffer.reset()
+            # Use a regular exception so the input task cannot abort the event loop.
+            event.app.exit(exception=InterruptedError())
+
+        return PromptSession(
+            history=FileHistory(str(path)) if (path := _history_path()) is not None else None,
+            completer=AgentCompleter(),
+            complete_while_typing=False,
+            key_bindings=kb,
+            interrupt_exception=InterruptedError,
+        )
 
     def _on_keyboard_interrupt(self) -> bool:
         """处理空行 Ctrl+C。返回 True 表示应退出 REPL。"""
-        now = time.monotonic()
-        self._interrupt_hits = (
-            1 if now - self._last_interrupt_at > settings()["ui"]["interrupt_repeat_seconds"]
-            else self._interrupt_hits + 1
-        )
-        self._last_interrupt_at = now
+        self._interrupt_hits += 1
         if self._interrupt_hits < 2:
             print_warning("再次按 Ctrl+C 退出，或输入 /exit、quit。")
         return self._interrupt_hits >= 2
@@ -282,7 +268,7 @@ class InteractiveRepl:
     async def read_line(self, *, stop_event: asyncio.Event | None = None) -> str | None:
         if sys.stdin.isatty() and sys.stdout.isatty():
             if self._session is None:
-                self._session = create_prompt_session()
+                self._session = self._create_prompt_session()
             try:
                 with patch_stdout(raw=True):
                     read_coro = self._session.prompt_async(self.prompt)
@@ -468,10 +454,10 @@ class AgentInput(Input):
 
     async def on_key(self, event: events.Key) -> None:
         """Capture submission in the same queue that applies typed characters."""
-        if event.key in {"enter", "ctrl+enter"}:
+        if event.key in {"enter", "ctrl+enter", "ctrl+j", "ctrl+\r"}:
             event.stop()
             event.prevent_default()
-            await self.action_submit(urgent=event.key == "ctrl+enter")
+            await self.action_submit(urgent=event.key != "enter")
 
     async def action_submit(self, *, urgent=False) -> None:
         """Consume this draft before another key can submit or replace it."""
@@ -482,6 +468,77 @@ class AgentInput(Input):
         else:
             await super().action_submit()
         self.value = ""
+
+    def finish_question(self, keep_draft: bool) -> None:
+        if not keep_draft:
+            self.value = ""
+        self.password = False
+        self.remove_class("ask")
+        self.placeholder = "📝 请输入您的任务:"
+        self.suggester = AgentInputSuggester(case_sensitive=True, use_cache=False)
+
+
+def terminal_driver():
+    if sys.platform != "win32":
+        return None
+    from ctypes import POINTER, cast
+    from textual.drivers import win32
+    from textual.drivers.windows_driver import WindowsDriver
+
+    class ControlEnterDriver(WindowsDriver):
+        def start_application_mode(self):
+            if hasattr(self, "_native_reader"):
+                return
+            native = self._native_reader = win32.KERNEL32.ReadConsoleInputW
+            def read(handle, records, size, count):
+                result = native(handle, records, size, count)
+                rows = cast(records, POINTER(win32.INPUT_RECORD))
+                for index in range(cast(count, POINTER(win32.DWORD)).contents.value):
+                    row = rows[index]
+                    key = row.Event.KeyEvent
+                    if (row.EventType == 1 and key.bKeyDown and key.wVirtualKeyCode == 13
+                            and key.dwControlKeyState & 0x000C and key.uChar.UnicodeChar == "\r"):
+                        key.uChar.UnicodeChar = "\n"
+                return result
+            read.argtypes, read.restype = native.argtypes, native.restype
+            win32.KERNEL32.ReadConsoleInputW = read
+            try:
+                super().start_application_mode()
+            except BaseException:
+                win32.KERNEL32.ReadConsoleInputW = self._native_reader
+                del self._native_reader
+                raise
+
+        def stop_application_mode(self):
+            if not hasattr(self, "_native_reader"):
+                return
+            try:
+                super().stop_application_mode()
+            finally:
+                win32.KERNEL32.ReadConsoleInputW = self._native_reader
+                del self._native_reader
+
+        def close(self):
+            self.stop_application_mode()
+            super().close()
+
+    return ControlEnterDriver
+
+
+class SessionFooter(Footer):
+    session_disabled = True
+
+    def compose(self) -> ComposeResult:
+        button = Button("会话 / 加载", id="session-load", disabled=self.session_disabled)
+        button.can_focus = False
+        inserted = False
+        for widget in super().compose():
+            yield widget
+            if getattr(widget, "action", None) == "review":
+                yield button
+                inserted = True
+        if not inserted:
+            yield button
 
 
 class SnapshotPickScreen(ModalScreen[SnapshotSelection]):
@@ -702,11 +759,10 @@ class UsagePanel(VerticalScroll):
 READY_LABEL = "就绪"
 PREPARING_LABEL = "正在准备会话…"
 WORKING_LABEL = "工作中"
-WORKING_FRAMES = ("", ".", "..", "...")
 
 
 class RunStatus(Static):
-    """Render the same interaction state on each native Textual refresh."""
+    """Render interaction state when existing UI events refresh the widget."""
 
     def _is_working(self) -> bool:
         return bool(
@@ -740,8 +796,14 @@ class RunStatus(Static):
         ):
             text.append(PREPARING_LABEL, style="dim")
             return text
+        session = self.app.system._session
+        if self.app._turn_control_pending or session.control_busy:
+            text.append("恢复中" if self.app._turn_control_pending and self.app._turn_control_pending[1] == "resume" else "暂停中", style="dim")
+            return text
+        if session.paused:
+            text.append("已暂停", style="dim")
+            return text
         if not self._is_working():
-            self.app._working_frame = 0
             text.append(READY_LABEL, style="dim")
             if self.app._run_mode == TuiRunMode.REVIEW and self.app._pending_count > 0:
                 text.append("       ")
@@ -750,12 +812,10 @@ class RunStatus(Static):
                     style="bold black on yellow",
                 )
             return text
-        suffix = WORKING_FRAMES[self.app._working_frame % len(WORKING_FRAMES)]
-        self.app._working_frame += 1
         if self.app.system.has_current_goal_turn:
             iteration = self.app.system.current_goal_iteration
             label = f"目标循环第 {iteration} 轮" if iteration else "目标循环"
-            text.append(f"{label}{suffix}")
+            text.append(label)
         else:
-            text.append(f"{WORKING_LABEL}{suffix}")
+            text.append(WORKING_LABEL)
         return text

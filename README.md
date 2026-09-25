@@ -24,7 +24,7 @@ redlotus
 
 ## Features
 
-The release process for `1.0.1.post1` uses the title `1.0.1-release` and preserves the existing `1.0.1` release. Its agreed validation scope excludes Linux, macOS, live QQ/WeChat accounts, and unconfigured model protocols. Those capabilities remain implemented but unverified for this release. Testing startup and upgrades from the old `1.0.1` package is outside this scope. Publication requires source, installed-package, and Windows artifact acceptance, followed by fresh public downloads. See the [build checkpoints](docs/design.md#状态说明) and the corresponding [GitHub release notes](https://github.com/Tian-ye1214/RedLotus/releases) for the final status and artifact hashes.
+The earlier `1.0.1.post1` release plan used the title `1.0.1-release` and preserved the existing `1.0.1` release. Its validation exclusions cover Linux, macOS, live QQ/WeChat accounts, and unconfigured model protocols; those capabilities remain unverified. Old `1.0.1` startup and upgrade tests are outside the scope. The current terminal-control changes do not publish or replace release artifacts. See the [project design](docs/design.md) and [GitHub Releases](https://github.com/Tian-ye1214/RedLotus/releases) for recorded status and artifact hashes.
 
 Before each model request, compression uses reported input tokens and the threshold `ceil(min(configured_ratio * context_capacity, context_capacity - max_output))`. A main, child, or memory request with a durable checkpoint that is rejected for context capacity is split at complete evidence and closed tool-call boundaries for concurrent compression, then retried once after the summaries are saved. Completed tools are not repeated. The capacity rejection is logged with unknown provider usage preserved. Original records and the system prompt remain intact.
 
@@ -103,13 +103,13 @@ python -m playwright install chromium
 
 ## Initial configuration
 
-After pip installation, run `redlotus`. Global configuration lives at `~/.redlotus/config.json`. Optional developer overrides use this field-by-field order: local `src/redlotus/config.json`, local `.env`, then global JSON. The source launcher searches from the checkout root, pip from the current directory, and PyInstaller from the executable's directory. `/config` shows the sources and write target. No parent-directory search or AppData configuration is used.
+Each parameter is resolved in this fixed order: project `src/redlotus/config.json` → project `.env` → global `~/.redlotus/config.json`. A value found at one layer stops that parameter's lookup; only unresolved parameters continue to the next layer. Nested objects follow the same rule field by field. The source launcher starts from the checkout root, pip from the current directory, and PyInstaller from the executable's directory, without searching parent directories. `/config` shows the sources and write target.
 
-Nested `.env` fields use JSON names separated by `__`, such as `models__worker__max_tokens=393216`. Numbers, booleans, arrays and objects use JSON values. Host environment variables never override business settings. Interactive startup asks for missing required fields; noninteractive startup reports their paths. No bundled configuration is silently copied or merged. After confirmation, configuration editing writes only the changes to an existing local JSON, otherwise to the global JSON. Cancelling writes nothing. Credentials are never included in packages.
+An empty value is judged by the parameter's semantics: valid `null`, `0`, `false`, and empty lists are preserved. Blank credentials can continue to the next source. A nonempty invalid value reports an error without silently falling back. `.env` keeps python-dotenv syntax and `__` for nested keys; it does not interpolate variables or import business settings from the host environment. See the [four precedence examples](docs/design.md#模型配置与上下文).
 
-For isolated tests, `REDLOTUS_CONFIG_FILE`, `REDLOTUS_DOTENV_FILE`, and `REDLOTUS_CONFIG_DIR` explicitly select the three sources. `REDLOTUS_DATA_DIR` isolates global state. Each opened project stores sessions, perception progress, logs, and its user-maintained `AGENT.md` in `.redlotus`; artifacts, dependencies, caches, and immutable reference snapshots belong in `WorkDatabase`. Configuration and all LanceDB memory databases remain in `~/.redlotus`, with project-scoped access. The legacy `%LOCALAPPDATA%/RedLotus` directory is not read, migrated, or recreated.
+The API key, base URL, and selected roles' model configuration are enough to enter the interactive session. Startup asks only for missing values in that set, without an additional RAG or runtime questionnaire. Model commands and `/api embedding` remain available for editing their settings. Optional components read runtime settings when used; missing settings for unused capabilities do not block startup or cause an exit. A required value missing at its point of use reports its name, purpose, type, allowed choices and sources; parameters without an enum say so. There is no schema, hidden fallback value, or bundled configuration template.
 
-For a new installation, run `redlotus` to complete the setup dialog, or use the public [field contract](src/redlotus/config.schema.json) to prepare your configuration. It contains types and descriptions, without model choices, credentials or policy defaults. Entering `=role` reuses that role's model name while preserving the target role's connection and policy. `max_context_windows` is edited only in JSON; missing or null values use OpenRouter metadata. The following connection fields are only a fragment, not a complete configuration:
+Credentials are hidden during entry. After confirmation, editing reads the latest JSON under a native blocking file lock and atomically writes only the changes to an existing project JSON, otherwise to the global JSON; it does not require a configured lock timeout or write `.env`. Esc cancels without saving. An Esc received while consecutive prompts switch is passed to the next prompt, and credentials remain hidden. Entering `=role` reuses that role's model name while preserving the target role's connection and policy. `max_context_windows` is configured in the files, outside the interactive model guide; missing or valid null values after source lookup use OpenRouter metadata. The following is only a connection fragment, not a complete configuration:
 
 ```json
 {
@@ -118,9 +118,11 @@ For a new installation, run `redlotus` to complete the setup dialog, or use the 
 }
 ```
 
-Gateways support Pydantic AI's OpenAI Chat, OpenAI Responses, Anthropic Messages and Google adapters. Manager, Worker, Coordinator and Compressor models can be configured independently or select named presets. Memory perception uses the role selected by `memory_perception.model_role`, independently of context compression. Vector retrieval and reranking use `SILICONFLOW_BASE`, `SILICONFLOW_KEY`, `RAG_models` and `rag_service`.
+`REDLOTUS_CONFIG_FILE`, `REDLOTUS_DOTENV_FILE`, and `REDLOTUS_CONFIG_DIR` explicitly select the existing project JSON, dotenv file, and global configuration directory. They do not add another precedence layer. `REDLOTUS_DATA_DIR` isolates global state. Each project stores sessions, logs, perception progress and `AGENT.md` in `.redlotus`; artifacts, dependencies, caches and immutable reference snapshots belong in `WorkDatabase`. Memory databases remain under the user's `.redlotus`, with project-scoped access. Packages contain no private configuration, credentials or schema.
 
-Named credential references such as `api_key_env` resolve fields in the same three-layer configuration, including the local `.env`; they do not read the host environment or a global `.env`. Direct keys and references follow the same source priority. Do not commit credentials. See [configuration and model routing](docs/design.md).
+Gateways use Pydantic AI's OpenAI Chat, OpenAI Responses, Anthropic Messages and Google adapters. Manager, Worker, Coordinator and Compressor models can be configured independently or select named presets. Perception uses `memory_perception.model_role`; retrieval and reranking use `SILICONFLOW_BASE`, `SILICONFLOW_KEY`, `RAG_models` and `rag_service`. Named credential references such as `api_key_env` resolve fields in the same three-file order; host environment variables do not override them. Do not commit credentials. See [configuration and model routing](docs/design.md#模型配置与上下文).
+
+Memory, RAG, and reference paths are read when used. Bundled Skills remain available without a configured Skills overlay. The CLI reads optional exit grace only when exiting; if it is absent, no application deadline is imposed. Process cleanup also allows an unspecified deadline.
 
 ## Terminal usage
 
@@ -137,16 +139,23 @@ Common shortcuts:
 | Shortcut | Action |
 |----------|--------|
 | `Enter` | Submit normally; pending outer turns appear as dimmed queued messages |
-| `Ctrl+Enter` | Add to the active inner loop at the next model request; start a normal turn when idle |
+| `Ctrl+Enter` · `↑` | Add to the active turn at the next model request; start a normal turn when idle |
+| `■` · `▶` | Pause the active turn or explicitly resume it; disabled when idle or handling a control action |
 | `Shift+Tab` | Switch run mode |
 | `Ctrl+R` | Open the pending-change review |
 | `Ctrl+C` | Stop the current turn |
 | `Ctrl+Q` | Exit |
-| `@path` | Reference documents and images, with Tab completion; up to 20 files. Video validation is deferred. |
+| `@path` | Reference documents and images, with Tab completion; subject to the configured file limit. Video validation is deferred. |
 
-Supplements appear as ordinary user messages, without an urgency label. The terminal uses Ctrl+Enter to supplement the active turn. If a terminal sends the same code for Ctrl+Enter and Enter, Python cannot distinguish them; the terminal must preserve the modifier. Shift+Tab can still work because it has a separate code. Keyboard diagnostics are for testing only; see [keyboard behavior and verification](docs/design.md#请求执行).
+Supplements appear as ordinary user messages, without an urgency label. Ctrl+Enter also accepts terminal `ctrl+j`/LF and modified CR events; ordinary Enter still submits normally, and pasted newlines do not submit. An application can distinguish the keys only when the terminal sends distinct events. Physical Ctrl+Enter verification in PyCharm remains open; IDE and terminal settings have not been changed. Keyboard diagnostics remain for testing only; physical keys and injected events are recorded separately in [keyboard behavior](docs/design.md#请求执行).
 
-References can be adjacent or separated by punctuation, for example `@review.md,@image.png`. Tab completes the current reference and automatically quotes paths containing spaces or delimiters; `@"path"`, `@'path'`, and `@{path}` also work. Files are deduplicated in first-appearance order. More than 20 distinct files produces an error instead of a partial upload.
+The prominent `↑` remains the urgent-submit button. The adjacent button uses the same slot for `■` while running and `▶` while paused, preserving the input draft and focus. Pause stops queue execution and cancels current model, child-agent, tool and question work while retaining the goal, mode, history, results, supplements and references. Inputs submitted while paused stay queued. Reloading a paused session still waits for `▶`; resume continues from retained history without resending the whole task or automatically replaying completed tools.
+
+A transport-interrupted response keeps the text, thinking and usage already received and waits for the same `▶` control. Full error details remain in the log; the application does not automatically retry. The thinking box opens once on the first thinking delta of each turn, and later deltas or responses respect manual collapse.
+
+In the simple terminal, two consecutive Ctrl+C presses on empty input exit; normal input resets the count, with no timing window. The TUI keeps its existing stop-or-exit behavior. Status and usage panels update from existing events without a periodic refresh setting.
+
+References can be adjacent or separated by punctuation, for example `@review.md,@image.png`. Tab completes the current reference and automatically quotes paths containing spaces or delimiters; `@"path"`, `@'path'`, and `@{path}` also work. Files are deduplicated in first-appearance order. Exceeding the configured file limit produces an error instead of a partial upload.
 
 <details>
 <summary>Common slash commands</summary>
@@ -156,7 +165,7 @@ References can be adjacent or separated by punctuation, for example `@review.md,
 | `/help` | Show help |
 | `/clear` | Clear context and start a new conversation |
 | `/pwd` · `/cd <path>` | Show or change the working directory |
-| `/load` | Open the current project's session picker; also available through the TUI session/load button |
+| `/load` | Open the current project's session picker; the TUI session/load button is in the bottom bar after Review |
 | `/config` · `/context` · `/panel` | Show configuration, context usage, or the runtime overview |
 | `/skills` | List loaded Skills |
 | `/LTM show` · `/STM show` | Show long- or short-term memory |
@@ -167,6 +176,8 @@ References can be adjacent or separated by punctuation, for example `@review.md,
 | `/stop` · `/cancel` | Stop the current turn or cancel an invocation |
 
 </details>
+
+`/trace` and `/status` keep complete trace and invocation history without fixed count eviction or shortened IDs. Session lists, diff context, streamed text, completions, tool arguments, usage paths and error details are not clipped. `/panel --all` remains accepted and displays the same complete list as `/panel`. Failed tasks retain their state and evidence until explicitly resumed.
 
 ## Skills
 
@@ -194,10 +205,11 @@ New skills are discovered automatically on subsequent user turns.
 - Project episodes and global records use the configured LanceDB directory under the user's `.redlotus`, with scope/project isolation, vector recall, reranking, and text fallback. Sessions and logs remain in each project's `.redlotus`; references, artifacts, dependencies, and caches stay in its `WorkDatabase`.
 - `MEMORY.md` contains the core profile, environment, constraints and general experience without a fixed character cap. Its complete contents and the system prompt are snapshotted for the session; memory writes do not rewrite that prefix. New confirmed information is consumed through tool results and retrieval, and a new session loads a fresh snapshot.
 - File and command tools use the current project. Generated artifacts go to `WorkDatabase/`. `/cd` cancels the old session before switching context.
+- Log cleanup runs once per session before input is enabled. It checks only `*.log` files directly in the log directory and deletes files whose modification age strictly exceeds `storage.cleanup.log_retention_days`. A missing or nonpositive value skips cleanup; there is no 14-day fallback. Logs do not rotate by size, and existing `.log.1` files are neither renamed nor deleted; new ones are not created. Ordinary logging and background timers do not trigger cleanup.
 
-Enter queues a separate FIFO turn. Ctrl+Enter adds an urgent supplement to the active turn, together with the completed tool batch at the next request boundary. Child Agents use dedicated threads, event loops, and clients within the configured session limit. Perception processes each set of 20 new user turns in the current session, with three earlier turns for continuity. Opening, loading, or exiting a session does not create a short perception window. Explicit remember requests are handled immediately; failed production remains pending.
+Enter queues a separate FIFO turn. Ctrl+Enter adds an urgent supplement to the active turn, together with the completed tool batch at the next request boundary; while paused, both stay queued until explicit resume. Child Agents use dedicated threads, event loops, and clients within the configured session limit. Perception processes each set of 20 new user turns in the current session, with three earlier turns for continuity. Opening, loading, or exiting a session does not create a short perception window. Explicit remember requests are handled immediately; failed production remains pending.
 
-Model parameters, retrieval settings and runtime limits are declared in JSON and read as independent copies. See [architecture and migration](docs/design.md) for window-based production and the retained RAG parameters.
+Model parameters, retrieval settings and retained runtime limits use the same three-file precedence and are read as independent copies. See [memory and retrieval design](docs/design.md#感知与记忆) for window-based production and the retained RAG parameters.
 
 ## QQ and WeChat bots
 
@@ -216,7 +228,7 @@ python -m redlotus.api.WeChat
 
 QQ integration requires [NapCat](https://github.com/NapNeko/NapCatQQ) with a configured OneBot WebSocket endpoint, bot QQ number, and WebUI token. The WeChat integration prompts for QR-code login at startup.
 
-Personal bot access must be bound in `bot.owner_channels.qq` (private QQ IDs) or `bot.owner_channels.wechat` (wxids). Unbound channels have text-only conversations and no access to personal memory or execution tools. Bots accept `/stop` and `/clear`; their entrypoints collect missing channel policies before connecting. Attachment order has been checked through the adapter and real model API; real account messaging remains pending. See the [binding example](docs/design.md#agent-与工具边界).
+Personal bot access must be bound in `bot.owner_channels.qq` (private QQ IDs) or `bot.owner_channels.wechat` (wxids). Unbound channels have text-only conversations and no access to personal memory or execution tools. Bots accept `/stop` and `/clear`; channel settings use the same three-file precedence, and missing required fields are reported without a setup form. Attachment order has been checked through the adapter and real model API; real account messaging remains pending. See the [channel permissions](docs/design.md#agent-与工具边界).
 
 ## Development
 
@@ -246,4 +258,4 @@ pyinstaller build.spec
 
 The main package lives in `src/redlotus/`, organized into `runtime`, `sessions`, `core`, `tools`, `memory`, `prompts`, `ui`, and `api`. The `redlotus` command maps to `redlotus.api.base:main`.
 
-Restructuring and release acceptance remain incomplete. Real API testing has resumed after funding; browser reading, screenshots, and cleanup passed on all four entries of the preceding candidate. The approved explicit copy_from option preserves UTF-8 source text through the existing review and atomic-write flow. All six source/pip/onedir copy cases ended with exact bytes; two required model self-correction, with their initial errors retained. A later review found unbounded session-lock waits during cancellation. The approved timeout fix passes 242 source auxiliary tests; artifacts and final-candidate acceptance are being updated. The final long-run matrix, cache target, and post-release checks have not passed. Tests must include source, daily pip, and packaged entries; builds and isolated fault checks alone are insufficient. See the [acceptance record](docs/design.md#状态说明) and [development rules](docs/development.md).
+This change covers terminal controls, durable pause/resume, thinking-box state, key compatibility, and explicit continuation after a transport interruption. Existing startup, three-file configuration precedence, optional settings, log age cleanup and bundled Skills remain. Private configuration is unchanged, with no new defaults, count limits or dependencies. The current source and installed-wheel suites each pass 692 tests with 18 obsolete-contract skips, plus seven independent review checks each. The original five test files stay deleted, with necessary coverage maintained in the five newer files. The eight modules and 36 application files meet the limits of five files per module and 500 effective lines per file. The required net reduction is still unmet: 10,500 effective lines exceed the 10,373 baseline; full physical-terminal acceptance also remains open. Earlier test results remain historical. No release artifacts are replaced; the long-run matrix, cache target and post-release checks remain incomplete. See the [project design](docs/design.md) and [development rules](docs/development.md).

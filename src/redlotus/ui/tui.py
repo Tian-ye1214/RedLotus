@@ -12,7 +12,6 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     Button,
     Collapsible,
-    Footer,
     Input,
     OptionList,
     RichLog,
@@ -21,7 +20,6 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import settings
 from redlotus.sessions.context import current_short_agent_id
 from redlotus.ui.cli_commands import WorkspaceSnapshot
 from redlotus.ui.presentation import (
@@ -29,7 +27,6 @@ from redlotus.ui.presentation import (
     PanelSnapshotCache,
     build_panel_snapshot,
     context_usage_renderable,
-    model_stream_visible_text,
     render_review_hunk,
     set_output_sink,
     user_text_panel,
@@ -38,12 +35,14 @@ from redlotus.ui.widgets import (
     AgentInput,
     AgentInputSuggester,
     RunStatus,
+    SessionFooter,
     SnapshotAction,
     SnapshotPickScreen,
     SnapshotSelection,
     TextualOutputSink,
     TuiRunMode,
     UsagePanel,
+    terminal_driver,
     visible_conversation_entries,
 )
 
@@ -62,15 +61,17 @@ class RedLotusTui(App[None]):
     #panel-task-progress { width: 1fr; }
     #panel-task-counts { height: 1; }
     #context-usage { display: none; height: 1; padding: 0 1; color: $text-muted; }
-    #stream-preview { display: none; height: 12; max-height: 12; padding: 0 1; }
+    #stream-preview { display: none; height: 1fr; padding: 0 1; }
     #thinking-preview { display: none; height: auto; padding: 0 1; }
     #thinking-scroll { height: 10; }
     #thinking-content { height: auto; color: $text-muted; }
     #status { height: 1; padding: 0 1; background: $surface; color: $text-muted; }
     #session-context { height: auto; padding: 0 1; color: $text-muted; }
     #input-row { height: 3; }
-    #input { width: 1fr; height: 3; border: round $primary; }
-    #session-load { width: 16; height: 3; }
+    #input { width: 1fr; min-width: 0; height: 3; border: round $primary; }
+    #urgent-submit, #turn-control { width: auto; min-width: 0; height: 3; padding: 0 2; }
+    #urgent-submit { text-style: bold; }
+    #session-load { width: auto; min-width: 0; height: 1; border: none; padding: 0 1; }
     #input.ask { border: thick $warning; }
     """
 
@@ -85,16 +86,17 @@ class RedLotusTui(App[None]):
     ]
 
     def __init__(self, controller: Any, stop_event: asyncio.Event | None = None) -> None:
-        super().__init__()
+        super().__init__(driver_class=terminal_driver())
         self.controller = controller
         self.system = controller.system
         self.stop_event = stop_event
         self.state = controller.new_session_state()
         self._ask_future: asyncio.Future[str] | None = None
+        self._ask_generation = None
         self._ask_lock = asyncio.Lock()
         self._record_reply = True
         self._active_line_handlers = 0
-        self._working_frame = 0
+        self._turn_control_pending: tuple[int, str] | None = None
         self._model_stream_title = ""
         self._model_stream_text = ""
         self._model_stream_thinking = ""
@@ -106,10 +108,7 @@ class RedLotusTui(App[None]):
         self._review_items: list = []  # [(entry, hunk), ...] 当前未决定的改动
         self._pending_count = 0
         self._panel_mode = False
-        self._panel_include_all = False
         self._panel_cache = PanelSnapshotCache()
-        self._panel_timer = None
-        self._panel_refresh_task = None
         # Mount starts asynchronous preparation before the workspace admission
         # gate exists. Keep the composer closed across that gap.
         self._startup_locked = True
@@ -123,7 +122,8 @@ class RedLotusTui(App[None]):
             with Collapsible(title="思考", collapsed=False, id="thinking-preview"):
                 with VerticalScroll(id="thinking-scroll"):
                     yield Static("", id="thinking-content")
-            yield Static("", id="stream-preview")
+            with VerticalScroll(id="stream-preview"):
+                yield Static("", id="stream-content")
             yield RunStatus(id="status")
             yield Static(self._session_context_text(), id="session-context")
             with Horizontal(id="input-row"):
@@ -133,17 +133,19 @@ class RedLotusTui(App[None]):
                     suggester=AgentInputSuggester(case_sensitive=True, use_cache=False),
                     disabled=True,
                 )
-                yield Button("会话 / 加载", id="session-load", disabled=True)
-            yield Footer()
+                for label, identity, variant in (("↑", "urgent-submit", "primary"), ("■", "turn-control", "default")):
+                    button = Button(label, id=identity, variant=variant, disabled=True)
+                    button.can_focus = False
+                    yield button
+            yield SessionFooter()
 
     async def on_mount(self) -> None:
         self._ui_thread_id = threading.get_ident()
         log = self.query_one("#output", RichLog)
         set_output_sink(TextualOutputSink(self, log))
-        self.system.set_ask_user_handler(self._make_ask_user_bridge())
+        self.system.set_ask_user_handler(self._ask_agent_user)
         if self._run_mode == TuiRunMode.REVIEW:
             self.system.toolkit.review_store.activate(self._on_reviews_changed)
-        self.set_interval(settings()["ui"]["status_refresh_seconds"], self.refresh_status)
         await self._prepare_cli_session()
         controller = self.controller
         controller._active_session_state = self.state
@@ -152,10 +154,7 @@ class RedLotusTui(App[None]):
         controller.config_prompt = self.ask_config
         if self.stop_event is not None:
             asyncio.create_task(self._watch_stop_event())
-        self.call_after_refresh(self._schedule_workspace_enter)
-
-    def _schedule_workspace_enter(self) -> None:
-        self.run_worker(self._enter_workspace_after_mount, exclusive=True)
+        self.call_after_refresh(self.run_worker, self._enter_workspace_after_mount, exclusive=True)
 
     async def _prepare_cli_session(self) -> None:
         missing = await self.controller.prepare_session()
@@ -166,8 +165,6 @@ class RedLotusTui(App[None]):
 
     async def _enter_workspace_after_mount(self) -> None:
         controller = self.controller
-        self.query_one("#input", AgentInput).disabled = True
-        self.query_one("#session-load", Button).disabled = True
         try:
             if await controller.enter_current_workspace():
                 self.state.is_first_input = False
@@ -245,16 +242,12 @@ class RedLotusTui(App[None]):
 
         self.call_ui(render)
 
-    def _make_ask_user_bridge(self):
-        async def ask_user_bridge(question: str) -> str:
-            # Child toolkits already bridge calls onto the owner's event loop.
-            who = current_short_agent_id()
-            return await self.ask_user(f"[{who}] {question}" if who else question)
-
-        return ask_user_bridge
+    async def _ask_agent_user(self, question: str) -> str:
+        # Child toolkits already bridge calls onto the owner's event loop.
+        who = current_short_agent_id()
+        return await self.ask_user(f"[{who}] {question}" if who else question)
 
     async def _watch_stop_event(self) -> None:
-        assert self.stop_event is not None
         await self.stop_event.wait()
         self.exit()
 
@@ -357,16 +350,14 @@ class RedLotusTui(App[None]):
         self.query_one("#input", AgentInput).focus()
         self.refresh_status()
 
-    async def open_panel(self, *, include_all: bool = False) -> None:
+    async def open_panel(self) -> None:
         if self._review_mode:
             self._exit_review()
         self._panel_mode = True
-        self._panel_include_all = include_all
         self.query_one("#output", RichLog).display = False
         panel_view = self.query_one("#panel-view", VerticalScroll)
         panel_view.display = True
-        self._schedule_panel_refresh()
-        self._ensure_panel_timer()
+        panel_view.border_title = "工作区总览 · Esc 退出"
         self.query_one("#input", AgentInput).focus()
         self.refresh_status()
 
@@ -382,48 +373,18 @@ class RedLotusTui(App[None]):
                 system=self.system,
                 coordinator_history=self.state.history,
                 manager_history=getattr(self.system, "_manager_history", None),
-                include_all=self._panel_include_all,
                 cache=self._panel_cache,
             )
-            if not self._panel_mode or identity != (self.system.workspace, self.system.session_key):
+            if not self.is_running or not self._panel_mode or identity != (self.system.workspace, self.system.session_key):
                 return
             self.query_one(UsagePanel).update_snapshot(snapshot)
         except Exception as e:
             logger.error(f"刷新工作区面板失败: {type(e).__name__}: {e}", exc_info=True)
-
-
-
-
-    def _schedule_panel_refresh(self) -> None:
-        if not self._panel_mode:
-            return
-        task = self._panel_refresh_task
-        if task is not None and not task.done():
-            return
-        self._panel_refresh_task = asyncio.create_task(self._refresh_panel())
-
-    def _ensure_panel_timer(self) -> None:
-        if self._panel_timer is not None:
-            return
-        interval = settings()["ui"]["panel_refresh_seconds"]
-        self._panel_timer = self.set_interval(interval, self._schedule_panel_refresh)
-        self.query_one("#panel-view").border_title = f"工作区总览 · 每 {interval:g} 秒刷新 · Esc 退出"
-
-    def _stop_panel_timer(self) -> None:
-        timer = self._panel_timer
-        self._panel_timer = None
-        task = self._panel_refresh_task
-        self._panel_refresh_task = None
-        if task is not None and not task.done():
-            task.cancel()
-        if timer is not None:
-            timer.stop()
-
     def _exit_panel(self) -> None:
         if not self._panel_mode:
             return
         self._panel_mode = False
-        self._stop_panel_timer()
+        self.workers.cancel_group(self, "panel")
         self.query_one("#panel-view", VerticalScroll).display = False
         self.query_one("#output", RichLog).display = True
         self.query_one("#input", AgentInput).focus()
@@ -459,9 +420,11 @@ class RedLotusTui(App[None]):
 
     def set_context_usage(self, items: list[ContextUsageItem]) -> None:
         self._display_content("context-usage", context_usage_renderable(items), bool(items))
+        self.refresh_status()
 
     def clear_context_usage(self) -> None:
         self._display_content("context-usage", "", False)
+        self.refresh_status()
 
     def _display_content(self, widget_id, content, visible=True):
         """Update one auxiliary display and its visibility together."""
@@ -473,21 +436,40 @@ class RedLotusTui(App[None]):
         if not self.is_running:
             return
         self.query_one(RunStatus).refresh()
+        if self._panel_mode:
+            self.run_worker(self._refresh_panel, group="panel", exclusive=True)
         controller = self.controller
         input_box = self.query_one("#input", AgentInput)
+        session = self.system._session
+        if self._ask_future is not None and self._ask_generation != session.generation[0]:
+            self._cancel_pending_ask()
+            self._ask_future = None
+            input_box.finish_question(False)
+        if self._turn_control_pending and self._turn_control_pending[0] != session.generation[0]:
+            self._turn_control_pending = None
         was_disabled = input_box.disabled
         asking = self._ask_future is not None and not self._ask_future.done()
         input_box.disabled = controller.is_transitioning or (
             self._startup_locked and not asking
         )
+        self.query_one("#urgent-submit", Button).disabled = input_box.disabled
+        control = self.query_one("#turn-control", Button)
+        control.label = "▶" if session.paused else "■"
+        control.disabled = (
+            self._startup_locked or controller.is_transitioning or bool(self._turn_control_pending)
+            or session.control_busy or not (self.system.has_current_turn or session.paused)
+        )
         if was_disabled and not input_box.disabled:
             input_box.focus()
-        self.query_one("#session-load", Button).disabled = (
+        footer = self.query_one(SessionFooter)
+        footer.session_disabled = (
             self._startup_locked
             or controller.is_transitioning
             or self._active_line_handlers > 0
             or self.system.has_current_turn
         )
+        for button in footer.query("#session-load"):
+            button.disabled = footer.session_disabled
         self.query_one("#session-context", Static).update(self._session_context_text())
         if not input_box.disabled and self.system.last_rejected_input and self._ask_future is None:
             if not input_box.value:
@@ -505,21 +487,17 @@ class RedLotusTui(App[None]):
         )
 
     def _refresh_model_stream(self) -> None:
-        self._display_content(
-            "stream-preview",
-            user_text_panel(
-                model_stream_visible_text(self._model_stream_text, self._stream_policy),
-                self._model_stream_title,
-                text_style="white",
-                border_style="cyan",
-            ),
-            bool(self._model_stream_text),
-        )
+        preview = self.query_one("#stream-preview", VerticalScroll)
+        preview.display = bool(self._model_stream_text)
+        self.query_one("#stream-content", Static).update(user_text_panel(
+            self._model_stream_text, self._model_stream_title,
+            text_style="white", border_style="cyan",
+        ))
+        preview.scroll_end(animate=False)
 
     def begin_model_stream(self, title: str) -> None:
         self.clear_model_stream()
         self._stream_session = (self.system.session_key, self.system._session.generation)
-        self._stream_policy = settings()["ui"]
         self._model_stream_title = title
         self._refresh_model_stream()
 
@@ -535,10 +513,11 @@ class RedLotusTui(App[None]):
         if not text or self._stream_session != (self.system.session_key, self.system._session.generation):
             return
         if kind == "thinking":
-            self._model_stream_thinking += text
             preview = self.query_one("#thinking-preview", Collapsible)
+            if not self._model_stream_thinking:
+                preview.collapsed = False
+            self._model_stream_thinking += text
             preview.display = True
-            preview.collapsed = False
             preview.title = "思考 · 接收中"
             self.query_one("#thinking-content", Static).update(Text(self._model_stream_thinking))
             self.query_one("#thinking-scroll", VerticalScroll).scroll_end(animate=False)
@@ -557,10 +536,11 @@ class RedLotusTui(App[None]):
                 self._model_stream_text, f"Coordinator · {status}", border_style="yellow",
             ))
         self._model_stream_text = ""
-        self._display_content("stream-preview", "", False)
+        self._refresh_model_stream()
         preview = self.query_one("#thinking-preview", Collapsible)
         preview.title = f"思考 · {status} · 展开查看"
         preview.collapsed = True
+        self.refresh_status()
 
     def clear_model_stream(self) -> None:
         self._model_stream_title = ""
@@ -568,9 +548,10 @@ class RedLotusTui(App[None]):
         self._model_stream_thinking = ""
         self._model_response_count = 0
         self._stream_session = None
-        self._display_content("stream-preview", "", False)
+        self._refresh_model_stream()
         self.query_one("#thinking-preview", Collapsible).display = False
         self.query_one("#thinking-content", Static).update("")
+        self.refresh_status()
 
     def _cancel_pending_ask(self) -> bool:
         fut = self._ask_future
@@ -586,7 +567,8 @@ class RedLotusTui(App[None]):
             if generation != self.system._session.generation:
                 raise asyncio.CancelledError()
             self._record_reply = record_reply
-            self._ask_future = asyncio.get_running_loop().create_future()
+            self._ask_generation = generation[0]
+            self._ask_future = future = asyncio.get_running_loop().create_future()
             if self._panel_mode:
                 self._exit_panel()
             if self._review_mode:
@@ -606,25 +588,32 @@ class RedLotusTui(App[None]):
             inp.focus()
             self.refresh_status()
             try:
-                answer = await self._ask_future
+                answer = await future
                 if generation != self.system._session.generation:
                     raise asyncio.CancelledError()
                 return answer
             finally:
-                inp.password = False
-                self._record_reply = True
-                self._ask_future = None
-                inp.remove_class("ask")
-                inp.placeholder = "📝 请输入您的任务:"
-                inp.suggester = AgentInputSuggester(
-                    case_sensitive=True, use_cache=False
-                )
-                self.refresh_status()
+                if self._ask_future is future and generation[0] == self.system._session.generation[0]:
+                    self._record_reply = True
+                    self._ask_future = None
+                    inp.finish_question(record_reply and not secret and bool(self.system._session.paused))
+                    self.refresh_status()
 
     async def ask_config(self, question: str, *, secret=False):
         return await self.ask_user(question, record_reply=False, secret=secret)
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "turn-control":
+            if not event.button.disabled and not self._turn_control_pending:
+                self._turn_control_pending = (self.system._session.generation[0], "resume" if self.system._session.paused else "pause")
+                self.refresh_status()
+                self.run_worker(self._control_turn(self._turn_control_pending), group="turn-control")
+            return
+        if event.button.id == "urgent-submit":
+            input_box = self.query_one("#input", AgentInput)
+            await input_box.action_submit(urgent=True)
+            input_box.focus()
+            return
         if event.button.id != "session-load" or self.controller.is_transitioning or self._active_line_handlers:
             return
         if self._panel_mode:
@@ -633,6 +622,21 @@ class RedLotusTui(App[None]):
         self.refresh_status()
         event.button.disabled = True
         asyncio.create_task(self._handle_line("/load"))
+
+    async def _control_turn(self, control: tuple[int, str]) -> None:
+        try:
+            if control[0] != self.system._session.generation[0]:
+                return
+            if control[1] == "resume":
+                await self.controller.resume_current_turn(self.state)
+            else:
+                await self.controller.pause_current_turn()
+        except Exception as error:
+            self.system._handle_turn_error(error)
+        finally:
+            if self._turn_control_pending == control and control[0] == self.system._session.generation[0]:
+                self._turn_control_pending = None
+                self.refresh_status()
 
     async def on_input_submitted(self, event: Input.Submitted, *, urgent=False) -> None:
         value = event.value.strip()
@@ -646,15 +650,13 @@ class RedLotusTui(App[None]):
         ):
             if self._record_reply:
                 self._write_user_input(value, title="用户回复")
-                self.system._session.user_inputs.append(value)
             self._ask_future.set_result(value)
             return
         if not value:
             return
         parts = value.split()
         if parts and parts[0].lower() == "/panel":
-            include_all = any(part.lower() == "--all" for part in parts[1:])
-            await self.open_panel(include_all=include_all)
+            await self.open_panel()
             return
         if self._panel_mode:
             self._exit_panel()
@@ -710,7 +712,6 @@ async def run_textual_tui(
     try:
         await app.run_async()
     finally:
-        app._stop_panel_timer()
         app._cancel_pending_ask()
         controller.set_snapshot_loaded_callback(None)
         set_output_sink(None)
@@ -719,4 +720,3 @@ async def run_textual_tui(
             system.toolkit.review_store.deactivate()
         except Exception:
             pass
-        await system.shutdown()

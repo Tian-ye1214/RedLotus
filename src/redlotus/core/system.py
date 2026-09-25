@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, nullcontext
 from typing import Any, Tuple
 
 from redlotus.core.agents import AgentRegistry, SubagentFactory
-from redlotus.core.gateway import AgentRunner, create_coordinator_agent
+from redlotus.core.gateway import AgentRunner, create_coordinator_agent, coordinator_stream_handler
 from redlotus.core.history import (
     compress_histories,
     prewarm_effective_max_contexts_by_role_async,
@@ -20,7 +20,8 @@ from redlotus.core.history import (
 from redlotus.core.tasks import TaskManager, TaskStatus, run_goal_loop
 from redlotus.memory.service import MemoryService
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import get_agent_usage_limits, settings
+from redlotus.runtime.config import get_agent_usage_limits
+from redlotus.runtime.network import is_transport_interruption
 from redlotus.runtime.resources import (
     WorkspaceContext,
     current_workspace,
@@ -40,16 +41,6 @@ from redlotus.tools.registry import SkillsManager
 from redlotus.tools.worker_tools import WorkerOrchestrator, manager_tools, worker_tools
 
 
-def _make_coordinator_stream_handler(system) :
-    if not system.presentation.supports_model_stream():
-        return None
-    session, generation = system.session_key, system._session.generation
-    return system.presentation.TextEventStreamHandler(
-        title="Coordinator",
-        is_current=lambda: (system.session_key, system._session.generation) == (session, generation),
-    )
-
-
 
 
 class AgentSystem:
@@ -61,19 +52,16 @@ class AgentSystem:
         presentation,
         workspace: WorkspaceContext | None = None,
         owner_memory_allowed: bool = True,
-        exit_deadline=None,
         input_controller: SessionController | None = None,
     ):
         self.presentation = presentation
         self.last_rejected_input = None
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
-        logger.activate_log_dir(logger.prepare_log_dir(self.workspace))
         self._owner_memory_allowed = owner_memory_allowed
         self._session = input_controller or SessionController()
         self.registry = AgentRegistry()
         self._shutdown_done = False
         self._shutdown_task: asyncio.Task | None = None
-        self._exit_deadline = exit_deadline
         self.last_turn_error: Exception | None = None
         self._cancel_lock = asyncio.Lock()
         self._skills_manager = SkillsManager(workspace=self.workspace)
@@ -170,6 +158,7 @@ class AgentSystem:
         self.presentation.update_output("clear_model_stream")
         self._session.queue.discard()
         await self.cancel_current_turn()
+        await self._session.queue.cancel()
         await self._factory.cancel_all()
         await self.toolkit.close()
         if close_memory:
@@ -241,8 +230,6 @@ class AgentSystem:
     async def shutdown(self) -> None:
         if self._shutdown_task is None:
             self._shutdown_done = True
-            if self._exit_deadline is not None:
-                self._exit_deadline.start()
             self._shutdown_task = asyncio.create_task(self._release_resources())
         await asyncio.shield(self._shutdown_task)
 
@@ -298,6 +285,8 @@ class AgentSystem:
         if self._current_turn or self._session.active or self._cancel_lock.locked() or self._shutdown_done:
             return None
         self.last_turn_error = None
+        self._session.user_inputs = list(message.resume['user_inputs']) if message.resume is not None else [message.original_text or message.text]
+        self._session.pending_inputs.clear()
         turn_id = turn_id or uuid.uuid4().hex
         task = asyncio.create_task(
             self._run_user_turn(
@@ -310,7 +299,7 @@ class AgentSystem:
         self._current_turn = {
             "turn_id": turn_id,
             "task": task,
-            "text": message.text,
+            "message": message,
             "mode": "goal" if goal_mode else "single",
             "goal_iteration": 0,
         }
@@ -345,24 +334,17 @@ class AgentSystem:
             logger.info("用户回合已取消 turn_id=%s", turn_id)
         except Exception as exc:
             self._handle_turn_error(exc)
+            if is_transport_interruption(exc):
+                try:
+                    await self._session.pause(self, reason='transport_error')
+                except Exception as pause_error:
+                    self._handle_turn_error(pause_error)
 
 
-    async def wait_for_memory_quiescent(self, timeout: float | None = None) -> bool:
-        timeout = settings()["memory_perception"]["quiescence_wait_timeout_seconds"] if timeout is None else timeout
-        async def drain():
-            if self._current_turn:
-                await asyncio.gather(self._current_turn["task"], return_exceptions=True)
-            return await self._memory.wait_idle(timeout=timeout)
-
-        task = asyncio.create_task(drain())
-        try:
-            # A status timeout must not cancel durable production or its model request.
-            return await asyncio.wait_for(asyncio.shield(task), timeout)
-        except TimeoutError:
-            task.add_done_callback(
-                lambda done: None if done.cancelled() else done.exception()
-            )
-            return False
+    async def wait_for_memory_quiescent(self) -> bool:
+        if self._current_turn:
+            await asyncio.shield(asyncio.gather(self._current_turn["task"], return_exceptions=True))
+        return await self._memory.wait_idle()
 
     async def _sync_skills_for_user_turn(self) -> None:
         """每次用户输入：在同一实例上重新扫描 skills（静默），避免磁盘 I/O 阻塞事件循环。"""
@@ -370,20 +352,27 @@ class AgentSystem:
 
     def set_ask_user_handler(self, handler):
         async def recorded_answer(question):
-            generation = self._session.generation
+            context = self._session.generation, self._session.turn_id, self._session_file, self._session.active
             answer = (await handler(question) if inspect.iscoroutinefunction(handler)
                       else await asyncio.to_thread(handler, question))
-            if isinstance(answer, str) and generation == self._session.generation:
-                await self.record_user_input(uuid.uuid4().hex, UserMessage(answer))
-            return answer
+            if context != (self._session.generation, self._session.turn_id, self._session_file, self._session.active):
+                return None
+            if context[3] and isinstance(answer, str):
+                await self.record_user_input(uuid.uuid4().hex, UserMessage(answer), context=context[:3])
+            return answer if context == (self._session.generation, self._session.turn_id, self._session_file, self._session.active) else None
 
         self.toolkit.set_ask_user_handler(recorded_answer if handler else None)
 
-    async def record_user_input(self, identity, message):
+    async def record_user_input(self, identity, message, *, context=None):
         """Persist a consumed input against its bound session, including tool questions."""
         storage = self._session_file
-        if storage is not None and self._session.active:
-            await self._durable_write(lambda: storage.record_input(identity, message))
+        bound = self._session.generation, self._session.turn_id
+        if storage is None or not self._session.active or context is not None and context != (*bound, storage):
+            return
+        await self._durable_write(lambda: storage.record_input(identity, message))
+        if storage is self._session_file and self._session.consume_recorded_input(identity, message, bound, event := self._memory.current):
+            await self._durable_write(lambda: self._memory.observations.save(event)
+                                      if storage is self._session_file and bound == (self._session.generation, self._session.turn_id) else None)
 
 
 
@@ -456,6 +445,7 @@ class AgentSystem:
             await self.bind_session(storage.session_id, storage=storage, generation=generation, task_title=title)
             self._session.reset(discard=True)
             self._session.queue.discard()
+            self._session.restore_pause(storage)
             self.presentation.update_output("clear_model_stream")
             state.history, state.is_first_input = history, False
             self._manager_history = manager_history
@@ -498,12 +488,13 @@ class AgentSystem:
         return True
 
     async def add_urgent_message(
-        self, message: UserMessage, *, admission=None, references=None
+        self, message: UserMessage, *, admission=None, references=None, input_data=None
     ) -> bool:
         admission = admission or self._session.admit(self.workspace, urgent=True)
         if not admission.urgent or not self._session.accepts(admission):
             return False
         store = self.toolkit._references
+        pending_input = input_data if input_data is not None else {'id': admission.id, 'text': message.original_text or message.text}
 
         async def prepare():
             try:
@@ -512,8 +503,10 @@ class AgentSystem:
                 if not self._session.accepts(admission):
                     return None
                 await store.prepare_message(message)
+                pending_input['reference_ids'] = [ref.id for ref in message.references]
                 return message if self._session.accepts(admission) else None
             except (OSError, ValueError) as exc:
+                self._session.pending_inputs.pop(admission.id, None)
                 if self._session.accepts(admission):
                     self.last_rejected_input = (
                         message.original_text or message.text
@@ -522,6 +515,7 @@ class AgentSystem:
                 return None
 
         self._session.queue_urgent(admission, prepare())
+        self._session.pending_inputs[admission.id] = pending_input
         logger.info_file_only(
             "input admitted id=%s sequence=%s turn=%s urgent=True",
             admission.id,
@@ -531,34 +525,7 @@ class AgentSystem:
         return True
 
     async def _take_inner_inputs(self):
-        prompts = []
-        for admission, message in await self._session.take_urgent():
-            await self.record_user_input(admission.id, message)
-            self._session.user_inputs.append(message.original_text or message.text)
-            prompts.append(message.to_prompt())
-            logger.debug(
-                "input consumed id=%s sequence=%s turn=%s",
-                admission.id,
-                admission.sequence,
-                admission.turn_id,
-            )
-            if self._memory.current is not None:
-                event = self._memory.current
-                event.user_inputs = list(self._session.user_inputs)
-                event.reference_ids = list(
-                    dict.fromkeys(
-                        [*event.reference_ids, *(ref.id for ref in message.references)]
-                    )
-                )
-                await self._durable_write(lambda: self._memory.observations.save(event))
-            self._current_attachments.extend(
-                [*message.attachments, *(part for ref in message.references for part in ref.to_prompt())]
-            )
-        return [
-            *prompts,
-            *self._session.take_notices(),
-            *self._memory.take_context_notices(),
-        ]
+        return await self._session.take_inputs(self)
 
     async def switch_workspace(self, path) -> None:
         """Prepare the target before releasing or replacing the current conversation."""
@@ -599,12 +566,14 @@ class AgentSystem:
             if message.original_text is not None
             else message.text,
             turn_id=turn_id,
+            user_inputs=message.resume['user_inputs'] if message.resume is not None else None,
         ):
             with workspace_context(self.workspace):
                 await self.toolkit._references.prepare_message(message)
                 if self.session_key is None:
                     await self.bind_session(uuid.uuid4().hex)
-                await self.record_user_input(turn_id, message)
+                if message.resume is None:
+                    await self.record_user_input(turn_id, message)
                 if not self._session_file.metadata.get("title"):
                     await self._durable_write(lambda: self._session_file.update(metadata={"title": message.text or "session"}))
                 job = await self._durable_write(lambda: self._memory.begin_turn(
@@ -613,6 +582,10 @@ class AgentSystem:
                     self._session.user_inputs[0],
                     references=message.references,
                 ))
+                if self._current_turn is not None:
+                    self._current_turn['observation'] = job
+                if message.resume is not None:
+                    await self._session.resume_inputs(self, message)
                 status, error = "success", ""
                 self._cli_turn_id = turn_id
                 self._current_attachments = [
@@ -777,12 +750,13 @@ class AgentSystem:
             stream_handler = (
                 None
                 if output_transform is not None
-                else _make_coordinator_stream_handler(self)
+                else coordinator_stream_handler(self)
             )
             async def _save_coordinator_node(run: Any) -> None:
                 candidate = ChatHistory()
                 candidate.set_messages(list(run.all_messages()))
                 await self._checkpoint(candidate, turn_id)
+                self._session.commit_inputs()
                 history.set_messages(candidate.messages)
 
             try:

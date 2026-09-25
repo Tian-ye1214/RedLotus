@@ -109,6 +109,7 @@ def _session_protected(
             session is None
             or session.metadata.get("active_turn")
             or session.metadata.get("interrupted_turn")
+            or session.metadata.get("paused_turn")
             or any(task["status"] != "completed" for task in session.metadata.get("tasks", []))
             or session.pending_jobs()
         )

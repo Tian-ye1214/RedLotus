@@ -7,6 +7,7 @@ import functools
 import inspect
 import io
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -15,20 +16,17 @@ import time
 import tokenize
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from itertools import islice
 from pathlib import Path
 from typing import Any, Callable
 
 import yaml
 
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import settings
+from redlotus.runtime.config import config_value, settings
 from redlotus.runtime.resources import (
     skills_dir,
-    user_skills_dir,
-)
-from redlotus.runtime.resources import (
     skills_dir as shipped_skills_dir,
+    user_skills_dir,
 )
 from redlotus.sessions.context import (
     TRACE_STORE,
@@ -426,10 +424,11 @@ class SkillsManager:
 
     def __init__(self, skills_dir: str | Path | None = None, *, workspace=None):
         self.skills_dir = (
-            Path(skills_dir) if skills_dir is not None else user_skills_dir(workspace)
+            Path(skills_dir) if skills_dir is not None else
+            user_skills_dir(workspace) if config_value(settings(), ("storage", "runtime_dir"), kind=str) is not None else None
         )
         self.workspace = workspace
-        self._roots = (shipped_skills_dir(), self.skills_dir)
+        self._roots = (shipped_skills_dir(), *((self.skills_dir,) if self.skills_dir is not None else ()))
         self._refresh_lock = threading.Lock()
         self.skills = {}
         self.refresh()
@@ -454,7 +453,8 @@ class SkillsManager:
         with self._refresh_lock:
             fresh = {}
             # Only the writable overlay is created; its entries override bundled Skills.
-            self.skills_dir.mkdir(parents=True, exist_ok=True)
+            if self.skills_dir is not None:
+                self.skills_dir.mkdir(parents=True, exist_ok=True)
             for root in self._roots:
                 for path in root.glob("*/SKILL.md"):
                     try:
@@ -558,7 +558,8 @@ class SkillsManager:
         Args:
             skill_name: The exact registered Skill name.
             script_name: A Python, shell, batch or PowerShell script relative to the Skill directory.
-            args: Arguments for the script; quote arguments that contain spaces.
+            args: Whitespace-separated arguments. Quote spaces with single or double
+                quotes; on Windows backslashes stay literal, including before a quote.
             timeout: Optional seconds, capped by the configured command limit; omitted uses that limit.
 
         Returns:
@@ -573,10 +574,17 @@ class SkillsManager:
             script = self._resource_path(skill_name, script_name)
             if not script.is_file():
                 raise FileNotFoundError(script_name)
+            if os.name == "nt":
+                lexer = shlex.shlex(args, posix=True)
+                lexer.whitespace_split = True
+                lexer.commenters = lexer.escape = ""
+                script_args = list(lexer)
+            else:
+                script_args = shlex.split(args)
             command = [
                 *executors[script.suffix.lower()],
                 str(script),
-                *shlex.split(args),
+                *script_args,
             ]
             result = await run_subprocess(
                 command,
@@ -643,20 +651,13 @@ def wrap_tools_for_user_notify(tools: list[Any]) -> list[Any]:
 def _notify(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
     """把一次调用以 "🔧 名字 [agent] · 参数" 推给用户；无回调则降级为 debug。"""
 
-    policy = settings()["ui"]
-
-    def brief(v: Any) -> str:
-        text = repr(v)
-        limit = policy["tool_argument_preview_chars"]
-        return text if len(text) <= limit else f"{text[:limit-1]}…"
-
     parts = [f"🔧 {name}"]
     if agent_id := current_short_agent_id():
         parts.append(f"[{agent_id}]")
+    if args:
+        parts.append(", ".join(repr(value) for value in args))
     if kwargs:
-        parts.append(", ".join(f"{k}={brief(v)}" for k, v in islice(kwargs.items(), policy["tool_keyword_limit"])))
-    elif args:
-        parts.append(", ".join(brief(v) for v in islice(args, policy["tool_positional_limit"])))
+        parts.append(", ".join(f"{key}={value!r}" for key, value in kwargs.items()))
     line = " · ".join(parts)
 
     callback = _notify_callback.get()

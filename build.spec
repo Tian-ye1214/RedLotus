@@ -34,7 +34,6 @@ def resource_files(source: Path, destination: str):
 
 datas = [
     (str(Path(project, "LICENSE")), "."),
-    (str(source_root / "config.schema.json"), "redlotus"),
     (str(source_root / "api" / "config.yaml.example"), "redlotus/api"),
     *resource_files(source_root / "tools" / "skills", "redlotus/tools/skills"),
     *[

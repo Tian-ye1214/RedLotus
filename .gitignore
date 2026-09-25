@@ -2,7 +2,6 @@
 lib/
 *.env
 .env
-src/redlotus/config.json
 LICENSE
 __pycache__/
 *.pyc

@@ -12,9 +12,7 @@ import re
 import shlex
 import subprocess
 import threading
-import time
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import Callable
 
@@ -23,7 +21,7 @@ from ddgs import DDGS
 from pydantic_ai import BinaryContent, ToolReturn
 
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import get_env, settings
+from redlotus.runtime.config import get_env
 from redlotus.runtime.network import get_client
 from redlotus.runtime.resources import (
     WorkspaceContext,
@@ -48,24 +46,20 @@ async def generate_image_from_flux(prompt: str, width: int | None = None, height
     bfl_base_url = get_env("BFL_BASE_URL", warn=False)
     bfl_api_key = get_env("BFL_API_KEY", warn=False)
     if not bfl_api_key:
-        return "Error: BFL_API_KEY environment variable is not set. Please set it before using image generation."
+        return "Error: BFL_API_KEY environment variable is not set."
 
-    config = settings()
-    policy = config["image_generation"]
-    width = policy["width"] if width is None else width
-    height = policy["height"] if height is None else height
-    max_wait_time = policy["max_wait_seconds"] if max_wait_time is None else max_wait_time
-    timeout, redirects = policy["http_timeout_seconds"], config["input_limits"]["max_redirects"]
-    client = get_client(f"image_generation:{timeout}:{redirects}", partial(
-        httpx.AsyncClient, timeout=timeout, follow_redirects=True, max_redirects=redirects,
-    ))
+    client = get_client("image_generation", lambda: httpx.AsyncClient(follow_redirects=True))
     headers = {"accept": "application/json", "x-key": bfl_api_key}
     request_id = None
-    start_time = time.monotonic()
     try:
         async with asyncio.timeout(max_wait_time):
             logger.info("正在提交图像生成请求")
-            response = await client.post(bfl_base_url, headers=headers, json={"prompt": prompt, "width": width, "height": height})
+            payload = {"prompt": prompt}
+            if width is not None:
+                payload["width"] = width
+            if height is not None:
+                payload["height"] = height
+            response = await client.post(bfl_base_url, headers=headers, json=payload)
             response.raise_for_status()
             response_data = response.json()
             request_id = response_data.get("id")
@@ -73,11 +67,7 @@ async def generate_image_from_flux(prompt: str, width: int | None = None, height
             if not polling_url:
                 return f"Error: No polling_url received from API. Response: {response_data}"
             logger.info(f"请求已提交，Request ID: {request_id}")
-            poll_count = 0
             while True:
-                poll_count += 1
-                if poll_count % policy["progress_every_polls"] == 0:
-                    logger.info(f"仍在等待中... (已等待 {time.monotonic() - start_time:.1f} 秒)")
                 result_response = await client.get(polling_url, headers=headers)
                 result_response.raise_for_status()
                 result = result_response.json()
@@ -89,14 +79,15 @@ async def generate_image_from_flux(prompt: str, width: int | None = None, height
                     img_response = await client.get(image_url)
                     img_response.raise_for_status()
                     mime_type = img_response.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-                    info_text = f"Image generated successfully!\nImage URL: {image_url}\nPrompt: {prompt}\nDimensions: {width}x{height}"
+                    info_text = f"Image generated successfully!\nImage URL: {image_url}\nPrompt: {prompt}"
+                    if width is not None and height is not None:
+                        info_text += f"\nDimensions: {width}x{height}"
                     logger.info("图像生成成功！")
                     return img_response.content, mime_type, info_text
                 if status == "Failed":
                     error_msg = result.get("error", "Unknown error")
                     logger.error(f"图像生成失败: {error_msg}")
                     return f"Error: Image generation failed - {error_msg}"
-                await asyncio.sleep(policy["poll_interval_seconds"])
     except TimeoutError:
         return f"Error: Image generation timed out after {max_wait_time} seconds. Request ID: {request_id}"
     except (httpx.HTTPError, ValueError) as e:
@@ -115,8 +106,6 @@ class BasicToolkit:
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
         if skills_manager is not None:
             skills_manager.workspace = self.workspace
-        self._clawhub_cwd = runtime_dir(self.workspace)
-        self._skills_overlay = user_skills_dir(self.workspace)
         self._WORK_DATABASE_ROOT = self.workspace.root / "WorkDatabase"
         self._artifact_dir = self._WORK_DATABASE_ROOT
         self._base_dir: Path = self.workspace.root
@@ -223,12 +212,12 @@ class BasicToolkit:
             if re.search(r"\bclawhub\s+install(?:\s|$)", command_lower):
                 return False, (
                     "Blocked bare `npx clawhub install`. Use: "
-                    f"`npx clawhub --dir skills install <slug>`. Skills dir: {self._skills_overlay}"
+                    f"`npx clawhub --dir skills install <slug>`. Skills dir: {user_skills_dir(self.workspace)}"
                 )
             if re.search(r'--dir(?:=|\s+)["\']?[a-zA-Z]:', command):
                 return False, (
                     "Blocked `--dir` with a drive letter; use `--dir skills` (relative to the skills work dir). "
-                    f"Skills dir: {self._skills_overlay}"
+                    f"Skills dir: {user_skills_dir(self.workspace)}"
                 )
         return True, ""
 
@@ -438,14 +427,12 @@ class BasicToolkit:
 
         Args:
             query: Search keywords
-            max_results: Maximum number of results; omitted or null uses web_search.max_results from configuration.
+            max_results: Optional maximum number of results.
         """
-        policy = dict(settings()["web_search"])
-        if max_results is not None:
-            policy["max_results"] = max_results
         try:
-            with DDGS(timeout=policy.pop("timeout_seconds")) as ddgs:
-                results = list(ddgs.text(query, **policy))
+            with DDGS() as ddgs:
+                options = {"max_results": max_results} if max_results is not None else {}
+                results = list(ddgs.text(query, **options))
 
             if not results:
                 logger.warning("⚠️ 没有找到相关搜索结果")
@@ -505,7 +492,7 @@ class BasicToolkit:
                 cwd = str(self._base_dir.resolve())
                 overrides = None
                 if re.search(r"\bclawhub\b", command, re.I):
-                    cwd = str(self._clawhub_cwd)
+                    cwd = str(runtime_dir(self.workspace))
                     if "--workdir" not in command:
                         overrides = {"CLAWHUB_WORKDIR": cwd}
 
@@ -549,9 +536,9 @@ class BasicToolkit:
 
         Args:
             prompt: The text description of what image to generate. Be detailed and specific about the visual content, style, composition, colors, mood, etc. This is the most important parameter.
-            width: Image width in pixels; omitted or null uses image_generation.width from configuration.
-            height: Image height in pixels; omitted or null uses image_generation.height from configuration.
-            max_wait_time: Total seconds for submission, polling and download; omitted or null uses image_generation.max_wait_seconds.
+            width: Optional image width in pixels.
+            height: Optional image height in pixels.
+            max_wait_time: Optional total seconds for submission, polling and download.
 
         Returns:
             Success: The generated image displayed inline plus generation details.

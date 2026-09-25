@@ -26,7 +26,7 @@ from redlotus.memory.records import (
 from redlotus.memory.store import MemoryReader, MemoryStore
 from redlotus.prompts.prompt import load_prompt
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import settings
+from redlotus.runtime.config import settings, config_value
 from redlotus.runtime.network import ModelTarget
 from redlotus.runtime.resources import (
     WorkspaceContext,
@@ -129,9 +129,9 @@ class MemoryService:
             self.current = None
 
     def _route(self):
-        config = settings()["memory_perception"]
+        config = config_value(settings(), ("memory_perception",), purpose="记忆感知角色与回合窗口参数", kind=dict)
         recipe = {
-            **asdict(ModelTarget.for_role(config["model_role"])),
+            **asdict(ModelTarget.for_role(config_value(config, ("model_role",), purpose="记忆感知使用的已配置模型角色", kind=str))),
             "perception": config,
             "prompt": load_prompt("memory_perception_system.md"),
         }
@@ -433,8 +433,8 @@ class MemoryService:
         with file_lock(self.session.path.parent / "schedule"):
             start = self.observations.reserved_cursor()
             while window := self.observations.window(through=through, start=start):
-                config = deepcopy(settings()["memory_perception"])
-                frozen = ModelTarget.for_role(config["model_role"])
+                config = deepcopy(config_value(settings(), ("memory_perception",), purpose="记忆感知角色与回合窗口参数", kind=dict))
+                frozen = ModelTarget.for_role(config_value(config, ("model_role",), purpose="记忆感知使用的已配置模型角色", kind=str))
                 self._targets[window.id] = frozen
                 target = asdict(frozen)
                 target.pop("api_key")
@@ -603,14 +603,14 @@ class MemoryService:
         async with self._processing:
             await self._clear("project")
 
-    async def wait_idle(self, timeout):
+    async def wait_idle(self):
         if self._processing.locked():
             return False
         if self._background is None:
             return True
         future = asyncio.wrap_future(self._background._future)
-        done, _ = await asyncio.wait([future], timeout=timeout)
-        if not done or future.cancelled():
+        await asyncio.wait([future])
+        if future.cancelled():
             return False
         future.result()
         return True
