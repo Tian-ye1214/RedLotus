@@ -392,7 +392,7 @@ class ObservationStore:
             self.session.update(metadata={"active_turn": value})
 
     def finish(self, event):
-        """Count exactly one finished outer turn, retaining its actual outcome."""
+        """Persist outcome details independently of final-response accounting."""
         event.finished_at = iso_utc_now()
         self.session.finish_turn(event.id, event.model_dump(mode="json"))
 
@@ -406,7 +406,8 @@ class ObservationStore:
         self.session.update(metadata={"perception_reserved": window.end_position})
 
     def read(self, ids):
-        return [ObservedTurn.model_validate(self.session.turn(key)) for key in ids]
+        return [ObservedTurn.model_validate({"project_id": self.workspace.project_id, "turn_id": "",
+                                            "origin": "legacy", **self.session.turn(key)}) for key in ids]
 
     def window(self, *, through=None, start=None):
         if not 0 <= self.overlap_turns < self.window_turns:
@@ -416,21 +417,31 @@ class ObservationStore:
             return None
         cursor = self.cursor() if start is None else start
         through = self.session.completed_turns if through is None else through
-        end = cursor + self.window_turns
-        if through < end:
+        rows = [row for row in self.session.pending_turns(0) if row["completion_number"] <= through]
+        reserved = {key for identity in self.session.pending_jobs() for key in
+                    (self.session.job(identity).get("window") or {}).get("new_turn_ids", [])}
+        fresh = [row["id"] for row in rows if row["completion_number"] > cursor
+                 and not row.get("memory_covered") and row["id"] not in reserved][:self.window_turns]
+        if len(fresh) < self.window_turns:
             return None
-        rows = self.session.pending_turns(max(0, cursor - self.overlap_turns))
-        events = [row for row in rows if row["number"] <= end]
-        fresh = [row["id"] for row in events if row["number"] > cursor]
-        overlap = [row["id"] for row in events if row["number"] <= cursor]
-        identity = hashlib.sha256(f"{self.session.session_id}\0{cursor}\0{end}".encode()).hexdigest()[:32]
+        end = self.session.turn(fresh[-1])["completion_number"]
+        overlap = [row["id"] for row in rows if row["completion_number"] <= cursor][-self.overlap_turns:] if self.overlap_turns else []
+        events = [row for row in rows if row["id"] in fresh + overlap]
+        identity = hashlib.sha256(f"v2\0{self.session.session_id}\0{cursor}\0{end}".encode()).hexdigest()[:32]
         return WindowManifest(id=identity, project_id=self.workspace.project_id,
                               new_turn_ids=fresh, overlap_turn_ids=overlap,
-                              reference_ids=list(dict.fromkeys(ref for row in events for ref in row["reference_ids"])),
+                              reference_ids=list(dict.fromkeys(ref for row in events for key in row["audit_event_ids"]
+                                                               for ref in self.session.turn(key).get("reference_ids", []))),
                               start_position=cursor, end_position=end)
 
     def commit(self, window):
-        self.session.update(metadata={"perception_consumed": max(self.cursor(), window.end_position)})
+        job = self.session.job(window.id) or {}
+        if not job.get("turn_count_migration", {}).get("committed"):
+            cursor = min((row["completion_number"] - 1 for row in self.session.pending_turns(0)
+                          if not row.get("memory_covered") and row["id"] not in window.new_turn_ids),
+                         default=self.session.completed_turns)
+            self.session.update(metadata={"perception_consumed": cursor},
+                                turns={key: {"memory_covered": True} for key in window.new_turn_ids})
 
 
 class EvidenceReader:
@@ -451,32 +462,30 @@ class EvidenceReader:
             for event in events
         }
         sources = {}
-        refs = {
-            key: await self.references.parse(self.references.load(key))
-            for key in dict.fromkeys(
-                key for event in events for key in event.reference_ids
-            )
-        }
         for event in events:
-            for index, text in enumerate(event.user_inputs):
-                sources[f"{event.id}:u{index}"] = dict(
-                    event_id=event.id,
-                    kind="user" if event.origin == "user" else "legacy_user",
-                    text=text,
-                    verified=event.origin == "user",
-                )
+            originals = [event.model_dump() if key == event.id else self.session.turn(key)
+                         for key in (self.session.turn(event.id) or {}).get("audit_event_ids", [event.id])]
+            packets[event.id]["user_inputs"] = [text for original in originals for text in original.get("user_inputs", [])]
+            packets[event.id]["reference_ids"] = list(dict.fromkeys(ref for original in originals for ref in original.get("reference_ids", [])))
+            for original in originals:
+                for index, text in enumerate(original.get("user_inputs", [])):
+                    sources[f"{original['id']}:u{index}"] = dict(
+                        event_id=event.id, source_event_id=original["id"],
+                        kind="user" if original.get("origin", "legacy") == "user" else "legacy_user",
+                        text=text, verified=original.get("origin", "legacy") == "user",
+                    )
+        refs = {key: await self.references.parse(self.references.load(key))
+                for key in dict.fromkeys(key for packet in packets.values() for key in packet["reference_ids"])}
         messages = []
         for event in events:
-            history = await asyncio.to_thread(self.session.read_turn, event.turn_id)
-            for index, message in enumerate(history):
-                if (getattr(message, "metadata", None) or {}).get("origin") == "context_summary":
-                    continue
-                messages.append((event, str(index), message))
-        for event, message_id, message in messages:
+            history = await asyncio.to_thread(self.session.read_turn, event.turn_id, sources=True)
+            messages.extend((event, source, index, message) for source, index, message in history
+                            if (getattr(message, "metadata", None) or {}).get("origin") != "context_summary")
+        for event, source, message_id, message in messages:
             for index, part in enumerate(message.parts):
                 kind = getattr(part, "part_kind", "")
                 content = getattr(part, "content", getattr(part, "args", ""))
-                source_id = f"{event.id}:{message_id}:{index}"
+                source_id = f"{source}:{message_id}:{index}"
                 if isinstance(content, list):
                     texts = []
                     for asset_index, item in enumerate(content):
@@ -543,6 +552,7 @@ class EvidenceReader:
                     evidence = dict(
                         id=source_id,
                         event_id=event.id,
+                        source_event_id=source,
                         kind=kind,
                         tool=tool,
                         text=content,

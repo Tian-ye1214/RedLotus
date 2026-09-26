@@ -40,7 +40,7 @@ from redlotus.runtime.network import (
 )
 from redlotus.runtime.resources import conversations_root, current_workspace
 from redlotus.sessions.context import TRACE_STORE, ChatHistory
-from redlotus.sessions.storage import SessionFile
+from redlotus.sessions.storage import SessionFile, session_status
 from redlotus.tools.registry import SkillsManager
 from redlotus.ui.presentation import (
     build_panel_snapshot,
@@ -349,7 +349,7 @@ def _format_stm_snapshot(snapshot: dict) -> str:
         "db_path": "LanceDB",
         "table_name": "记忆表",
         "row_count": "项目记录数",
-        "observed_turns": "当前会话已结束回合",
+        "observed_turns": "当前会话已确认完成回合",
         "consumed_turns": "当前会话已处理回合",
         "pending_turns": "当前会话待处理回合",
         "window_turns": "窗口大小",
@@ -357,6 +357,7 @@ def _format_stm_snapshot(snapshot: dict) -> str:
     }
     lines = [
         "## 项目情景记忆",
+        *( ["历史计数不完整；仅展示已确认数量。"] if snapshot.get("turn_count_incomplete") else []),
         *(f"- {label}: {snapshot.get(key, '')}" for key, label in fields.items()),
     ]
     lines.extend(
@@ -647,22 +648,20 @@ class WorkspaceSnapshot:
         return value if isinstance(value, int) and value >= 0 else 0
 
     @property
+    def turn_count_label(self) -> str:
+        return (f"已确认 {self.completed_turns} 回合（历史计数不完整）"
+                if self.meta.get("turn_count_incomplete") else f"{self.completed_turns} 回合")
+
+    @property
     def status(self) -> str:
         if not self.is_loadable:
             return "损坏"
-        cached = {
+        return {
             "active": "进行中",
             "interrupted": "上次已中断",
             "completed": "已完成",
             "new": "未开始",
-        }.get(self.meta.get("status"))
-        if cached:
-            return cached
-        if self.meta.get("active_turn"):
-            return "进行中"
-        if self.meta.get("interrupted_turn"):
-            return "上次已中断"
-        return "已完成" if self.completed_turns else "未开始"
+        }[session_status(self.meta)]
 
     @property
     def local_activity_time(self) -> str:
@@ -681,7 +680,7 @@ class WorkspaceSnapshot:
             )
         return (
             f"标题：{self.title} · 本地活动：{self.local_activity_time} · "
-            f"{self.completed_turns} 回合 · 状态：{self.status} · 会话：{self.session_id}"
+            f"{self.turn_count_label} · 状态：{self.status} · 会话：{self.session_id}"
         )
 
 

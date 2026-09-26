@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -21,7 +20,7 @@ from redlotus.runtime import config as app_config
 from redlotus.runtime import logging as logger
 from redlotus.runtime.resources import session_data_dir
 from redlotus.sessions.context import ChatHistory
-from redlotus.sessions.control import UserMessage, load_file_refs, user_message_from_cli_input
+from redlotus.sessions.control import SessionController, UserMessage, load_file_refs, user_message_from_cli_input
 from redlotus.ui.cli_commands import (
     SlashCommands,
     WorkspaceSnapshot,
@@ -42,12 +41,6 @@ from redlotus.ui.widgets import (
     SnapshotSelection,
     legacy_pick_snapshot,
 )
-
-
-@dataclass
-class CliSessionState:
-    history: ChatHistory
-    is_first_input: bool = True
 
 
 class AgentCliController:
@@ -187,8 +180,8 @@ class AgentCliController:
             print_warning(f"加载失败: {exc}")
             return None
 
-    def new_session_state(self) -> CliSessionState:
-        return CliSessionState(history=ChatHistory())
+    def new_session_state(self) -> SessionController:
+        return self.system._session
 
     async def pause_current_turn(self):
         async with self._admission_lock:
@@ -204,55 +197,19 @@ class AgentCliController:
                 self._queue_input(row['text'], state, admission, goal_mode=row['goal_mode'], references=None, wait_for_turn=False, data=row)
 
     async def resume_current_turn(self, state):
-        system, session = self.system, self.system._session
         async with self._admission_lock:
-            if self.is_transitioning or session.control_busy or not session.paused:
+            if self.is_transitioning:
                 return False
-            session.control_busy = True
-            saved = session.paused
-            generation, storage = session._generation, system._session_file
-            try:
-                from redlotus.sessions.context import repair_interrupted_tool_calls
-                message = UserMessage(saved['request']['text'], resume=saved)
-                message.references = await load_file_refs(message.text, workspace=system.workspace, captured={'reference_ids': saved['reference_ids']})
-                for row in saved['supplements']:
-                    message.references.extend(await load_file_refs(row['text'], workspace=system.workspace, captured=row))
-                if generation != session._generation or session.paused is not saved:
-                    return False
-                state.history.set_messages(repair_interrupted_tool_calls(state.history.messages))
-                self._restore_paused_queue(state)
-                await session.save_pause(system)
-                if generation != session._generation or storage is not system._session_file or session.paused is not saved:
-                    return False
-                async def resume():
-                    if generation != session._generation or storage is not system._session_file:
-                        return
-                    try:
-                        if saved['turn_id'] is None:
-                            admission = session.admit(system.workspace, input_id=saved['request'].get('id'))
-                            return await self._start_user_turn_from_raw_input(message.text, state, wait_for_turn=True,
-                                goal_mode=saved['request']['goal_mode'], references=None, admission=admission, input_data=saved['request'])
-                        task = system._start_user_turn(message, state.history, goal_mode=saved['request']['goal_mode'])
-                        if task is None:
-                            raise RuntimeError('当前任务尚未停止，无法恢复')
-                        system.record_control_result('resume', saved['turn_id'], 'running', accepted=True)
-                        await task
-                    finally:
-                        if generation == session._generation and storage is system._session_file and not session.paused:
-                            await system._durable_write(lambda: storage.update(metadata={'paused_turn': None}))
-                        update_output('refresh_status')
-                session.queue.submit(resume, data=saved['request'], first=True)
-                session.paused = None
-                session.queue.ready.set()
-                return True
-            finally:
-                session.control_busy = False
-                update_output('refresh_status')
+            return await state.resume(self.system,
+                lambda message, admission, data: state.start(self.system, message, state.history, admission, goal_mode=data['goal_mode'])
+                if message.resume else self._start_user_turn_from_raw_input(message.text, state,
+                    goal_mode=data['goal_mode'], references=None, admission=admission, input_data=data, message=message),
+                lambda: self._restore_paused_queue(state))
 
     def _queue_input(self, raw_input, state, admission, *, goal_mode, references, wait_for_turn, data=None):
         data = data if data is not None else {'text': raw_input, 'id': admission.id, 'goal_mode': goal_mode}
         future = self.system._session.queue.submit(
-            lambda: self._start_user_turn_from_raw_input(raw_input, state, wait_for_turn=True,
+            lambda: self._start_user_turn_from_raw_input(raw_input, state,
                 goal_mode=goal_mode, references=references, admission=admission, input_data=data), data=data)
         def input_finished(done):
             try:
@@ -353,7 +310,7 @@ class AgentCliController:
         update_output("set_context_usage", items)
 
     async def _handle_slash_command(
-        self, raw_input: str, state: CliSessionState
+        self, raw_input: str, state: SessionController
     ) -> str:
         command = raw_input.split()[0].lower()
         if self.system.has_current_turn:
@@ -367,7 +324,7 @@ class AgentCliController:
         if command == "/load" and self.system._session.is_compressing:
             await self.system._session.cancel_compression()
 
-        await self.system._sync_skills_for_user_turn()
+        await asyncio.to_thread(self.system._skills_manager.refresh)
         first_override = await SlashCommands(self, state, raw_input).run()
         if first_override is not None:
             state.is_first_input = first_override
@@ -376,13 +333,13 @@ class AgentCliController:
     async def _start_user_turn_from_raw_input(
         self,
         raw_input: str,
-        state: CliSessionState,
+        state: SessionController,
         *,
-        wait_for_turn: bool,
         goal_mode: bool = False,
         references,
         admission,
         input_data=None,
+        message=None,
     ) -> str:
         system = self.system
         await self._ready.wait()
@@ -392,14 +349,14 @@ class AgentCliController:
             return "continue"
         await self._publish_context_usage(state.history)
         try:
-            file_refs = await references if references is not None and not references.cancelled() else await load_file_refs(raw_input, workspace=admission.workspace, captured=input_data)
+            file_refs = message.references if message is not None else await references if references is not None and not references.cancelled() else await load_file_refs(raw_input, workspace=admission.workspace, captured=input_data)
         except (OSError, ValueError) as exc:
             self.system.last_rejected_input = raw_input
             print_warning(str(exc))
             return "continue"
         if not system._session.accepts(admission):
             return "continue"
-        message = user_message_from_cli_input(raw_input)
+        message = message or user_message_from_cli_input(raw_input)
         message.references = file_refs
         if file_refs:
             print_success(
@@ -423,37 +380,28 @@ class AgentCliController:
             )
             state.is_first_input = False
 
-        if not system._session.accepts(admission):
-            return "continue"
-        turn_task = system._start_user_turn(
-            message, state.history, goal_mode=goal_mode, turn_id=admission.id
-        )
-        if turn_task is None:
-            raise RuntimeError("Another turn bypassed the session queue")
-
-        if wait_for_turn:
-            try:
-                await turn_task
-            except KeyboardInterrupt:
-                print_warning(await system.stop_current_turn())
-            except asyncio.CancelledError:
-                pass
+        try:
+            await system._session.start(system, message, state.history, admission, goal_mode=goal_mode)
+        except KeyboardInterrupt:
+            print_warning(await system.stop_current_turn())
+        except asyncio.CancelledError:
+            pass
         return "continue"
 
     async def process_line(
         self,
         raw_input: str,
-        state: CliSessionState,
+        state: SessionController,
         *,
         wait_for_turn: bool,
         goal_mode: bool = False,
         input_id: str | None = None,
         urgent: bool = False,
     ) -> str:
-        if not (raw_input := raw_input.strip()):
+        if not raw_input.strip():
             return "continue"
 
-        if (command := raw_input.lower()) in self.EXIT_COMMANDS:
+        if (command := raw_input.strip().lower()) in self.EXIT_COMMANDS:
             self.system._session.queue.discard()
             print_success("Bye.")
             return "break"
@@ -463,9 +411,9 @@ class AgentCliController:
             state.is_first_input = True
             return "continue"
 
-        if raw_input.startswith("/"):
+        if command.startswith("/"):
             await self._publish_context_usage(state.history)
-            return await self._handle_slash_command(raw_input, state)
+            return await self._handle_slash_command(raw_input.strip(), state)
 
         if not self._ready.is_set():
             return "continue"
@@ -485,12 +433,9 @@ class AgentCliController:
                 )
                 return "continue"
             data = {'text': raw_input, 'id': admission.id, 'goal_mode': goal_mode}
-            references = asyncio.create_task(
+            references = self.system._session.track_preparation(
                 load_file_refs(raw_input, workspace=admission.workspace, captured=data)
             )
-            self.system._session._preparations.add(references)
-            references.add_done_callback(self.system._session._preparations.discard)
-            references.add_done_callback(lambda done: None if done.cancelled() else done.exception())
             if self.system._session.paused:
                 await references
             if transition != self._transition or not self._ready.is_set() or not self.system._session.accepts(admission):

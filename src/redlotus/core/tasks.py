@@ -13,8 +13,6 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic_ai.messages import (
     BaseToolReturnPart,
-    ModelRequest,
-    ModelResponse,
     TextPart,
 )
 
@@ -247,16 +245,10 @@ class TaskManager:
             self.reset()
             await self.save()
             history.reset()
-            presentation.print_phase("第一阶段: Manager 规划任务列表")
-            tmpl = await asyncio.to_thread(load_prompt, "manager_planning_new.md")
-            planning_text = tmpl.format(user_input=user_input)
-        else:
-            presentation.print_phase("第一阶段: 基于用户反馈调整任务")
-            current_todo = self.get_todo_list()
-            tmpl = await asyncio.to_thread(load_prompt, "manager_planning_continue.md")
-            planning_text = tmpl.format(
-                user_input=user_input, current_todo=current_todo
-            )
+        presentation.print_phase("第一阶段: 基于用户反馈调整任务" if continue_from_previous else "第一阶段: Manager 规划任务列表")
+        template = "manager_planning_continue.md" if continue_from_previous else "manager_planning_new.md"
+        tmpl = await asyncio.to_thread(load_prompt, template)
+        planning_text = tmpl.format(user_input=user_input, current_todo=self.get_todo_list())
 
         planning_prompt = [planning_text, *attachments] if attachments else planning_text
         result = await orchestrator.plan(
@@ -335,28 +327,10 @@ def parse_goal_output(text: str) -> GoalParseResult:
 
 def summarize_last_coordinator_turn(messages: list) -> str:
     """Build goal-mode previous_output from the latest turn's assistant text and tool returns."""
+    from redlotus.prompts.message_text import pydantic_messages_to_text
+
     turns = split_messages_into_turns(messages)
-    if not turns:
-        return ""
-    sections: list[str] = []
-    for msg in turns[-1]:
-        if isinstance(msg, ModelResponse):
-            for part in msg.parts:
-                if isinstance(part, TextPart):
-                    text = (part.content or "").strip()
-                    if text:
-                        sections.append(text)
-        elif isinstance(msg, ModelRequest):
-            for part in msg.parts:
-                if isinstance(part, BaseToolReturnPart):
-                    content = (
-                        part.model_response_str()
-                        if hasattr(part, "model_response_str")
-                        else str(part.content)
-                    )
-                    tool_name = part.tool_name or "tool"
-                    sections.append(f"[{tool_name}]\n{content}")
-    return "\n\n".join(sections).strip()
+    return pydantic_messages_to_text(turns[-1] if turns else [], part_types=(TextPart, BaseToolReturnPart))
 
 
 def build_goal_iteration_prompt(
@@ -383,7 +357,7 @@ async def run_goal_loop(
     history: Any,
     turn_id: str | None,
     set_iteration: Callable[[int], None] | None = None,
-) -> None:
+) -> str:
     original_goal = message.text or ""
     previous_output = ""
     missing_marker = False
@@ -403,28 +377,16 @@ async def run_goal_loop(
             missing_marker_reminder=missing_marker,
         )
 
-        parse_result: GoalParseResult | None = None
-
-        def output_transform(raw_output: str) -> str:
-            nonlocal parse_result
-            parse_result = parse_goal_output(raw_output)
-            return parse_result.cleaned_text
-
         prompt_message = replace(message, text=prompt_text, resume=continuation)
-        _history, output = await system.run_agent_system(
+        _history, parsed = await system.run_agent_system(
             prompt_message,
             history,
             turn_id=turn_id,
-            output_transform=output_transform,
             _inside_goal=True,
         )
-
-        parsed = parse_result or parse_goal_output(output)
-        previous_output = summarize_last_coordinator_turn(_history.messages) or output
+        previous_output = summarize_last_coordinator_turn(_history.messages) or parsed.cleaned_text
         missing_marker = parsed.missing_marker
         continuation = None
 
         if parsed.signal == GoalSignal.DONE:
-            return
-
-
+            return parsed.cleaned_text

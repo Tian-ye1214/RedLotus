@@ -52,17 +52,12 @@ class MemoryService:
         self.evidence = EvidenceReader(self.references)
         self.reader = MemoryReader(self.store, self.long_term, self.references, owner_memory_allowed)
         self._perception_factory = factory
-        self.perception, self.current, self.session = None, None, None
+        self.perception = None
         self._input_source = lambda: self.current.user_inputs if self.current else []
         self._injection_snapshot = None
-        self._context_notices = []
         self._processing, self._explicit = asyncio.Lock(), asyncio.Lock()
-        self.last_error = ""
-        self._background = None
-        self._background_running = False
         self._schedule_lock = threading.Lock()
-        self._pending_end = 0
-        self._targets = {}
+        self.unbind_session()
 
     def bind_session(self, session):
         """Bind storage only: new/load must never schedule automatic perception."""
@@ -153,7 +148,7 @@ class MemoryService:
         return read_locked_json(path).get("cleared_at", "") if path.exists() else ""
 
     def _job(self, job):
-        saved = self.session.job(job.id)
+        saved = self.session.job(job if isinstance(job, str) else job.id)
         if saved is not None:
             saved["events"] = self.observations.read(saved.pop("event_ids"))
             return MemoryJob.model_validate(saved)
@@ -558,9 +553,8 @@ class MemoryService:
                     return
                 for identity in self.session.pending_jobs():
                     saved = self.session.job(identity)
-                    saved["events"] = self.observations.read(saved.pop("event_ids"))
-                    job = MemoryJob.model_validate(saved)
-                    if job.window and job.window.end_position > through:
+                    job = self._job(identity)
+                    if job.window and job.window.end_position > through and not saved.get("turn_count_migration", {}).get("committed"):
                         continue
                     if not job.done and not await self._execute(job, retry=recover):
                         return
@@ -571,6 +565,7 @@ class MemoryService:
         return {
             **await self.store.snapshot("project"),
             "observed_turns": total,
+            "turn_count_incomplete": bool(self.session and self.session.metadata.get("turn_count_incomplete")),
             "consumed_turns": consumed,
             "pending_turns": total - consumed,
             "window_turns": self.observations.window_turns,

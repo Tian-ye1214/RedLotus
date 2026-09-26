@@ -33,7 +33,7 @@ from redlotus.runtime.network import (
     context_length_exceeded,
     lookup_model_context,
 )
-from redlotus.sessions.context import ChatHistory, _context_summary_metadata
+from redlotus.sessions.context import ChatHistory, _context_summary_metadata, pending_tool_calls
 from redlotus.sessions.storage import SessionFile, _response_id, _response_usage
 
 
@@ -255,9 +255,7 @@ async def prepare_compression(
     )
     new_messages = messages[:head_end] + [summary_msg] + messages[tail_start:]
     logger.info("上下文压缩完成: role=%s messages=%d→%d", role, len(messages), len(new_messages))
-    candidate = ChatHistory()
-    candidate.set_messages(new_messages)
-    return candidate
+    return ChatHistory(new_messages)
 
 
 async def compress_histories(sources, *, task_state, persist, is_current):
@@ -319,19 +317,10 @@ async def get_effective_max_context_async(
 
 
 def _closed_boundaries(messages: list) -> list[int]:
-    pending: set[str] = set()
     boundaries = [0]
-    for index, message in enumerate(messages):
-        for part in getattr(message, "parts", ()):
-            kind = getattr(part, "part_kind", "")
-            key = getattr(part, "tool_call_id", "")
-            if kind == "tool-call":
-                pending.add(key)
-            elif kind in ("tool-return", "retry-prompt"):
-                pending.discard(key)
-        if not pending:
-            boundaries.append(index + 1)
+    pending_tool_calls(messages, closed_boundaries=boundaries)
     return boundaries
+
 
 
 
@@ -350,10 +339,8 @@ async def compact_request_messages(
     recent_tokens = latest_usage_input_tokens(combined)
     if not force and (recent_tokens is None or recent_tokens < threshold):
         return combined
-    history = ChatHistory()
-    history.set_messages(combined)
     candidate = await prepare_compression(
-        history,
+        ChatHistory(combined),
         role=role,
         force=True,
         task_state=task_state,
@@ -584,17 +571,16 @@ def summarize_messages(
     for message in messages:
         if _response_usage(message) is None:
             continue
-        summary.totals.responses += 1
         role = (message.metadata or {}).get("role", "coordinator")
         agent_totals = summary.by_agent.setdefault(role, UsageTotals())
         category = (message.metadata or {}).get("category") or "unknown"
         category_totals = summary.by_category.setdefault(category, UsageTotals())
-        for totals in (agent_totals, category_totals):
+        groups = (summary.totals, agent_totals, category_totals)
+        for totals in groups:
             totals.responses += 1
         usage = message.usage
         if not usage.has_values():
-            summary.totals.missing_usage_responses += 1
-            for totals in (agent_totals, category_totals):
+            for totals in groups:
                 totals.missing_usage_responses += 1
             summary.content.missing_usage_responses += 1
             summary.content.missing_reasoning_responses += 1
@@ -607,9 +593,8 @@ def summarize_messages(
             summary.content.reasoning_tokens += reasoning
         model_name = str(getattr(message, "model_name", "") or "unknown")
         billable = billable_tokens_from_usage(usage)
-        summary.totals.add_usage(usage, billable)
-        agent_totals.add_usage(usage, billable)
-        category_totals.add_usage(usage, billable)
+        for totals in groups:
+            totals.add_usage(usage, billable)
         model_summary = summary.by_model.setdefault(
             model_name, ModelUsageSummary(model_name=model_name)
         )

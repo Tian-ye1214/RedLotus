@@ -125,6 +125,14 @@ API Key、Base URL 与所选角色的模型配置齐全即可进入交互；启�
 
 记忆、RAG 与引用路径在实际使用时读取，Skills overlay 未配置不影响随包 Skills。CLI 在退出时才读取可选退出宽限，缺失时不设置应用期限；进程清理同样允许没有配置期限。
 
+`storage.runtime_dir` 保存命令依赖缓存、临时文件、Office 转换中间文件和用户安装的 Skills。将下面字段合并进现有 JSON，或在项目 `.env` 写入 `storage__runtime_dir=WorkDatabase/runtime`，沿用上述优先级：
+
+```json
+{"storage": {"runtime_dir": "WorkDatabase/runtime"}}
+```
+
+相对路径以当前工作区为基准，绝对路径也必须位于工作区内。未配置时普通对话、项目文件读写和随包 Skills 仍可使用；执行命令、安装用户 Skills 或转换 Office 文件时会提示所缺配置。`runtime/skills` 是持久内容，执行缓存清理不会删除它。程序不补隐藏路径或自动改写私人配置。
+
 ## 终端使用
 
 全屏 TUI 提供三种运行模式，可使用 `Shift+Tab` 循环切换：
@@ -212,6 +220,8 @@ Enter 将输入排入 FIFO 队列；Ctrl+Enter 将加急补充加入当前回合
 
 向量模型、重排、分块、相似度阈值、候选数量和索引参数继续保留，按同一三层优先级读取独立副本。完整的保留项、替代项与迁移行为见 [记忆与检索设计](docs/design.md#感知与记忆)。
 
+`completed_turns` 按主助手最终答复完整生成并持久化计数，一个逻辑用户请求计一轮；任务未成功但助手完整说明结果也计一轮。排队、暂停、中断、运行异常、工具往返、子 Agent、加急补充、追问回答和 goal 内部迭代不单独计数。恢复沿用原回合 ID，重复保存及渠道重发不重复累计。旧会话加载和扫描使用同一校正流程，保留审计身份和已落库记忆；证据不足时显示“历史计数不完整”和已确认数量，不将缺失证据送入新感知窗口。
+
 ## QQ 与微信机器人
 
 安装机器人依赖：
@@ -229,7 +239,9 @@ python -m redlotus.api.WeChat
 
 QQ 接入需要先运行 [NapCat](https://github.com/NapNeko/NapCatQQ)，并配置 OneBot WebSocket、机器人 QQ 号和 WebUI token。微信接入在启动后按提示扫码登录。
 
-个人聊天渠道需要配置 `bot.owner_channels.qq`（本人私聊 QQ 号）或 `bot.owner_channels.wechat`（本人 wxid）。未绑定渠道提供文本对话，不开放个人记忆和执行工具。机器人支持 `/stop`、`/clear`；渠道运行策略按同一三层优先级读取，必需项缺失明确报错，不逐项引导填写。适配器至真实模型的附件顺序已验证，真实账号收发仍待验收。配置示例见 [渠道权限](docs/design.md#agent-与工具边界)。
+配置 `bot.owner_channels.qq`（本人私聊 QQ 号列表）或 `bot.owner_channels.wechat`（本人 wxid 列表）后，绑定本人私聊具备 CLI 的执行、委派和记忆能力；其他身份及群聊保留文本对话权限。QQ、微信各自维持独立会话，通过 `UserMessage`、`SessionController` 和 `AgentSystem` 共用 CLI 执行流程。
+
+通道支持正文、图片、文件、携带附件的追问回答、结果文本及 `/stop`、`/resume`、`/clear`。正文保留换行和代码缩进，附件保留名称、真实 MIME 及平台提供的顺序，经 `ReferenceStore` 保存不可变快照、解析并检查限额；整条消息准备成功才执行，失败明确指出附件。追问附件直接回答当前问题；传输中断保留原回合和排队附件快照，使用 `/resume` 继续。结果发送失败保留完成记录，不重跑任务。终端面板、配置向导和逐块审查不在手机通道范围。自动回归使用模拟平台和模型，真实 QQ／微信账号收发仍未验收。配置示例见[渠道权限](docs/design.md#agent-与工具边界)。
 
 ## 本地开发
 
@@ -259,4 +271,4 @@ pyinstaller build.spec
 
 项目主要代码位于 `src/redlotus/`，分为 `runtime`、`sessions`、`core`、`tools`、`memory`、`prompts`、`ui`、`api` 八个模块；命令入口为 `redlotus.api.base:main`。
 
-本轮覆盖终端控制、持久暂停／恢复、思考框状态、按键兼容及传输中断后的明确续接。已有启动、三层配置优先级、按需读取、日志年龄清理与随包 Skills 保留；私人配置字节不变，没有新增默认值、数量限制或依赖。当前源码与实际安装 wheel 各 692 项通过、18 项旧功能断言跳过，另各 7 项独立审查回归通过；先前结果均为历史证据。原五个测试文件保持删除，必要覆盖在现有五份新测试中维护。八模块、36 个应用文件及每模块五文件、单文件 500 有效行满足；应用 10,500 有效行高于既定 10,373 基线，整体净精简仍未通过，完整双终端物理验收也未关闭。不替换发布制品，最终长测、缓存目标和发布后验收仍未完成。详见[项目设计](docs/design.md)及[开发约定](docs/development.md)。
+测试按现行运行目录、手机通道和回合计数／历史校正契约维护，不恢复已删除的过时断言。CI 分别运行源码测试及隔离安装 wheel 的测试；`python scripts/verify_wheel.py dist` 检查实际导入路径，零测试收集仍然失败。真实模型、QQ／微信账号、物理终端和长期验收与模拟回归分开记录，本地回归不代表这些项目已通过。详见[项目设计](docs/design.md)及[开发约定](docs/development.md)。

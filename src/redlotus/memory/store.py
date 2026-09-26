@@ -527,21 +527,13 @@ class MemoryReader:
             return "Error: Personal memory unavailable."
         if scope not in (None, "project", "global"):
             return "Error: scope must be project (L1) or global (L2)."
-        if id is not None:
-            return await self.read_memory(id, include_references=include_references, scope=scope)
-        rows = await self.store.search(query, scope)
-        return json.dumps(
-            dict(
-                memories=[row.model_dump(mode="json") for row in rows],
-                retrieval_error=self.store.retrieval_error,
-            ),
-            ensure_ascii=False,
-        )
-
-    async def read_memory(self, id: str, include_references: bool = False, *, scope=None):
-        """Read a permitted complete memory; optionally include original referenced media."""
-        if not self.owner_memory_allowed:
-            return "Error: Personal memory unavailable."
+        if id is None:
+            rows = await self.store.search(query, scope)
+            return json.dumps(
+                dict(memories=[row.model_dump(mode="json") for row in rows],
+                     retrieval_error=self.store.retrieval_error),
+                ensure_ascii=False,
+            )
         if not MEMORY_ID_PATTERN.fullmatch(id):
             return "Error: Invalid memory id."
         try:
@@ -568,36 +560,6 @@ class MemoryReader:
             return_value=json.dumps({**record.model_dump(mode="json"), "reference_errors": errors}, ensure_ascii=False),
             content=references,
         )
-
-    async def search_episodes(self, query: str) -> str:
-        """Search task episodes belonging only to the current project."""
-        if not self.owner_memory_allowed:
-            return "Error: Personal memory unavailable."
-        rows = await self.store.search(query, "project")
-        return json.dumps(
-            dict(
-                project_id=self.store.workspace.project_id,
-                retrieval_error=self.store.retrieval_error,
-                episodes=[
-                    row.model_dump(mode="json") for row in rows if row.kind == "episode"
-                ],
-            ),
-            ensure_ascii=False,
-        )
-
-    async def read_episode(self, id: str) -> str:
-        """Read one current-project episode with its original evidence sources."""
-        if not self.owner_memory_allowed:
-            return "Error: Personal memory unavailable."
-        if not MEMORY_ID_PATTERN.fullmatch(id):
-            return "Error: Invalid episode id."
-        try:
-            row = self.store.get(id)
-        except KeyError:
-            return "Error: Episode not found in this project."
-        if row.scope != "project" or row.kind != "episode" or row.state != "active":
-            return "Error: Episode not found in this project."
-        return row.model_dump_json()
 
     async def long_term_snapshot(self):
         return (

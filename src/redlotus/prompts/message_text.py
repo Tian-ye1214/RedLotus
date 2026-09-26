@@ -15,11 +15,13 @@ from pydantic_ai.messages import (
 )
 
 
-def pydantic_messages_to_text(messages: list) -> str:
+def pydantic_messages_to_text(messages: list, *, part_types=None) -> str:
     """Render complete textual evidence without clipping model-visible content."""
     lines = []
     for message in messages:
         for part in message.parts:
+            if part_types is not None and not isinstance(part, part_types):
+                continue
             if isinstance(part, UserPromptPart):
                 items = (
                     [part.content] if isinstance(part.content, str) else part.content

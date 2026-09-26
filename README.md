@@ -124,6 +124,14 @@ Gateways use Pydantic AI's OpenAI Chat, OpenAI Responses, Anthropic Messages and
 
 Memory, RAG, and reference paths are read when used. Bundled Skills remain available without a configured Skills overlay. The CLI reads optional exit grace only when exiting; if it is absent, no application deadline is imposed. Process cleanup also allows an unspecified deadline.
 
+`storage.runtime_dir` holds command caches, temporary files, Office conversion intermediates, and installed Skills. Merge this field into existing JSON, or set `storage__runtime_dir=WorkDatabase/runtime` in the project `.env`, using the precedence above:
+
+```json
+{"storage": {"runtime_dir": "WorkDatabase/runtime"}}
+```
+
+Relative paths start from the current workspace; absolute paths must also remain inside it. Ordinary conversations, project file tools, and bundled Skills work without this field. Command execution, Skill installation, and Office conversion report the missing configuration when needed. Installed `runtime/skills` content is persistent and excluded from cache cleanup. No hidden path or automatic private configuration edit is added.
+
 ## Terminal usage
 
 Use `Shift+Tab` to cycle through the three TUI run modes:
@@ -211,6 +219,8 @@ Enter queues a separate FIFO turn. Ctrl+Enter adds an urgent supplement to the a
 
 Model parameters, retrieval settings and retained runtime limits use the same three-file precedence and are read as independent copies. See [memory and retrieval design](docs/design.md#感知与记忆) for window-based production and the retained RAG parameters.
 
+`completed_turns` counts one logical user request when the main assistant's complete final reply is persisted, including a complete explanation of an unsuccessful task. Queuing, pauses, interruptions, runtime exceptions, tool exchanges, child agents, supplements, question answers, and internal goal iterations add no separate count. Resume retains the original turn ID; saves and reply resends are idempotent. Legacy loading and discovery use the same historical correction, preserving audit identities and published memory. Missing evidence produces an incomplete-history label and a confirmed count, and is excluded from new perception windows.
+
 ## QQ and WeChat bots
 
 Install the bot dependencies:
@@ -228,7 +238,9 @@ python -m redlotus.api.WeChat
 
 QQ integration requires [NapCat](https://github.com/NapNeko/NapCatQQ) with a configured OneBot WebSocket endpoint, bot QQ number, and WebUI token. The WeChat integration prompts for QR-code login at startup.
 
-Personal bot access must be bound in `bot.owner_channels.qq` (private QQ IDs) or `bot.owner_channels.wechat` (wxids). Unbound channels have text-only conversations and no access to personal memory or execution tools. Bots accept `/stop` and `/clear`; channel settings use the same three-file precedence, and missing required fields are reported without a setup form. Attachment order has been checked through the adapter and real model API; real account messaging remains pending. See the [channel permissions](docs/design.md#agent-与工具边界).
+Bind private owner IDs in the `bot.owner_channels.qq` or `bot.owner_channels.wechat` lists. Bound private chats have the CLI's execution, delegation, and memory capabilities; other identities and group chats retain text-only permissions. QQ and WeChat keep independent conversations while sharing the CLI's `UserMessage`, `SessionController`, and `AgentSystem` execution flow.
+
+Channels support text, images, files, attachment answers to current questions, final text, `/stop`, `/resume`, and `/clear`. Text retains newlines and indentation; attachments preserve names, actual MIME types, and available platform ordering. `ReferenceStore` supplies immutable snapshots, parsing, and limits. The whole message must prepare successfully before execution, with failed attachments identified. Attachment answers unblock the current question. Transport interruptions retain the original turn and queued attachment snapshots; `/resume` continues that turn. Reply delivery failure preserves the completed result without rerunning it. Terminal panels, configuration wizards, and hunk review remain outside the phone interface. Automated regressions use simulated platforms and models; live QQ/WeChat messaging remains unverified. See [channel permissions](docs/design.md#agent-与工具边界).
 
 ## Development
 
@@ -258,4 +270,4 @@ pyinstaller build.spec
 
 The main package lives in `src/redlotus/`, organized into `runtime`, `sessions`, `core`, `tools`, `memory`, `prompts`, `ui`, and `api`. The `redlotus` command maps to `redlotus.api.base:main`.
 
-This change covers terminal controls, durable pause/resume, thinking-box state, key compatibility, and explicit continuation after a transport interruption. Existing startup, three-file configuration precedence, optional settings, log age cleanup and bundled Skills remain. Private configuration is unchanged, with no new defaults, count limits or dependencies. The current source and installed-wheel suites each pass 692 tests with 18 obsolete-contract skips, plus seven independent review checks each. The original five test files stay deleted, with necessary coverage maintained in the five newer files. The eight modules and 36 application files meet the limits of five files per module and 500 effective lines per file. The required net reduction is still unmet: 10,500 effective lines exceed the 10,373 baseline; full physical-terminal acceptance also remains open. Earlier test results remain historical. No release artifacts are replaced; the long-run matrix, cache target and post-release checks remain incomplete. See the [project design](docs/design.md) and [development rules](docs/development.md).
+Regressions cover the current runtime-directory, phone-channel, and turn-counting/migration contracts without restoring deleted obsolete assertions. CI runs source tests and tests of an isolated wheel installation; `python scripts/verify_wheel.py dist` checks actual import origins. Zero collected tests fail. Real models, QQ/WeChat accounts, physical terminals, and long-running acceptance remain separate from simulated regression results. See the [project design](docs/design.md) and [development rules](docs/development.md).

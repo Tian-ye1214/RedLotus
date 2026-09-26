@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 import tokenize
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,8 +23,8 @@ from typing import Any, Callable
 import yaml
 
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import config_value, settings
 from redlotus.runtime.resources import (
+    WorkspaceContext,
     skills_dir,
     skills_dir as shipped_skills_dir,
     user_skills_dir,
@@ -348,31 +349,17 @@ class JavaScriptCommandCheck(PythonCommandCheck):
 
 def readable_roots(*, work_base: Path) -> tuple[Path, ...]:
     """Agent 可读根：当前项目 + 随包基线技能 + 运行时技能 overlay。"""
-    roots = [work_base.resolve()]
-    for d in (skills_dir(), user_skills_dir()):
-        try:
-            roots.append(d.resolve())
-        except OSError:
-            pass
-    return tuple(roots)
-
-
-def is_under_root(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
+    overlay = user_skills_dir(WorkspaceContext.from_path(work_base), required=False)
+    return tuple(path.resolve() for path in (work_base, skills_dir(), overlay) if path is not None)
 
 
 def assert_readable_path(path: Path, *, work_base: Path) -> Path:
     """解析后的路径必须落在 当前项目 或技能目录（基线 / overlay）下。"""
     resolved = path.resolve()
-    for root in readable_roots(work_base=work_base):
-        if is_under_root(resolved, root):
-            return resolved
-    roots = ", ".join(str(r) for r in readable_roots(work_base=work_base))
-    raise ValueError(f"Path not allowed (must be under: {roots}): {resolved}")
+    roots = readable_roots(work_base=work_base)
+    if any(resolved.is_relative_to(root) for root in roots):
+        return resolved
+    raise ValueError(f"Path not allowed (must be under: {', '.join(map(str, roots))}): {resolved}")
 
 
 def resolve_readable_path(name: str, *, work_base: Path) -> Path:
@@ -382,29 +369,19 @@ def resolve_readable_path(name: str, *, work_base: Path) -> Path:
         raise ValueError("Path name must not be empty")
     work = work_base.resolve()
 
-    p_in = Path(name).expanduser()
-    if p_in.is_absolute():
-        return assert_readable_path(p_in, work_base=work)
-
     norm = name.replace("\\", "/").strip("/")
-    low = norm.lower()
     # 兼容旧写法 src/skills；归一到 skills/...
-    if low == "src/skills" or low.startswith("src/skills/"):
+    if norm.lower() == "src/skills" or norm.lower().startswith("src/skills/"):
         norm = norm[len("src/") :]
-        low = norm.lower()
-    if low == "skills" or low.startswith("skills/"):
+    path = Path(name).expanduser()
+    if not path.is_absolute() and (norm.lower() == "skills" or norm.lower().startswith("skills/")):
         rel = norm[len("skills") :].lstrip("/")
-        for base in (skills_dir(), user_skills_dir()):
-            cand = (base / rel).resolve() if rel else base.resolve()
-            if cand.exists():
-                return assert_readable_path(cand, work_base=work)
+        candidates = [root / rel for root in readable_roots(work_base=work)[1:]]
         # 默认落在可写 overlay（供新建 / 安装技能）
-        cand = (
-            (user_skills_dir() / rel).resolve() if rel else user_skills_dir().resolve()
-        )
-        return assert_readable_path(cand, work_base=work)
-
-    return assert_readable_path((work / name).resolve(), work_base=work)
+        path = next((candidate for candidate in candidates if candidate.exists()), None)
+        if path is None:
+            path = (user_skills_dir(WorkspaceContext.from_path(work), required=False) or skills_dir()) / rel
+    return assert_readable_path(work / path, work_base=work)
 
 
 @dataclass
@@ -423,10 +400,7 @@ class SkillsManager:
     IGNORED_RESOURCE_DIRS = {".git", "__pycache__", ".idea", ".vscode"}
 
     def __init__(self, skills_dir: str | Path | None = None, *, workspace=None):
-        self.skills_dir = (
-            Path(skills_dir) if skills_dir is not None else
-            user_skills_dir(workspace) if config_value(settings(), ("storage", "runtime_dir"), kind=str) is not None else None
-        )
+        self.skills_dir = Path(skills_dir) if skills_dir is not None else user_skills_dir(workspace, required=False)
         self.workspace = workspace
         self._roots = (shipped_skills_dir(), *((self.skills_dir,) if self.skills_dir is not None else ()))
         self._refresh_lock = threading.Lock()
@@ -692,21 +666,16 @@ def _record(
     )
 
 
-def _run_wrapped(
-    fn: Callable[..., Any],
-    name: str,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-) -> Any:
+@contextmanager
+def _tool_call(name, args, kwargs):
+    """Share telemetry and failure handling across synchronous and async tools."""
     t0 = time.monotonic()
     _notify(name, args, kwargs)
     try:
-        result = fn(*args, **kwargs)
-    except Exception as e:
+        yield lambda result: _record(name, t0, tool_result_succeeded(result), result=result)
+    except BaseException as e:
         _record(name, t0, False, error=e)
         raise
-    _record(name, t0, tool_result_succeeded(result), result=result)
-    return result
 
 
 def _wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -719,20 +688,18 @@ def _wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
 
         @functools.wraps(fn)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            t0 = time.monotonic()
-            _notify(name, args, kwargs)
-            try:
+            with _tool_call(name, args, kwargs) as record:
                 result = await fn(*args, **kwargs)
-            except BaseException as e:
-                _record(name, t0, False, error=e)
-                raise
-            _record(name, t0, tool_result_succeeded(result), result=result)
+                record(result)
             return result
     else:
 
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return _run_wrapped(fn, name, args, kwargs)
+            with _tool_call(name, args, kwargs) as record:
+                result = fn(*args, **kwargs)
+                record(result)
+            return result
 
     wrapper._notify_tool_wrapped = True  # type: ignore[attr-defined]
     return wrapper

@@ -22,6 +22,7 @@ from redlotus.runtime.resources import (
     _storage_cleanup_log,
     _storage_full,
     _storage_workspace,
+    runtime_dir,
     session_data_dir,
     workspace_context,
 )
@@ -65,14 +66,9 @@ def _locked_session(message_path: Path) -> Iterator[FileLock | None]:
 
 def _session_candidates(sessions: Path, current: Path, cutoff: float):
     candidates = []
-    session_dirs = _storage_children(sessions)
-    if session_dirs is None:
-        return candidates
-    for session_dir in session_dirs:
-        if not _safe_storage_child(sessions, session_dir) or not session_dir.is_dir():
-            continue
-        message = session_dir / "model_messages.json"
-        if not _safe_storage_child(session_dir, message) or not message.is_file():
+    for session_dir in _storage_children(sessions) or ():
+        message = _session_message(sessions, session_dir)
+        if message is None:
             continue
         try:
             stale = message.stat().st_mtime < cutoff
@@ -87,26 +83,24 @@ def _session_candidates(sessions: Path, current: Path, cutoff: float):
     return sorted(candidates, key=lambda row: row[0])
 
 
-def _load_cleanup_session(
-    session_dir: Path, message: Path, transaction: FileLock, project_id: str
-):
-    from redlotus.sessions.storage import SessionFile
-
-    session = SessionFile.load(message, lock=transaction, recover=False)
-    return (
-        session
-        if session.session_id == session_dir.name and session.project_id == project_id
-        else None
-    )
+def _session_message(sessions, directory):
+    """Validate both directory and journal before treating either as owned storage."""
+    message = directory / "model_messages.json"
+    return message if (
+        _safe_storage_child(sessions, directory) and directory.is_dir()
+        and _safe_storage_child(directory, message) and message.is_file()
+    ) else None
 
 
 def _session_protected(
     session_dir: Path, message: Path, transaction: FileLock, project_id: str
 ) -> bool:
+    from redlotus.sessions.storage import SessionFile
+
     try:
-        session = _load_cleanup_session(session_dir, message, transaction, project_id)
+        session = SessionFile.load(message, lock=transaction, recover=False, commit_recovery=False)
         return (
-            session is None
+            session.session_id != session_dir.name or session.project_id != project_id
             or session.metadata.get("active_turn")
             or session.metadata.get("interrupted_turn")
             or session.metadata.get("paused_turn")
@@ -141,14 +135,8 @@ def _active_cache_projects(sessions: Path, project_id: str) -> set[str] | None:
     if session_dirs is None:
         return None
     for session_dir in session_dirs:
-        if not _safe_storage_child(sessions, session_dir) or not session_dir.is_dir():
-            active.add(session_dir.name)
-            continue
-        message = session_dir / "model_messages.json"
-        if (
-            not _safe_storage_child(session_dir, message)
-            or not message.is_file()
-        ):
+        message = _session_message(sessions, session_dir)
+        if message is None:
             active.add(session_dir.name)
             continue
         with _locked_session(message) as transaction:
@@ -187,38 +175,27 @@ def retry_after_storage_cleanup(
                 _storage_cleanup_log(message, released)
                 if _retry_after_cleanup(retry):
                     return
-    if not cache_enabled:
+    if not cache_enabled or (runtime := runtime_dir(workspace, required=False)) is None:
         raise error
-    from redlotus.tools.execution import execution_cache_dir
-
-    cache_root = execution_cache_dir(workspace)
+    cache_root = runtime / "cache"
     environments = (Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve())
     if not _same_storage_volume(cache_root, failed):
         raise error
-    current_project = workspace.project_id
     active = _active_cache_projects(sessions, workspace.project_id)
     if active is None:
         raise error
-    protected_projects = active | ({current_project} if current_project else set())
+    protected_projects = active | {workspace.project_id}
     for cache in _storage_children(cache_root) or ():
         marker = cache / ".redlotus-cache"
-        if not _safe_storage_child(cache_root, cache) or not cache.is_dir():
+        if cache.name in protected_projects or not _safe_storage_child(cache_root, cache) or not cache.is_dir():
             continue
         try:
-            in_environment_tree = any(
+            if any(
                 cache.resolve().is_relative_to(environment)
                 or environment.is_relative_to(cache.resolve())
                 for environment in environments
-            )
-        except OSError:
-            continue
-        if (
-            cache.name in protected_projects
-            or in_environment_tree
-            or not _safe_storage_child(cache, marker)
-        ):
-            continue
-        try:
+            ) or not _safe_storage_child(cache, marker):
+                continue
             if json.loads(marker.read_text(encoding="utf-8")) != {
                 "project_id": cache.name
             }:

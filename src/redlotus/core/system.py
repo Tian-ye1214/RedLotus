@@ -7,8 +7,7 @@ import inspect
 import json
 import time
 import uuid
-from collections.abc import Callable
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 from typing import Any, Tuple
 
 from redlotus.core.agents import AgentRegistry, SubagentFactory
@@ -17,7 +16,7 @@ from redlotus.core.history import (
     compress_histories,
     prewarm_effective_max_contexts_by_role_async,
 )
-from redlotus.core.tasks import TaskManager, TaskStatus, run_goal_loop
+from redlotus.core.tasks import GoalParseResult, GoalSignal, TaskManager, TaskStatus, parse_goal_output, run_goal_loop
 from redlotus.memory.service import MemoryService
 from redlotus.runtime import logging as logger
 from redlotus.runtime.config import get_agent_usage_limits
@@ -34,7 +33,7 @@ from redlotus.sessions.context import (
     messages_safe_for_new_prompt,
     repair_interrupted_tool_calls,
 )
-from redlotus.sessions.control import SessionController, UserMessage
+from redlotus.sessions.control import SessionController, UserMessage, load_file_refs
 from redlotus.sessions.storage import SessionFile
 from redlotus.tools.base_tools import BasicToolkit
 from redlotus.tools.registry import SkillsManager
@@ -64,19 +63,10 @@ class AgentSystem:
         self._shutdown_task: asyncio.Task | None = None
         self.last_turn_error: Exception | None = None
         self._cancel_lock = asyncio.Lock()
-        self._skills_manager = SkillsManager(workspace=self.workspace)
         self._manager_history = ChatHistory()
         self._current_attachments: list = []
         self._factory = SubagentFactory()
-        self._memory = MemoryService(
-            workspace=self.workspace,
-            owner_memory_allowed=owner_memory_allowed,
-            factory=self._factory,
-        )
-        self.toolkit = BasicToolkit(
-            self._skills_manager,
-            workspace=self.workspace, show_diff=presentation.show_file_diff,
-        )
+        self._skills_manager, self._memory, self.toolkit = self._workspace_services(self.workspace)
         self._task_manager = TaskManager(
             persist=self._save_tasks,
             input_source=lambda: (self._session.turn_id, self._session.user_inputs),
@@ -92,15 +82,19 @@ class AgentSystem:
             factory=self._factory,
             user_inputs=lambda: self._session.user_inputs,
         )
-        self._memory.bind_runner(
-            self.registry, input_source=lambda: self._session.user_inputs
-        )
         self._session_file = None
         self._context_prewarmed = False
         self._coordinator_agent = None
         self._current_turn: dict[str, Any] | None = None
-        self._cli_turn_id: str | None = None
         self.session_key: str | None = None
+
+    def _workspace_services(self, workspace):
+        """Prepare the same workspace services for startup and workspace switching."""
+        skills = SkillsManager(workspace=workspace)
+        memory = MemoryService(workspace=workspace, owner_memory_allowed=self._owner_memory_allowed, factory=self._factory)
+        memory.bind_runner(self.registry, input_source=lambda: self._session.user_inputs)
+        toolkit = BasicToolkit(skills, workspace=workspace, show_diff=self.presentation.show_file_diff)
+        return skills, memory, toolkit
 
     async def bind_session(self, session_key: str, *, storage=None, generation=None, task_title=None) -> None:
         previous = self._session_file
@@ -134,23 +128,6 @@ class AgentSystem:
         self.session_key, self._session_file = session_key, storage
         self._memory.bind_session(storage)
         self._orchestrator.session_file = storage
-        self._orchestrator.set_session_key(session_key)
-
-    async def end_session_agents(self, session_key: str) -> None:
-        await self._orchestrator.factory.cancel_session(session_key)
-        self._session.reset(discard=True)
-        await self.registry.cancel_session(session_key)
-        await self.registry.remove_session(session_key)
-        if self.session_key == session_key:
-            self._memory.unbind_session()
-            self._session_file.release_use()
-            self.session_key = None
-            self._session_file = None
-            self._coordinator_agent = None
-            self._memory.reset_injection_snapshot()
-            self._orchestrator.set_session_key(None)
-            self._orchestrator.session_file = None
-            self._session.storage_paused = False
 
     async def reset_session(self, *, close_memory=False) -> None:
         """Release resources before discarding a conversation's recoverable state."""
@@ -164,15 +141,17 @@ class AgentSystem:
         if close_memory:
             await self._memory.store.close()
         if self.session_key:
-            await self.end_session_agents(self.session_key)
+            await self.registry.cancel_session(self.session_key)
+            await self.registry.remove_session(self.session_key)
+            self._session_file.release_use()
+        self.session_key = self._session_file = self._coordinator_agent = None
+        self._memory.unbind_session()
+        self._memory.reset_injection_snapshot()
+        self._orchestrator.session_file = None
         self._task_manager.reset()
         self.toolkit.reset_task_directory()
         self._manager_history.reset()
-        self._session_file = None
-        self._memory.reset_injection_snapshot()
-        self._memory.unbind_session()
         self._session.storage_paused = False
-        self._session.take_notices()
         self._session.queue.discard()
 
 
@@ -234,16 +213,11 @@ class AgentSystem:
         await asyncio.shield(self._shutdown_task)
 
     async def _release_resources(self) -> None:
-        self._session.reset(discard=True)
-        self._session.queue.discard()
         self._factory.stop()
-        await self.cancel_current_turn()
-        if self.session_key:
-            await self.end_session_agents(self.session_key)
+        await self.reset_session()
         await self.registry.cancel_all()
         await self._factory.close()
         await self._memory.close()
-        await self.toolkit.close()
         logger.info("[lifecycle] shutdown complete")
 
     def _on_turn_task_done(self, done_task: asyncio.Task) -> None:
@@ -287,7 +261,7 @@ class AgentSystem:
         self.last_turn_error = None
         self._session.user_inputs = list(message.resume['user_inputs']) if message.resume is not None else [message.original_text or message.text]
         self._session.pending_inputs.clear()
-        turn_id = turn_id or uuid.uuid4().hex
+        turn_id = (message.resume or {}).get("turn_id") or turn_id or uuid.uuid4().hex
         task = asyncio.create_task(
             self._run_user_turn(
                 turn_id,
@@ -315,23 +289,24 @@ class AgentSystem:
                 self._current_turn["goal_iteration"] = iteration
 
         try:
-            if goal_mode:
-                async with self._outer_turn(message, turn_id):
-                    await run_goal_loop(
+            async with self._outer_turn(message, turn_id):
+                if goal_mode:
+                    return await run_goal_loop(
                         self,
                         message=message,
                         history=history,
                         turn_id=turn_id,
                         set_iteration=set_iteration,
                     )
-            else:
-                await self.run_agent_system(
+                _, output = await self.run_agent_system(
                     message,
                     history,
                     turn_id=turn_id,
                 )
+                return output
         except asyncio.CancelledError:
             logger.info("用户回合已取消 turn_id=%s", turn_id)
+            raise
         except Exception as exc:
             self._handle_turn_error(exc)
             if is_transport_interruption(exc):
@@ -339,16 +314,13 @@ class AgentSystem:
                     await self._session.pause(self, reason='transport_error')
                 except Exception as pause_error:
                     self._handle_turn_error(pause_error)
+            raise
 
 
     async def wait_for_memory_quiescent(self) -> bool:
         if self._current_turn:
             await asyncio.shield(asyncio.gather(self._current_turn["task"], return_exceptions=True))
         return await self._memory.wait_idle()
-
-    async def _sync_skills_for_user_turn(self) -> None:
-        """每次用户输入：在同一实例上重新扫描 skills（静默），避免磁盘 I/O 阻塞事件循环。"""
-        await asyncio.to_thread(self._skills_manager.refresh)
 
     def set_ask_user_handler(self, handler):
         async def recorded_answer(question):
@@ -357,8 +329,15 @@ class AgentSystem:
                       else await asyncio.to_thread(handler, question))
             if context != (self._session.generation, self._session.turn_id, self._session_file, self._session.active):
                 return None
-            if context[3] and isinstance(answer, str):
-                await self.record_user_input(uuid.uuid4().hex, UserMessage(answer), context=context[:3])
+            if context[3] and isinstance(answer, (str, UserMessage)):
+                from pydantic_ai import ToolReturn
+
+                message = UserMessage(answer) if isinstance(answer, str) else answer
+                if isinstance(answer, str):
+                    message.references = await load_file_refs(answer, workspace=self.workspace)
+                await self._session.prepare_message(self, message)
+                await self.record_user_input(uuid.uuid4().hex, message, context=context[:3])
+                answer = ToolReturn(return_value=message.text, content=message.to_prompt()) if message.references else message.text
             return answer if context == (self._session.generation, self._session.turn_id, self._session_file, self._session.active) else None
 
         self.toolkit.set_ask_user_handler(recorded_answer if handler else None)
@@ -429,9 +408,7 @@ class AgentSystem:
             manager_messages = repair_interrupted_tool_calls(storage.role_messages(
                 "manager", agent_id=make_agent_id(storage.session_id, "manager", "planning"),
             ))
-            history, manager_history = ChatHistory(), ChatHistory()
-            history.set_messages(repaired)
-            manager_history.set_messages(manager_messages)
+            history, manager_history = ChatHistory(repaired), ChatHistory(manager_messages)
             active = metadata.get("active_turn")
             if active or repaired != messages or tasks.snapshot() != metadata.get("tasks", []):
                 await finish_io(asyncio.to_thread(lambda: storage.save_context(
@@ -493,7 +470,6 @@ class AgentSystem:
         admission = admission or self._session.admit(self.workspace, urgent=True)
         if not admission.urgent or not self._session.accepts(admission):
             return False
-        store = self.toolkit._references
         pending_input = input_data if input_data is not None else {'id': admission.id, 'text': message.original_text or message.text}
 
         async def prepare():
@@ -502,7 +478,7 @@ class AgentSystem:
                     message.references = await references
                 if not self._session.accepts(admission):
                     return None
-                await store.prepare_message(message)
+                await self._session.prepare_message(self, message)
                 pending_input['reference_ids'] = [ref.id for ref in message.references]
                 return message if self._session.accepts(admission) else None
             except (OSError, ValueError) as exc:
@@ -524,30 +500,16 @@ class AgentSystem:
         )
         return True
 
-    async def _take_inner_inputs(self):
-        return await self._session.take_inputs(self)
-
     async def switch_workspace(self, path) -> None:
         """Prepare the target before releasing or replacing the current conversation."""
         workspace = WorkspaceContext.from_path(path)
         if not workspace.root.is_dir():
             raise NotADirectoryError(workspace.root)
         log_dir = logger.prepare_log_dir(workspace)
-        skills = SkillsManager(workspace=workspace)
-        memory = MemoryService(
-            workspace=workspace,
-            owner_memory_allowed=self._owner_memory_allowed,
-            factory=self._factory,
-        )
-        memory.bind_runner(
-            self.registry, input_source=lambda: self._session.user_inputs
-        )
-        toolkit = BasicToolkit(
-            skills, workspace=workspace, show_diff=self.presentation.show_file_diff,
-        )
+        skills, memory, toolkit = self._workspace_services(workspace)
         toolkit.set_ask_user_handler(self.toolkit._ask_user_handler)
         review_store = self.toolkit.review_store
-        toolkit._review_store, toolkit._file_lock = review_store, review_store._lock
+        toolkit.review_store, toolkit._file_lock = review_store, review_store._lock
         await self.reset_session(close_memory=True)
         self.workspace, self._memory, self.toolkit, self._skills_manager = workspace, memory, toolkit, skills
         self._coordinator_agent = None
@@ -569,7 +531,7 @@ class AgentSystem:
             user_inputs=message.resume['user_inputs'] if message.resume is not None else None,
         ):
             with workspace_context(self.workspace):
-                await self.toolkit._references.prepare_message(message)
+                await self._session.prepare_message(self, message)
                 if self.session_key is None:
                     await self.bind_session(uuid.uuid4().hex)
                 if message.resume is None:
@@ -587,13 +549,12 @@ class AgentSystem:
                 if message.resume is not None:
                     await self._session.resume_inputs(self, message)
                 status, error = "success", ""
-                self._cli_turn_id = turn_id
                 self._current_attachments = [
                     *message.attachments,
                     *(part for ref in message.references for part in ref.to_prompt()),
                 ]
                 try:
-                    await self._sync_skills_for_user_turn()
+                    await asyncio.to_thread(self._skills_manager.refresh)
                     with self._session.usage(self._session_file):
                         yield
                 except asyncio.CancelledError:
@@ -606,12 +567,11 @@ class AgentSystem:
                     status, error = "failed", f"{type(exc).__name__}: {exc}"
                     raise
                 finally:
-                    self._cli_turn_id, self._current_attachments = None, []
-                    paths = [str(self._session_file.path)]
+                    self._current_attachments = []
                     def finish():
                         return self._memory.finish_turn(
                             job, status=status, user_inputs=self._session.user_inputs,
-                            evidence_paths=paths, error=error,
+                            evidence_paths=[str(self._session_file.path)], error=error,
                         )
                     if status == "cancelled":
                         try:
@@ -639,7 +599,7 @@ class AgentSystem:
             return await self._task_manager.execute_plan(
                 user_input, continue_from_previous, orchestrator=self._orchestrator,
                 history=self._manager_history, tools=manager_tools(self._task_manager, self.toolkit, self._memory),
-                attachments=self._current_attachments, turn_id=self._cli_turn_id, presentation=self.presentation,
+                attachments=self._current_attachments, turn_id=self._session.turn_id, presentation=self.presentation,
             )
 
 
@@ -664,7 +624,7 @@ class AgentSystem:
                                         agent_id=make_agent_id(self.session_key, "worker", task_id)),
             ))
             return await self._orchestrator.execute_all_tasks_parallel(
-                "\n".join(self._session.user_inputs), self._current_attachments, turn_id=self._cli_turn_id,
+                "\n".join(self._session.user_inputs), self._current_attachments, turn_id=self._session.turn_id,
             )
 
     async def execute_task_with_worker(
@@ -688,7 +648,7 @@ class AgentSystem:
             user_goal,
             retry_info,
             attachments=self._current_attachments,
-            turn_id=self._cli_turn_id,
+            turn_id=self._session.turn_id,
         )
 
     async def run_agent_system(
@@ -696,125 +656,111 @@ class AgentSystem:
         message: "UserMessage",
         history: "ChatHistory",
         *,
-        turn_id: str | None = None,
-        output_transform: Callable[[str], str] | None = None,
+        turn_id: str,
         _inside_goal: bool = False,
-    ) -> tuple["ChatHistory", str]:
-        """Run one user request, or one inner iteration of the current goal."""
-        turn_id = turn_id or uuid.uuid4().hex
-        boundary = nullcontext() if _inside_goal else self._outer_turn(message, turn_id)
-        async with boundary:
-            if not self._context_prewarmed:
-                await prewarm_effective_max_contexts_by_role_async(
-                    reason="非 CLI 首条任务（预取三角色）"
-                )
-                self._context_prewarmed = True
-
-            self._session.open_inbox()
-
-            logger.info_file_only("[用户]\n%s", self.presentation.format_user_log_text(message))
-
-            routing_tools = [
-                self.execute_task_with_manager,
-                self.execute_task_with_worker,
-                self.resume_task,
-            ]
-            if self._coordinator_agent is None:
-                from redlotus.prompts.prompt import (
-                    memory_from_session_prompt,
-                    session_prompt_from_history,
-                )
-
-                restored = session_prompt_from_history(history.messages)
-                if restored is not None:
-                    self._memory.reset_injection_snapshot(
-                        memory_from_session_prompt(restored)
-                    )
-                self._coordinator_agent = await create_coordinator_agent(
-                    self._skills_manager,
-                    self._memory.injection_for_session(),
-                    routing_tools if self._owner_memory_allowed else [],
-                    worker_tools(self.toolkit, self._memory)
-                    if self._owner_memory_allowed
-                    else [],
-                    self._task_manager.structured_status,
-                    instructions=restored,
-                    persist_context=self._commit_request_context,
-                )
-            agent = self._coordinator_agent
-
-            start_time = time.time()
-            coord_aid = await self.registry.ensure_agent(
-                self.session_key, "coordinator"
+    ) -> tuple["ChatHistory", str | GoalParseResult]:
+        """Run one coordinator iteration inside the shared user-turn lifecycle."""
+        if not self._context_prewarmed:
+            await prewarm_effective_max_contexts_by_role_async(
+                reason="非 CLI 首条任务（预取三角色）"
             )
-            stream_handler = (
-                None
-                if output_transform is not None
-                else coordinator_stream_handler(self)
-            )
-            async def _save_coordinator_node(run: Any) -> None:
-                candidate = ChatHistory()
-                candidate.set_messages(list(run.all_messages()))
-                await self._checkpoint(candidate, turn_id)
-                self._session.commit_inputs()
-                history.set_messages(candidate.messages)
+            self._context_prewarmed = True
 
-            try:
-                result = await self.registry.run(
-                    lambda: AgentRunner().run(
-                        agent=agent,
-                        prompt=message.to_prompt(),
-                        message_history=messages_safe_for_new_prompt(history.messages),
-                        usage_limits=get_agent_usage_limits(),
-                        event_stream_handler=stream_handler,
-                        on_node=_save_coordinator_node,
-                        take_urgent=self._take_inner_inputs,
-                        on_complete=self._session.close_inbox,
-                    ),
-                    agent_id=coord_aid,
-                    turn_id=turn_id,
+        self._session.open_inbox()
+
+        logger.info_file_only("[用户]\n%s", self.presentation.format_user_log_text(message))
+
+        routing_tools = [
+            self.execute_task_with_manager,
+            self.execute_task_with_worker,
+            self.resume_task,
+        ]
+        if self._coordinator_agent is None:
+            from redlotus.prompts.prompt import (
+                memory_from_session_prompt,
+                session_prompt_from_history,
+            )
+
+            restored = session_prompt_from_history(history.messages)
+            if restored is not None:
+                self._memory.reset_injection_snapshot(
+                    memory_from_session_prompt(restored)
                 )
-            except BaseException as exc:
-                self._session.close_inbox()
-                if stream_handler is not None and stream_handler._is_current():
-                    self.presentation.update_output("end_model_stream", "已停止" if isinstance(exc, asyncio.CancelledError) else "执行失败")
-                raise
-            if stream_handler is not None and not stream_handler._is_current():
-                raise asyncio.CancelledError("The reply belongs to a previous session.")
-            raw_output = str(result.output or "")
-            output = (
-                output_transform(raw_output)
-                if output_transform is not None
-                else raw_output
+            self._coordinator_agent = await create_coordinator_agent(
+                self._skills_manager,
+                self._memory.injection_for_session(),
+                routing_tools if self._owner_memory_allowed else [],
+                worker_tools(self.toolkit, self._memory)
+                if self._owner_memory_allowed
+                else [],
+                self._task_manager.structured_status,
+                instructions=restored,
+                persist_context=self._commit_request_context,
             )
-            if stream_handler is not None:
-                self.presentation.finish_model_stream(output, title="Coordinator")
-            else:
-                self.presentation.show_model_output(output, title="Coordinator")
-            history.update(result)
-            elapsed = time.time() - start_time
+        agent = self._coordinator_agent
 
-            logger.debug("run_agent_system 完成，耗时 %.2f 秒", elapsed)
-            await self._checkpoint(history, turn_id)
-            worker_storage = self._session_file.role_file("worker", create=False)
-            if worker_storage is not None:
-                from redlotus.sessions.context import make_agent_id
-                retained = {
-                    make_agent_id(self.session_key, "worker", task.id)
-                    for task in self._task_manager.tasks.values() if task.status != TaskStatus.COMPLETED
-                }
-                await self._durable_write(lambda: worker_storage.compact(
-                    keep_turn_ids=set(), release_turn_id=turn_id, keep_agent_ids=retained,
-                ))
-            return history, output
+        start_time = time.time()
+        coord_aid = await self.registry.ensure_agent(
+            self.session_key, "coordinator"
+        )
+        stream_handler = None if _inside_goal else coordinator_stream_handler(self)
+        async def _save_coordinator_node(run: Any) -> None:
+            messages = list(run.all_messages())
+            await self._checkpoint(messages, turn_id)
+            self._session.commit_inputs()
+            history.set_messages(messages)
+
+        try:
+            result = await self.registry.run(
+                lambda: AgentRunner().run(
+                    agent=agent,
+                    prompt=message.to_prompt(),
+                    message_history=messages_safe_for_new_prompt(history.messages),
+                    usage_limits=get_agent_usage_limits(),
+                    event_stream_handler=stream_handler,
+                    on_node=_save_coordinator_node,
+                    take_urgent=lambda: self._session.take_inputs(self),
+                    on_complete=self._session.close_inbox,
+                ),
+                agent_id=coord_aid,
+                turn_id=turn_id,
+            )
+        except BaseException as exc:
+            self._session.close_inbox()
+            if stream_handler is not None and stream_handler._is_current():
+                self.presentation.update_output("end_model_stream", "已停止" if isinstance(exc, asyncio.CancelledError) else "执行失败")
+            raise
+        if stream_handler is not None and not stream_handler._is_current():
+            raise asyncio.CancelledError("The reply belongs to a previous session.")
+        raw_output = str(result.output or "")
+        parsed = parse_goal_output(raw_output) if _inside_goal else None
+        output = parsed.cleaned_text if parsed else raw_output
+        if stream_handler is not None:
+            self.presentation.finish_model_stream(output, title="Coordinator")
+        else:
+            self.presentation.show_model_output(output, title="Coordinator")
+        history.update(result)
+        elapsed = time.time() - start_time
+
+        logger.debug("run_agent_system 完成，耗时 %.2f 秒", elapsed)
+        await self._checkpoint(history.messages, turn_id, completed=parsed is None or parsed.signal == GoalSignal.DONE)
+        worker_storage = self._session_file.role_file("worker", create=False)
+        if worker_storage is not None:
+            from redlotus.sessions.context import make_agent_id
+            retained = {
+                make_agent_id(self.session_key, "worker", task.id)
+                for task in self._task_manager.tasks.values() if task.status != TaskStatus.COMPLETED
+            }
+            await self._durable_write(lambda: worker_storage.compact(
+                keep_turn_ids=set(), release_turn_id=turn_id, keep_agent_ids=retained,
+            ))
+        return history, parsed or output
 
     async def _commit_request_context(self, messages):
         """Commit an automatic checkpoint before the SDK can send or adopt it."""
         storage = self._session_file
         session_id = self.session_key
-        candidate = ChatHistory()
-        candidate.set_messages(messages)
-        await self._checkpoint(candidate, self._cli_turn_id)
+        await self._checkpoint(messages, self._session.turn_id)
         if storage is not self._session_file or session_id != self.session_key:
             raise asyncio.CancelledError("Session changed during checkpoint persistence.")
 
@@ -822,12 +768,13 @@ class AgentSystem:
         storage = self._session_file
         await self._durable_write(lambda: storage.update(metadata={"tasks": tasks}))
 
-    async def _checkpoint(self, history, turn_id):
+    async def _checkpoint(self, messages, turn_id, *, completed=False):
         """Append model context; the task state machine owns its checkpoints."""
-        storage, messages = self._session_file, list(history.messages)
+        storage, messages = self._session_file, list(messages)
         await self._durable_write(lambda: storage.save_context(
             messages,
             turn_id=turn_id,
+            completed_turn=self._memory.current.model_dump(mode="json") if completed else None,
         ))
 
 
@@ -842,5 +789,7 @@ class AgentSystem:
             return await self._session.compress(lambda: self._compress_context(history), busy=self.has_current_turn)
 
     def _handle_turn_error(self, error):
+        if error is self.last_turn_error:
+            return
         self.last_turn_error = error
         self.presentation.handle_turn_error(error)

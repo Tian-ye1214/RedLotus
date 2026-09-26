@@ -715,14 +715,14 @@ class UsagePanel(VerticalScroll):
         notes = ["用户输入及引用文本只计一次；不含系统提示词、旧回复和工具结果。"]
         if not complete:
             notes.append("统计不完整，暂不展示完整占比。")
-        if content.incomplete_sessions:
-            notes.append(f"{content.incomplete_sessions} 个旧会话输入统计不完整；输入仅为已统计部分。")
-        if content.unmetered_attachments:
-            notes.append(f"未计量附件 {content.unmetered_attachments} 个。")
-        if content.missing_reasoning_responses:
-            notes.append(f"{content.missing_reasoning_responses} 次响应推理明细未知。")
-        if content.missing_usage_responses:
-            notes.append(f"{content.missing_usage_responses} 次响应未报告用量。")
+        for amount, label in (
+            (content.incomplete_sessions, "{amount} 个旧会话输入统计不完整；输入仅为已统计部分。"),
+            (content.unmetered_attachments, "未计量附件 {amount} 个。"),
+            (content.missing_reasoning_responses, "{amount} 次响应推理明细未知。"),
+            (content.missing_usage_responses, "{amount} 次响应未报告用量。"),
+        ):
+            if amount:
+                notes.append(label.format(amount=amount))
         self.query_one("#panel-content-note", Static).update("\n".join(notes))
 
 

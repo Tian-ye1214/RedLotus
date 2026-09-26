@@ -4,13 +4,11 @@ import asyncio
 import contextvars
 import mimetypes
 import os
-import re
 import signal
 import sys
 import threading
+from abc import ABC, abstractmethod
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
 from redlotus.runtime import config as app_config
@@ -27,39 +25,15 @@ from redlotus.runtime.config import (
 )
 from redlotus.runtime.network import close_all_clients
 
-if TYPE_CHECKING:
-    from redlotus.core.system import AgentSystem
 from redlotus.runtime.resources import WorkspaceContext, current_workspace
-from redlotus.sessions.context import ChatHistory
-from redlotus.sessions.control import InputAdmission, SessionController, UserMessage
+from redlotus.sessions.control import SessionController, UserMessage
 from redlotus.tools import registry as tool_telemetry
 
 
-@dataclass(frozen=True)
-class QueuedTurn:
-    user_message: UserMessage
-    send_reply: Callable[..., Awaitable[Any]]
-    loop: asyncio.AbstractEventLoop
-    prepare: Callable[[], Awaitable[list]] | None = None
-    admission: InputAdmission | None = None
-
-
-@dataclass
-class ChatSession:
-    inputs: SessionController = field(default_factory=SessionController)
-    history: ChatHistory = field(default_factory=ChatHistory)
-    agent: AgentSystem | None = None
-    question: asyncio.Future | None = None
-    question_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    ready: asyncio.Event = field(default_factory=asyncio.Event)
-
-
-class BotBase:
+class BotBase(ABC):
     """所有平台机器人的公共基类。
 
-    子类需实现：
-      - platform_tag: str      —— 日志前缀，如 "WeChat" / "QQ"
-      - session_prefix: str    —— 会话 ID 前缀，如 "wx_" / "qq_"
+    子类提供平台名称及适配方法；公共模板负责接收、准备、执行和回复。
     """
 
     RESET_COMMANDS = frozenset({"新任务", "/新任务", "/reset"})
@@ -69,7 +43,7 @@ class BotBase:
     _MIME_MAP: dict[str, str] = {}
 
     def __init__(self):
-        self._sessions: dict[str, ChatSession] = {}
+        self._sessions: dict[str, SessionController] = {}
         self._released = False
         self._agent_ctx = contextvars.ContextVar(
             f"{type(self).__name__}_context", default=None
@@ -78,10 +52,19 @@ class BotBase:
     platform_tag: str
     session_prefix: str
 
+    @abstractmethod
+    def adapt_message(self, *args):
+        """Return (identity, UserMessage, reply, prepare), or None to ignore an event."""
+        raise NotImplementedError
+
+    async def _handle_message(self, *args):
+        if adapted := self.adapt_message(*args):
+            identity, message, reply, prepare = adapted
+            await self.dispatch_user_message(identity, message, reply, prepare=prepare)
+
     def _session(self, session_id):
         if session_id not in self._sessions:
-            state = ChatSession()
-            state.ready.set()
+            state = SessionController()
             self._sessions[session_id] = state
         return self._sessions[session_id]
 
@@ -93,8 +76,8 @@ class BotBase:
         if state.agent is None:
             state.agent = AgentSystem(
                 presentation=presentation,
-                owner_memory_allowed=False,
-                input_controller=state.inputs,
+                owner_memory_allowed=self._is_owner(session_id),
+                input_controller=state,
             )
             logger.activate_log_dir(logger.prepare_log_dir(state.agent.workspace))
             logger.prune_old_logs()
@@ -102,56 +85,78 @@ class BotBase:
             state.agent.toolkit.set_task_directory(f"{self.platform_tag}_{session_id}")
         return state.agent
 
+    def _is_owner(self, identity):
+        prefix = "private_" if self.platform_tag == "QQ" else self.session_prefix
+        owners = settings().get("bot", {}).get("owner_channels", {}).get(self.platform_tag.lower(), [])
+        owners = owners if isinstance(owners, list) else [owners]
+        return identity.startswith(prefix) and identity[len(prefix):] in {str(owner) for owner in owners}
+
     async def _close_session(self, state):
-        if state.question and not state.question.done():
-            state.question.cancel()
-        state.inputs.reset(discard=True)
-        await state.inputs.queue.cancel(discard=True)
-        await state.inputs.queue.join()
+        state.reset(discard=True)
+        await state.queue.cancel(discard=True)
+        await state.queue.join()
         if state.agent:
             await state.agent.shutdown()
 
     async def _reset_session(self, session_id, *, preserve_queue=False):
         old = self._sessions.pop(session_id, None)
-        state = ChatSession()
+        state = SessionController()
+        state.queue.ready.clear()
         self._sessions[session_id] = state
         if old:
-            old.inputs.reset(discard=True)
-            pending = [entry[2] for entry in old.inputs.queue.pending]
-            old.inputs.queue.discard()
+            old.reset(discard=True)
+            pending = [entry[2] for entry in old.queue.pending]
+            old.queue.discard()
             if preserve_queue:
-                for turn in pending:
-                    self._submit_turn(session_id, state, turn)
+                for request in pending:
+                    message, reply, _, prepare = old.deliveries[request["id"]]
+                    self._submit_turn(session_id, state, message, reply, prepare=prepare, request=request)
         try:
             if old:
                 await self._close_session(old)
         finally:
-            state.ready.set()
+            state.queue.ready.set()
 
-    def _submit_turn(self, identity, state, turn):
-        turn = replace(turn, admission=state.inputs.admit(
-            WorkspaceContext.from_path(current_workspace()),
-            input_id=turn.admission.id if turn.admission else None,
-        ))
-        logger.debug("[%s] input admitted id=%s sequence=%s", self.platform_tag, turn.admission.id, turn.admission.sequence)
-        return state.inputs.queue.submit(
-            lambda: self._consume_turn(identity, state, turn), data=turn
-        )
+    def _submit_turn(self, identity, state, message, send_reply, *, prepare=None, request=None):
+        admission = state.admit(WorkspaceContext.from_path(current_workspace()), input_id=(request or {}).get('id'))
+        request = request if request is not None else dict(text=message.text, id=admission.id, goal_mode=False)
+        state.deliveries[admission.id] = (message, send_reply, asyncio.get_running_loop(), prepare)
+        async def capture():
+            await state.prepare_message(self._agent_for_session(identity), message, prepare=prepare)
+            request['reference_ids'] = [ref.id for ref in message.references]
+            if state.paused:
+                await state.save_pause(state.agent)
+            return message
+        prepared = state.track_preparation(capture())
+        logger.debug("[%s] input admitted id=%s sequence=%s", self.platform_tag, admission.id, admission.sequence)
+        return state.queue.submit(lambda: self._consume_turn(identity, state, message, admission, request, prepared), data=request)
 
-    async def _consume_turn(self, identity, state, turn):
-        await state.ready.wait()
+    async def _consume_turn(self, identity, state, message, admission, request, prepared=None):
         try:
-            result = await self._run_turn(identity, state, turn)
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            logger.error("[%s] Agent 请求失败: %s", self.platform_tag, error)
-            result = f"本轮执行失败（输入 {turn.admission.id}），未完成的操作不能视为成功：{error}"
-        if self._sessions.get(identity) is state:
+            generation = state.generation
+            _, send_reply, loop, prepare = state.deliveries[admission.id]
+            self._agent_ctx.set((identity, state, send_reply, loop, generation))
+            tool_telemetry.set_user_notify_callback(self._notify)
             try:
-                await turn.send_reply(result)
+                if prepared is not None and not prepared.cancelled():
+                    message = await prepared
+                with logger.session_log_context(identity):
+                    result = await state.start(self._agent_for_session(identity), message, state.history, admission,
+                                               prepare=prepare if prepared is not None and prepared.cancelled() else None)
             except Exception as exc:
-                logger.error("[%s] 回复发送未确认，未自动重发: %s", self.platform_tag, exc)
-                raise
+                error = f"{type(exc).__name__}: {exc}"
+                logger.error("[%s] Agent 请求失败: %s", self.platform_tag, error)
+                result = f"本轮执行失败（输入 {admission.id}），未完成的操作不能视为成功：{error}"
+            paused = state.paused and state.paused['request']['id'] == admission.id
+            if self._sessions.get(identity) is state and (generation == state.generation or paused):
+                try:
+                    await send_reply("任务已暂停，发送 /resume 恢复。" if paused else result)
+                except Exception as exc:
+                    logger.error("[%s] 回复发送未确认，未自动重发: %s", self.platform_tag, exc)
+                    raise
+        finally:
+            if not state.paused:
+                state.deliveries.pop(admission.id, None)
 
     def guess_download_mime(self, *, filename="", media_type_key=""):
         return mimetypes.guess_type(filename)[0] or self._MIME_MAP.get(
@@ -159,50 +164,25 @@ class BotBase:
         )
 
     def _notify(self, text):
-        identity, state, turn = self._agent_ctx.get()
+        identity, state, send_reply, loop, generation = self._agent_ctx.get()
 
         async def send():
-            if self._sessions.get(identity) is state:
+            if self._sessions.get(identity) is state and generation == state.generation:
                 try:
-                    await turn.send_reply(text)
+                    await send_reply(text)
                 except Exception as exc:
                     logger.error("[%s] 通知发送失败: %s", self.platform_tag, exc)
 
-        turn.loop.call_soon_threadsafe(lambda: asyncio.create_task(send()))
-
-    async def _run_turn(self, identity, state, turn):
-        if turn.prepare:
-            turn.user_message.attachments = await turn.prepare()
-        if self._sessions.get(identity) is not state or not state.inputs.accepts(turn.admission):
-            raise asyncio.CancelledError()
-        if not (turn.user_message.text or turn.user_message.attachments or turn.user_message.references):
-            return ""
-        agent = self._agent_for_session(identity)
-        token = self._agent_ctx.set((identity, state, turn))
-        tool_telemetry.set_user_notify_callback(self._notify)
-        try:
-            with logger.session_log_context(identity):
-                if agent.session_key is None:
-                    from uuid import uuid4
-                    await agent.bind_session(uuid4().hex)
-                _, result = await agent.run_agent_system(
-                    turn.user_message,
-                    state.history,
-                    turn_id=turn.admission.id,
-                )
-                return result
-        finally:
-            tool_telemetry.set_user_notify_callback(None)
-            self._agent_ctx.reset(token)
+        loop.call_soon_threadsafe(lambda: asyncio.create_task(send()))
 
     async def _ask_user(self, question, timeout=None):
-        identity, state, turn = self._agent_ctx.get()
+        identity, state, send_reply, loop, generation = self._agent_ctx.get()
         async with state.question_lock:
-            if self._sessions.get(identity) is not state:
+            if self._sessions.get(identity) is not state or generation != state.generation:
                 return None
             state.question = asyncio.get_running_loop().create_future()
             try:
-                await turn.send_reply(question)
+                await send_reply(question)
                 return await (state.question if timeout is None else asyncio.wait_for(state.question, timeout))
             except TimeoutError:
                 return None
@@ -210,7 +190,7 @@ class BotBase:
                 state.question = None
 
     async def dispatch_user_message(self, session_id, message, send_reply, *, prepare=None):
-        user_text = message.text
+        user_text = message.text.strip()
         if not session_id or self._released:
             return
         state = self._session(session_id)
@@ -218,8 +198,8 @@ class BotBase:
             if state.agent:
                 await state.agent.stop_current_turn()
             else:
-                state.inputs.reset()
-                await state.inputs.queue.cancel()
+                state.reset()
+                await state.queue.cancel()
             await send_reply("已停止当前任务，保留会话记录。")
             return
         if (
@@ -232,8 +212,23 @@ class BotBase:
             )
             await send_reply("已结束当前任务并清空上下文。")
             return
-        if state.question and not state.question.done() and not (prepare or message.attachments or message.references):
-            state.question.set_result(user_text)
+        if user_text == "/resume":
+            resumed = await state.resume(self._agent_for_session(session_id),
+                lambda message, admission, data: self._consume_turn(session_id, state, message, admission, data), lambda: None)
+            await send_reply("正在恢复任务。" if resumed else "没有暂停的任务。")
+            return
+        if state.question and not state.question.done():
+            question, generation = state.question, state.generation
+            try:
+                await state.prepare_message(self._agent_for_session(session_id), message, prepare=prepare)
+            except asyncio.CancelledError:
+                return
+            except (OSError, ValueError) as exc:
+                if generation == state.generation:
+                    await send_reply(str(exc))
+            else:
+                if generation == state.generation and not question.done():
+                    question.set_result(message)
             return
         if not user_text and not message.attachments and not message.references and prepare is None:
             return
@@ -243,7 +238,7 @@ class BotBase:
         self._submit_turn(
             session_id,
             state,
-            QueuedTurn(message, send_reply, asyncio.get_running_loop(), prepare),
+            message, send_reply, prepare=prepare,
         )
         await send_reply("✓ 收到，正在处理…")
 
@@ -256,7 +251,7 @@ class BotBase:
         await close_all_clients()
 
     def clean_text(self, raw):
-        return re.sub(r"\s+", " ", (raw or "").strip())
+        return raw or ""
 
 
 async def ask_configuration(question: str, *, secret=False):
@@ -377,23 +372,17 @@ async def prepare_startup_configuration(*, ask=None, emit=print) -> bool:
         models = config_value(setup.values, ("models",), purpose="已有 Agent 角色与模型选择", kind=dict)
         if not isinstance(models, dict) or not models:
             raise ConfigError(f"请在 {config_file()} 中提供 models 配置对象")
-        for role in models:
+        for path in [("models", role) for role in models] + setup.connection_paths():
             try:
-                get_model_and_params(role, cfg=setup.values)
+                if path[0] == "models":
+                    get_model_and_params(path[1], cfg=setup.values)
+                else:
+                    config_value(setup.values, path, purpose="连接模型服务的地址或认证凭据", kind=str)
             except ConfigError as exc:
                 if not exc.missing or not interactive:
                     raise
                 if not await setup.fill(exc.path):
                     return False
-        for path in setup.connection_paths():
-            try:
-                config_value(setup.values, path, purpose="连接模型服务的地址或认证凭据", kind=str)
-                continue
-            except ConfigError as exc:
-                if not exc.missing or not interactive:
-                    raise
-            if not await setup.fill(path):
-                return False
         return await setup.commit()
     except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
         emit("配置已取消，未保存本次填写内容。")
@@ -425,14 +414,11 @@ def install_stop_handlers(stop_event: asyncio.Event) -> None:
     """Map process signals to the interactive runner's stop event."""
     loop = asyncio.get_running_loop()
 
-    def request_stop(*_args: object) -> None:
-        stop_event.set()
-
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, request_stop)
+            loop.add_signal_handler(sig, stop_event.set)
         except (NotImplementedError, ValueError):
-            signal.signal(sig, request_stop)
+            signal.signal(sig, lambda *_: stop_event.set())
 
 async def run_cli(system=None):
     """Run the interactive RedLotus CLI/TUI."""

@@ -136,15 +136,18 @@ def compute_line_diff(old: str, new: str) -> list[DiffLine]:
     sm = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
     out: list[DiffLine] = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "equal":
-            out += [DiffLine(DiffKind.CTX, i1 + k + 1, j1 + k + 1, line) for k, line in enumerate(old_lines[i1:i2])]
-        elif tag == "insert":
-            out += [DiffLine(DiffKind.ADD, None, j1 + k + 1, line) for k, line in enumerate(new_lines[j1:j2])]
-        elif tag == "delete":
-            out += [DiffLine(DiffKind.DEL, i1 + k + 1, None, line) for k, line in enumerate(old_lines[i1:i2])]
-        elif tag == "replace":
-            out += [DiffLine(DiffKind.MOD, i1 + k + 1, None, line) for k, line in enumerate(old_lines[i1:i2])]
-            out += [DiffLine(DiffKind.MOD, None, j1 + k + 1, line) for k, line in enumerate(new_lines[j1:j2])]
+        if tag in ("equal", "delete", "replace"):
+            kind = {"equal": DiffKind.CTX, "delete": DiffKind.DEL, "replace": DiffKind.MOD}[tag]
+            out.extend(
+                DiffLine(kind, i1 + k + 1, j1 + k + 1 if tag == "equal" else None, line)
+                for k, line in enumerate(old_lines[i1:i2])
+            )
+        if tag in ("insert", "replace"):
+            kind = DiffKind.ADD if tag == "insert" else DiffKind.MOD
+            out.extend(
+                DiffLine(kind, None, j1 + k + 1, line)
+                for k, line in enumerate(new_lines[j1:j2])
+            )
     return out
 
 
@@ -538,12 +541,15 @@ def _collect_history(
         history.file_count += 1
         history.add_totals(summary.totals)
         history.content.add(summary.content)
-        for role, totals in summary.by_agent.items():
-            history.by_agent.setdefault(role, UsageTotals()).add_totals(totals)
-        for category, totals in summary.by_category.items():
-            history.by_category.setdefault(category, UsageTotals()).add_totals(totals)
-        for model, usage in summary.by_model.items():
-            history.by_model.setdefault(model, UsageTotals()).add_totals(usage.totals)
+        for source, destination in (
+            (summary.by_agent, history.by_agent),
+            (summary.by_category, history.by_category),
+            (summary.by_model, history.by_model),
+        ):
+            for name, usage in source.items():
+                destination.setdefault(name, UsageTotals()).add_totals(
+                    getattr(usage, "totals", usage)
+                )
         session = sessions.setdefault(
             summary.meta["session_id"], PanelSessionSummary(date=date, topic=topic)
         )
@@ -569,14 +575,8 @@ async def _collect_runtime(
     runtime = RuntimePanelStats()
     runtime.session_key = str(getattr(system, "session_key", "") or "-")
     runtime.context_input_tokens = {
-        "Coordinator": latest_usage_input_tokens(
-            getattr(coordinator_history, "messages", []) or []
-        )
-        or 0,
-        "Manager": latest_usage_input_tokens(
-            getattr(manager_history, "messages", []) or []
-        )
-        or 0,
+        label: latest_usage_input_tokens(getattr(history, "messages", []) or []) or 0
+        for label, history in (("Coordinator", coordinator_history), ("Manager", manager_history))
     }
     runtime.tasks = _collect_task_stats(getattr(system, "_task_manager", None))
     if system is not None:
@@ -592,17 +592,10 @@ def _collect_task_stats(task_manager: Any) -> TaskPanelStats:
     tasks = getattr(task_manager, "tasks", {}) or {}
     stats = TaskPanelStats(total=len(tasks))
     for task in tasks.values():
-        value = getattr(
-            getattr(task, "status", None), "value", getattr(task, "status", "")
-        )
-        if value == "completed":
-            stats.completed += 1
-        elif value == "running":
-            stats.running += 1
-        elif value == "failed":
-            stats.failed += 1
-        else:
-            stats.pending += 1
+        status = getattr(task, "status", "")
+        value = getattr(status, "value", status)
+        name = value if value in ("completed", "running", "failed") else "pending"
+        setattr(stats, name, getattr(stats, name) + 1)
     return stats
 
 

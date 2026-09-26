@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from pydantic_ai import BinaryContent
 
 from redlotus.api.base import BotBase, main
+from redlotus.api.media import mime_magic
 from redlotus.runtime import logging as logger
 from redlotus.sessions.control import UserMessage
 
@@ -29,8 +30,13 @@ class WeChatAgentBot(BotBase):
     async def _download_attachments(self, bot: WeChatBot, msg) -> list:
         """Download every SDK media item; one failed item rejects the entire request."""
         attachments = []
-        for kind in self._MIME_MAP:
-            for index, item in enumerate(getattr(msg, kind + "s")):
+        remaining = {kind: list(getattr(msg, kind + "s")) for kind in self._MIME_MAP}
+        kinds = {2: "image", 3: "voice", 4: "file", 5: "video"}
+        order = [kinds[item["type"]] for item in (msg.raw or {}).get("item_list", []) if item.get("type") in kinds]
+        order.extend(kind for kind, items in remaining.items() for _ in range(max(0, len(items) - order.count(kind))))
+        for index, kind in enumerate(order):
+            if remaining[kind]:
+                item = remaining[kind].pop(0)
                 identity = getattr(item, "file_name", None) or f"{kind}[{index + 1}]"
                 single = replace(msg, **{name + "s": [item] if name == kind else [] for name in self._MIME_MAP})
                 try:
@@ -39,23 +45,24 @@ class WeChatAgentBot(BotBase):
                         raise ValueError("下载结果为空")
                 except Exception as exc:
                     raise ValueError(f"附件 {identity} 准备失败：{exc}；请重新发送完整消息。") from exc
+                identity = media.file_name or identity
                 attachments.append(BinaryContent(
                     data=media.data,
-                    media_type=self.guess_download_mime(filename=identity, media_type_key=media.type),
+                    media_type=mime_magic(media.data) or self.guess_download_mime(filename=identity, media_type_key=media.type),
                     identifier=identity,
                 ))
         return attachments
 
-    async def _handle_message(self, bot: WeChatBot, msg) -> None:
+    def adapt_message(self, bot: WeChatBot, msg):
         if not msg.user_id:
             return
         session_id = f"{self.session_prefix}{msg.user_id}"
         text = self.clean_text(msg.text or "")
-        await self.dispatch_user_message(
+        return (
             session_id,
             UserMessage(text=text, original_text=text),
             partial(bot.reply, msg),
-            prepare=partial(self._download_attachments, bot, msg) if any(getattr(msg, kind + "s") for kind in self._MIME_MAP) else None,
+            partial(self._download_attachments, bot, msg) if any(getattr(msg, kind + "s") for kind in self._MIME_MAP) else None,
         )
 
     async def _async_main(self) -> None:

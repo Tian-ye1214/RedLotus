@@ -226,7 +226,7 @@ class RedLotusTui(App[None]):
             log = self.query_one("#output", RichLog)
             log.write(
                 Text(
-                    f"已恢复会话：{snapshot.title} · {snapshot.completed_turns} 回合",
+                    f"已恢复会话：{snapshot.title} · {snapshot.turn_count_label}",
                     style="bold green",
                 ),
                 scroll_end=True,

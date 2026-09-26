@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from redlotus.api.base import BotBase, main
-from redlotus.api.qq_media_helpers import extract_media, iter_segments
+from redlotus.api.media import extract_media, iter_segments
 from redlotus.runtime.config import user_config_dir
 from redlotus.sessions.control import UserMessage
 
@@ -17,33 +17,6 @@ if TYPE_CHECKING:
 
 
 class QQBot(BotBase):
-    _FILE_ALLOW_EXT = frozenset(
-        {
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".gif",
-            ".webp",
-            ".bmp",
-            ".mp4",
-            ".mov",
-            ".mkv",
-            ".webm",
-            ".pdf",
-            ".txt",
-            ".md",
-            ".docx",
-            ".doc",
-            ".xlsx",
-            ".xls",
-            ".pptx",
-            ".ppt",
-            ".csv",
-            ".json",
-            ".html",
-        }
-    )
-
     def __init__(self):
         super().__init__()
         # ncatbot freezes its configuration on import. Validate the user's file first.
@@ -63,7 +36,7 @@ class QQBot(BotBase):
     session_prefix = "qq_"
 
     def clean_text(self, raw: str) -> str:
-        return re.sub(r"\[CQ:[^\]]+\]", "", raw or "").strip()
+        return re.sub(r"\[CQ:[^\]]+\]", "", raw or "")
 
     def _is_at_me(self, event: BaseMessageEvent) -> bool:
         from ncatbot.core import GroupMessageEvent
@@ -80,21 +53,21 @@ class QQBot(BotBase):
         finally:
             await self.release_all_resources_async()
 
-    async def _handle_message(self, event: BaseMessageEvent) -> None:
-        raw_text = (event.raw_message or "").strip()
+    def adapt_message(self, event: BaseMessageEvent):
+        raw_text = (event.raw_message or "")
         if not self._is_at_me(event):
             return
         is_group = event.is_group_msg()
         session_id = f"group_{event.group_id}" if is_group else f"private_{event.user_id}"
         user_text = self.clean_text(raw_text)
-        await self.dispatch_user_message(
+        return (
             session_id,
             UserMessage(
                 text=user_text,
                 original_text=user_text,
             ),
             partial(event.reply, at=False) if is_group else event.reply,
-            prepare=partial(extract_media, self._bot_client.api, event, self._FILE_ALLOW_EXT) if (
+            partial(extract_media, self._bot_client.api, event) if (
                 any(kind in ("image", "video", "file") for kind, _ in iter_segments(event))
                 or re.search(r"\[CQ:(?:image|video|file),", raw_text)
             ) else None,

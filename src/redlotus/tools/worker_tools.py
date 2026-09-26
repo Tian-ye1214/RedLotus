@@ -122,10 +122,6 @@ class WorkerOrchestrator:
         self._user_inputs = user_inputs
         self.factory = factory
         self.session_file = None
-        self._session_key: str | None = None
-
-    def set_session_key(self, session_key: str | None) -> None:
-        self._session_key = session_key
 
     async def _execute(
         self,
@@ -138,11 +134,11 @@ class WorkerOrchestrator:
         planning_tools: tuple = (),
         include_browser: bool = False,
     ):
-        if self._session_key is None:
+        if self.session_file is None:
             raise RuntimeError("Worker requires a bound session")
         owner_loop = asyncio.get_running_loop()
         persist = bind_to_loop(self._persist, owner_loop)
-        session_key, session_file = self._session_key, self.session_file
+        session_key, session_file = self.session_file.session_id, self.session_file
         source_toolkit, memory_service = self._toolkit, self.memory
         target = ModelTarget.for_role(role)
         # Snapshot before starting the thread: no mutable messages or clients cross loops.
@@ -157,8 +153,6 @@ class WorkerOrchestrator:
 
         async def execute_child():
             toolkit = source_toolkit.clone_for_worker(owner_loop)
-            local_history = ChatHistory()
-            local_history.set_messages(messages)
             try:
                 if role == "worker":
                     toolsets, capabilities = create_worker_toolsets(
@@ -187,11 +181,10 @@ class WorkerOrchestrator:
                         cancelling=bool(asyncio.current_task().cancelling()),
                     )
                     if (
-                        session_file is not self.session_file or session_key != self._session_key
+                        session_file is not self.session_file
                         or asyncio.current_task().cancelling()
                     ):
                         raise asyncio.CancelledError("Child checkpoint belongs to an ended invocation.")
-                    local_history.set_messages(candidate)
 
                 agent = self.factory.create_agent(
                     target,
@@ -209,7 +202,7 @@ class WorkerOrchestrator:
                 result = await self.factory.runner.run(
                     agent=agent,
                     prompt=with_runtime_context(copy.deepcopy(prompt)),
-                    message_history=local_history.messages,
+                    message_history=messages,
                     usage_limits=get_agent_usage_limits(),
                     on_node=save_node,
                 )
@@ -217,15 +210,12 @@ class WorkerOrchestrator:
             finally:
                 await toolkit.close()
 
-        async def run_child():
-            return await self.factory.run(spec, execute_child)
-
         try:
             agent_id = await self._registry.ensure_agent(
                 session_key, role, task_id
             )
             report, returned_messages = await self._registry.run(
-                run_child, agent_id=agent_id, turn_id=turn_id
+                lambda: self.factory.run(spec, execute_child), agent_id=agent_id, turn_id=turn_id
             )
             history.set_messages(returned_messages)
             return report
