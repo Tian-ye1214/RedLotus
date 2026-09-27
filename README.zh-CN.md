@@ -249,7 +249,7 @@ QQ 接入需要先运行 [NapCat](https://github.com/NapNeko/NapCatQQ)，并配�
 git clone https://github.com/Tian-ye1214/RedLotus.git
 cd RedLotus
 
-pip install -e ".[dev]"
+pip install -e ".[dev,bots]"
 python main.py
 pytest -q
 ```

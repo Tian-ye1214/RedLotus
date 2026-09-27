@@ -248,7 +248,7 @@ Channels support text, images, files, attachment answers to current questions, f
 git clone https://github.com/Tian-ye1214/RedLotus.git
 cd RedLotus
 
-pip install -e ".[dev]"
+pip install -e ".[dev,bots]"
 python main.py
 pytest -q
 ```
