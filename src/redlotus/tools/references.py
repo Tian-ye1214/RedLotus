@@ -11,6 +11,8 @@ import mimetypes
 import os
 import shutil
 import tempfile
+from contextlib import closing
+from functools import cached_property
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -19,7 +21,6 @@ from filelock import AsyncFileLock
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import BinaryContent
 
-from redlotus.runtime.config import get_env, settings
 from redlotus.runtime.network import ModelInputPolicy
 from redlotus.runtime.resources import (
     WorkspaceContext,
@@ -112,7 +113,6 @@ class OfficeConverter:
     @staticmethod
     def executable() -> str:
         candidates = [
-            get_env("LIBREOFFICE_PATH", warn=False),
             shutil.which("soffice.com"),
             shutil.which("soffice"),
             str(
@@ -125,15 +125,15 @@ class OfficeConverter:
             if value and Path(value).is_file():
                 return value
         raise ValueError(
-            "DOC/PPT 转换需要 LibreOffice；请安装或设置 LIBREOFFICE_PATH。"
+            "DOC/PPT 转换需要 LibreOffice。"
         )
 
     async def convert(self, source: Path, target_format: str, directory: Path) -> Path:
+        scratch = runtime_dir() / "office"
         executable = self.executable()
         directory.mkdir(parents=True, exist_ok=True)
         # LibreOffice still uses Windows APIs with limited path lengths; keep its private
         # profile and working copies short, then publish the result to the reference store.
-        scratch = runtime_dir() / "office"
         scratch.mkdir(parents=True, exist_ok=True)
         profile_root = Path(tempfile.mkdtemp(prefix="rl-office-", dir=scratch))
         try:
@@ -179,8 +179,14 @@ class OfficeConverter:
 class DocumentReader:
     """Read format structure once; never execute referenced content."""
 
-    async def read(self, source: Path, directory: Path) -> list[ReferencePart]:
-        extension = source.suffix.lower()
+    async def read(self, source: Path, directory: Path, *, media_type: str = "") -> list[ReferencePart]:
+        extension = source.suffix.lower() or {
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+            "application/vnd.ms-excel": ".xls", "application/msword": ".doc",
+            "application/vnd.ms-powerpoint": ".ppt",
+        }.get(media_type, mimetypes.guess_extension(media_type))
         if extension in (".doc", ".ppt", ".xls"):
             modern = {".doc": "docx", ".ppt": "pptx", ".xls": "xlsx"}[extension]
             source = await OfficeConverter().convert(
@@ -221,7 +227,7 @@ class DocumentReader:
     def csv(self, source: Path, directory: Path) -> list[ReferencePart]:
         text = self.decode(source.read_bytes())
         try:
-            dialect = csv.Sniffer().sniff(text[:settings()["input_limits"]["csv_sniff_chars"]], delimiters=",;\t|")
+            dialect = csv.Sniffer().sniff(text, delimiters=",;\t|")
         except csv.Error:
             dialect = csv.excel
         rows = list(csv.reader(io.StringIO(text), dialect))
@@ -230,11 +236,13 @@ class DocumentReader:
     def html(self, source: Path, directory: Path) -> list[ReferencePart]:
         from lxml import etree, html
 
-        root = html.fromstring(
+        root = html.document_fromstring(
             self.decode(source.read_bytes()).encode("utf-8"),
             parser=html.HTMLParser(encoding="utf-8"),
         )
         etree.strip_elements(root, "script", "style", with_tail=False)
+        for link in root.xpath(".//a[@href]"):
+            link.tail = f" ({link.get('href')})" + (link.tail or "")
         tables = []
         for number, table in enumerate(root.xpath("self::table | .//table"), 1):
             rows = [
@@ -243,8 +251,6 @@ class DocumentReader:
             ]
             tables.append(ReferencePart.from_text(rows, locator=f"HTML table {number}"))
             table.drop_tree()
-        for link in root.xpath(".//a[@href]"):
-            link.tail = f" ({link.get('href')})" + (link.tail or "")
         for element in root.iter():
             if element.tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
                 element.text = "#" * int(element.tag[1]) + " " + (element.text or "")
@@ -353,38 +359,38 @@ class DocumentReader:
         from openpyxl import load_workbook
         from openpyxl.utils import get_column_letter
 
-        formulas = load_workbook(source, read_only=True, data_only=False)
-        cached = load_workbook(source, read_only=True, data_only=True)
-        parts = []
-        try:
-            for sheet in formulas:
-                rows = []
-                for row_number, (source_row, cached_row) in enumerate(
-                    zip(sheet.iter_rows(), cached[sheet.title].iter_rows()), 1
-                ):
-                    row = []
-                    for column, (cell, value) in enumerate(
-                        zip(source_row, cached_row), 1
+        with source.open("rb") as formulas_source, source.open("rb") as cached_source:
+            with (
+                closing(load_workbook(formulas_source, read_only=True, data_only=False)) as formulas,
+                closing(load_workbook(cached_source, read_only=True, data_only=True)) as cached,
+            ):
+                parts = []
+                for sheet in formulas:
+                    rows = []
+                    for row_number, (source_row, cached_row) in enumerate(
+                        zip(sheet.iter_rows(), cached[sheet.title].iter_rows()), 1
                     ):
-                        item = dict(
-                            cell=f"{get_column_letter(column)}{row_number}",
-                            value=value.value,
-                        )
-                        if cell.data_type == "f":
-                            item["formula"] = cell.value
-                        row.append(item)
-                    rows.append(row)
-                parts.append(
-                    ReferencePart.from_text(rows, locator=f"Sheet {sheet.title}")
-                )
-        finally:
-            formulas.close()
-            cached.close()
-        return parts
+                        row = []
+                        for column, (cell, value) in enumerate(
+                            zip(source_row, cached_row), 1
+                        ):
+                            item = dict(
+                                cell=f"{get_column_letter(column)}{row_number}",
+                                value=value.value,
+                            )
+                            if cell.data_type == "f":
+                                item["formula"] = cell.value
+                            row.append(item)
+                        rows.append(row)
+                    parts.append(
+                        ReferencePart.from_text(rows, locator=f"Sheet {sheet.title}")
+                    )
+                return parts
 
     def slides(self, source: Path, directory: Path) -> list[ReferencePart]:
         from pptx import Presentation
         from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from pptx.shapes.placeholder import PlaceholderPicture
 
         parts = []
         for number, slide in enumerate(Presentation(source).slides, 1):
@@ -416,7 +422,7 @@ class DocumentReader:
                         parts.append(
                             ReferencePart.from_text(values, locator=f"{locator}, chart")
                         )
-                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE or isinstance(shape, PlaceholderPicture):
                         target = (
                             directory
                             / f"slide-{number}-image-{shape.shape_id}.{shape.image.ext}"
@@ -487,13 +493,18 @@ def reference_message_data(value, *, restore=False, workspace=None):
 
 
 class ReferenceStore:
-    PARSER_VERSION = 4
+    PARSER_VERSION = 7
 
     def __init__(self, workspace: WorkspaceContext, root: Path | None = None):
         self.workspace = workspace
-        self.root = root or references_dir(workspace)
+        if root is not None:
+            self.root = root
 
-    async def prepare_message(self, message):
+    @cached_property
+    def root(self):
+        return references_dir(self.workspace)
+
+    async def prepare_message(self, message, *, role="coordinator"):
         import base64
         import mimetypes
 
@@ -501,8 +512,8 @@ class ReferenceStore:
 
         from redlotus.runtime.network import ModelInputPolicy
 
-        policy = ModelInputPolicy.for_role("coordinator")
-        references = list(message.references)
+        policy = ModelInputPolicy.for_role(role)
+        references = list(await asyncio.gather(*(self.parse(reference) for reference in message.references)))
         remote_images = {}
         for index, item in enumerate(message.attachments):
             if isinstance(item, BinaryContent):
@@ -519,7 +530,7 @@ class ReferenceStore:
                         base64.b64decode(encoded),
                         name=name,
                         source=f"attachment:{index}",
-                        policy=policy,
+                        policy=policy, media_type=mime,
                     )
                 else:
                     ref = await self.import_url(item.url, policy=policy)
@@ -537,15 +548,17 @@ class ReferenceStore:
     async def import_binary(self, item, *, source, policy):
         """Reuse registered native media, or capture an unregistered attachment once."""
         try:
-            registered = self.load(item.identifier[:32])
-        except (ValueError, FileNotFoundError):
-            registered = None
-        if registered is not None:
-            return await self.parse(registered)
-        name = item.identifier or "media"
-        if not Path(name).suffix:
-            name += mimetypes.guess_extension(item.media_type) or ".bin"
-        return await self.import_bytes(item.data, name=name, source=source, policy=policy)
+            try:
+                registered = self.load(item.identifier[:32])
+            except (ValueError, FileNotFoundError):
+                registered = None
+            if registered is not None:
+                policy.check([registered.byte_size])
+                return await self.parse(registered)
+            name = item.identifier or "media" + (mimetypes.guess_extension(item.media_type) or ".bin")
+            return await self.import_bytes(item.data, name=name, source=source, policy=policy, media_type=item.media_type)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{item.identifier or 'media'}: {exc}") from exc
 
     async def capture_file(
         self, path: Path, *, policy: ModelInputPolicy
@@ -572,10 +585,9 @@ class ReferenceStore:
 
         if urlsplit(url).scheme not in ("https", "http"):
             raise ValueError("Remote references require HTTP(S)")
-        redirects = settings()["input_limits"]["max_redirects"]
         client = get_client(
-            f"reference_download:{policy.reference_download_timeout_seconds}:{redirects}",
-            lambda: httpx.AsyncClient(timeout=policy.reference_download_timeout_seconds, max_redirects=redirects, follow_redirects=True),
+            "reference_download",
+            lambda: httpx.AsyncClient(follow_redirects=True),
         )
         async with client.stream("GET", url) as response:
             response.raise_for_status()
@@ -588,30 +600,25 @@ class ReferenceStore:
         if not Path(name).suffix:
             name += mimetypes.guess_extension(mime) or ".bin"
         return await self.import_bytes(
-            bytes(data), name=name, source=url, policy=policy
+            bytes(data), name=name, source=url, policy=policy, media_type=mime
         )
 
     async def import_bytes(
-        self, data: bytes, *, name: str, source: str, policy: ModelInputPolicy
+        self, data: bytes, *, name: str, source: str, policy: ModelInputPolicy, media_type: str = ""
     ) -> ReferenceFile:
         reference = await self.capture_bytes(
-            data, name=name, source=source, policy=policy
+            data, name=name, source=source, policy=policy, media_type=media_type
         )
         return await self.parse(reference)
 
     async def capture_bytes(
-        self, data: bytes, *, name: str, source: str, policy: ModelInputPolicy
+        self, data: bytes, *, name: str, source: str, policy: ModelInputPolicy, media_type: str = ""
     ) -> ReferenceFile:
         policy.check([len(data)])
-        media_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
-        if media_type.startswith("image/"):
-            from PIL import Image
-
-            with Image.open(io.BytesIO(data)) as picture:
-                media_type = Image.MIME[picture.format]
+        media_type = media_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
         digest = hashlib.sha256(data).hexdigest()
         identity = hashlib.sha256(
-            f"{self.workspace.project_id}\0{os.path.normcase(source)}\0{digest}".encode()
+            json.dumps([self.workspace.project_id, source, name, media_type, digest], ensure_ascii=False).encode()
         ).hexdigest()[:32]
         directory = self.root / "blobs" / digest[:32]
         directory.mkdir(parents=True, exist_ok=True)
@@ -621,7 +628,7 @@ class ReferenceStore:
                 await finish_io(
                     asyncio.to_thread(atomic_write, snapshot, data)
                 )
-        return ReferenceFile(
+        reference = ReferenceFile(
             id=identity,
             project_id=self.workspace.project_id,
             name=name,
@@ -631,49 +638,58 @@ class ReferenceStore:
             sha256=digest,
             snapshot=snapshot,
         )
+        manifest = self.root / 'manifests' / f'{identity}.json'
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        async with AsyncFileLock(str(manifest) + '.lock', run_in_executor=False):
+            if not manifest.exists():
+                await finish_io(asyncio.to_thread(atomic_write_json, manifest, reference.manifest()))
+        return reference
 
     async def parse(self, reference: ReferenceFile) -> ReferenceFile:
-        manifest = self.root / "manifests" / f"{reference.id}.json"
-        manifest.parent.mkdir(parents=True, exist_ok=True)
-        async with AsyncFileLock(str(manifest) + ".lock", run_in_executor=False):
-            if manifest.is_file():
-                cached = ReferenceFile.model_validate_json(
-                    manifest.read_text(encoding="utf-8")
-                )
-                if cached.parser_version == self.PARSER_VERSION:
-                    return cached
-            snapshot = reference.snapshot
-            directory = snapshot.parent
-            parts_path = directory / (
-                f"parts-v{self.PARSER_VERSION}" + snapshot.suffix + ".json"
-            )
-            async with AsyncFileLock(directory / ".build.lock", run_in_executor=False):
-                if parts_path.is_file():
-                    parts = [
-                        ReferencePart.model_validate(item)
-                        for item in json.loads(parts_path.read_text(encoding="utf-8"))
-                    ]
-                else:
-                    if reference.media_type.startswith(("image/", "video/", "audio/")):
-                        parts = await finish_io(
-                            asyncio.to_thread(self._media_parts, reference)
-                        )
-                    else:
-                        parts = await DocumentReader().read(snapshot, directory)
-                    await finish_io(
-                        asyncio.to_thread(
-                            atomic_write_json,
-                            parts_path,
-                            [part.model_dump(mode="json") for part in parts],
-                        )
+        try:
+            manifest = self.root / "manifests" / f"{reference.id}.json"
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            async with AsyncFileLock(str(manifest) + ".lock", run_in_executor=False):
+                if manifest.is_file():
+                    cached = ReferenceFile.model_validate_json(
+                        manifest.read_text(encoding="utf-8")
                     )
-            prepared = reference.model_copy(
-                update={"parts": parts, "parser_version": self.PARSER_VERSION}
-            )
-            await finish_io(
-                asyncio.to_thread(atomic_write_json, manifest, prepared.manifest())
-            )
-            return prepared
+                    if cached.parser_version == self.PARSER_VERSION:
+                        return cached
+                snapshot = reference.snapshot
+                directory = snapshot.parent
+                parts_path = directory / (
+                    f"parts-v{self.PARSER_VERSION}-{hashlib.sha256(reference.media_type.encode()).hexdigest()[:16]}" + snapshot.suffix + ".json"
+                )
+                async with AsyncFileLock(directory / ".build.lock", run_in_executor=False):
+                    if parts_path.is_file():
+                        parts = [
+                            ReferencePart.model_validate(item)
+                            for item in json.loads(parts_path.read_text(encoding="utf-8"))
+                        ]
+                    else:
+                        if reference.media_type.startswith(("image/", "video/", "audio/")):
+                            parts = await finish_io(
+                                asyncio.to_thread(self._media_parts, reference)
+                            )
+                        else:
+                            parts = await DocumentReader().read(snapshot, directory, media_type=reference.media_type)
+                        await finish_io(
+                            asyncio.to_thread(
+                                atomic_write_json,
+                                parts_path,
+                                [part.model_dump(mode="json") for part in parts],
+                            )
+                        )
+                prepared = reference.model_copy(
+                    update={"parts": parts, "parser_version": self.PARSER_VERSION}
+                )
+                await finish_io(
+                    asyncio.to_thread(atomic_write_json, manifest, prepared.manifest())
+                )
+                return prepared
+        except Exception as exc:
+            raise ValueError(f"引用文件 {reference.name} 解析失败：{exc}") from exc
 
     @staticmethod
     def _media_parts(reference: ReferenceFile) -> list[ReferencePart]:

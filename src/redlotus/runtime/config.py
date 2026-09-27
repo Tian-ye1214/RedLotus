@@ -5,37 +5,24 @@ import json
 import os
 import sys
 from contextlib import ExitStack, contextmanager
+from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
-from functools import lru_cache
+from functools import partial
 from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from dotenv.parser import parse_stream
 
+
 if TYPE_CHECKING:
     from pydantic_ai.usage import UsageLimits as _UsageLimits
-
-_CONFIG: tuple[tuple, dict[str, Any]] | None = None
-
-@dataclass(frozen=True)
-class AgentRunPolicy:
-    max_concurrent_threads_per_session: int
-    max_command_timeout_seconds: int
-
-    @classmethod
-    def from_config(cls, cfg: dict[str, Any]) -> "AgentRunPolicy":
-        return cls(**{key: cfg["agent_run_policy"][key] for key in cls.__dataclass_fields__})
-
-    def clamp_command_timeout(self, timeout: float | None) -> float:
-        return self.max_command_timeout_seconds if timeout is None else max(1, min(timeout, self.max_command_timeout_seconds))
 
 def _frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 def user_config_dir() -> Path:
-    """用户配置根：config.json / .env / bot config.yaml。"""
+    """用户配置根：config.json / bot config.yaml。"""
     return Path(
         os.environ.get("REDLOTUS_CONFIG_DIR")
         or Path.home() / ".redlotus"
@@ -75,22 +62,99 @@ class ConfigError(ValueError):
         super().__init__(message)
         self.path, self.missing = path, missing
 
-class ConfigValues(dict):
-    """保持字典接口，同时为必填项和凭据保留路径及来源。"""
+def _empty_value(value, kind):
+    kinds = kind if isinstance(kind, tuple) else (kind,)
+    return kind is not None and (
+        value is None and type(None) not in kinds or
+        isinstance(value, str) and not value.strip() and (str not in kinds or type(None) not in kinds))
 
-    def __init__(self, values=(), *, path=(), origins=None):
-        self.path, self.origins = path, origins if origins is not None else {}
-        super().__init__()
-        for key, value in dict(values).items():
-            self[key] = (
-                ConfigValues(value, path=(*path, key), origins=self.origins)
-                if isinstance(value, dict) else value
-            )
+class ConfigValues(dict):
+    """按实际访问的字段查找三层来源；字典枚举才请求该节点的全部字段。"""
+
+    def __init__(self, values=(), *, path=(), sources=()):
+        self.path = path
+        self.sources, self.deleted = sources, set()
+        super().__init__(values)
+
+    def _nodes(self):
+        for rank, node in enumerate(self.sources):
+            if callable(node):
+                node = self.sources[rank] = node()
+            for key in self.path:
+                if not isinstance(node, dict):
+                    break
+                node = node.get(key)
+            if isinstance(node, dict):
+                yield rank, node
+            elif node is not None and not (isinstance(node, str) and not node.strip()):
+                raise ConfigError(f"配置 {'.'.join(self.path)} 必须是对象；检查来源: {config_source_summary()}", path=self.path)
+
+    def __contains__(self, key):
+        return self._resolve(key, None)
+
+    def _resolve(self, key, kind):
+        if dict.__contains__(self, key) and not _empty_value(dict.__getitem__(self, key), kind):
+            return True
+        if key in self.deleted:
+            return False
+        field = (*self.path, key)
+        declared_role = False
+        for _, node in self._nodes():
+            if not (node._resolve(key, kind) if isinstance(node, ConfigValues) else key in node):
+                continue
+            value = node[key]
+            if _empty_value(value, kind):
+                continue
+            if (_connection_field(key) or _model_selection_field(field)) and (
+                value is None or isinstance(value, str) and not value.strip()
+            ):
+                declared_role |= field[0] == "models" and len(field) == 2
+                continue
+            self[key] = (ConfigValues(path=field, sources=self.sources)
+                         if isinstance(value, dict) else deepcopy(value))
+            return True
+        if declared_role:
+            self[key] = ConfigValues(path=field, sources=self.sources)
+            return True
+        return False
 
     def __getitem__(self, key):
         if key not in self:
-            raise ConfigError(f"缺少配置 {'.'.join((*self.path, key))}；检查来源: {config_source_summary()}")
-        return super().__getitem__(key)
+            raise KeyError(".".join((*self.path, key)))
+        return dict.__getitem__(self, key)
+
+    def get(self, key, default=None):
+        return self[key] if key in self else default
+
+    def __iter__(self):
+        for _, node in self._nodes():
+            for key in node:
+                self.__contains__(key)
+        return dict.__iter__(self)
+
+    def __len__(self):
+        return sum(1 for _ in self)
+
+    keys, items, values = Mapping.keys, Mapping.items, Mapping.values
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def pop(self, key, *default):
+        self.__contains__(key)
+        self.deleted.add(key)
+        return dict.pop(self, key, *default)
+
+    def __delitem__(self, key):
+        self.pop(key)
+
+    def __deepcopy__(self, memo):
+        values = {key: deepcopy(value, memo) for key, value in (self.items() if self.path else dict.items(self))}
+        result = ConfigValues(values, path=self.path, sources=deepcopy(self.sources, memo))
+        result.deleted = self.deleted.copy()
+        return result
 
 def _connection_field(key: str) -> bool:
     lowered = key.lower()
@@ -99,107 +163,33 @@ def _connection_field(key: str) -> bool:
 def _model_selection_field(path: tuple[str, ...]) -> bool:
     return bool(path) and (
         path[0] == "RAG_models" or
-        path[0] in {"models", "model_presets"} and path[-1] == "name"
+        path[0] == "models" and len(path) == 2 or
+        path[0] == "models" and path[-1] == "name"
     )
 
 
-@lru_cache(maxsize=1)
-def config_schema():
-    """Public field contract shared by validation and setup; contains no configuration values."""
-    from redlotus.runtime.resources import resource_root
-
-    return json.loads((resource_root() / "config.schema.json").read_text(encoding="utf-8"))
-
-
-def _resolve_schema(node):
-    while "$ref" in node:
-        node = {**config_schema()["$defs"][node["$ref"].rsplit("/", 1)[-1]],
-                **{key: value for key, value in node.items() if key != "$ref"}}
-    return node
-
-
-def config_field(path):
-    node = config_schema()
-    for key in path:
-        node = _resolve_schema(node)
-        node = node.get("properties", {}).get(key, node.get("additionalProperties", {}))
-    return _resolve_schema(node)
-
-
-def config_value(values, path, default=None):
-    for key in path:
-        if not isinstance(values, dict) or key not in values:
-            return default
+def config_value(values, path, default=None, *, purpose=None, kind=None, choices=None):
+    full_path = (*getattr(values, "path", ()), *path)
+    for index, key in enumerate(path):
+        if not isinstance(values, dict) or not (
+            values._resolve(key, kind if index == len(path) - 1 else dict)
+            if isinstance(values, ConfigValues) else key in values and not _empty_value(
+                values[key], kind if index == len(path) - 1 else dict)
+        ):
+            if purpose is None:
+                return default
+            if not (_connection_field(path[-1]) or _model_selection_field(full_path) or full_path == ("models",)):
+                raise KeyError(".".join(full_path))
+            kinds = kind if isinstance(kind, tuple) else (kind,)
+            raise ConfigError(f"缺少配置 {'.'.join(full_path)}；作用：{purpose}；"
+                              f"类型：{' / '.join(t.__name__ for t in kinds)}；"
+                              f"可选值：{choices if choices is not None else '无枚举限制'}；"
+                              f"检查来源: {config_source_summary()}", path=full_path, missing=True)
         values = values[key]
+    if kind is not None and (not isinstance(values, kind) or isinstance(values, bool) and kind is not bool
+                            and (not isinstance(kind, tuple) or bool not in kind)):
+        raise ConfigError(f"配置 {'.'.join(full_path)} 类型错误；作用：{purpose}；检查来源: {config_source_summary()}", path=full_path)
     return values
-
-
-def missing_startup_fields(values, required=()):
-    """Resolve presets before finding required fields; new configured roles need no Python list."""
-    schema = config_schema()
-    roles = dict.fromkeys([*schema["properties"]["models"]["required"], *values.get("models", {})])
-    if memory_role := config_value(values, ("memory_perception", "model_role")):
-        roles[memory_role] = None
-    effective, missing = deepcopy(values), []
-    effective["models"] = {}
-    for role in roles:
-        try:
-            name, params = get_model_and_params(role, cfg=values)
-        except ConfigError as exc:
-            if not exc.missing:
-                raise
-            missing.append(exc.path)
-        else:
-            effective["models"][role] = {"name": name, **params}
-            if "auto_compress_ratio" in params:
-                missing.extend(("models", role, key) for key in ("compress_head_turns", "compress_tail_turns") if key not in params)
-    if missing:
-        return list(dict.fromkeys(missing))
-
-    def collect(node, current, path=()):
-        node = _resolve_schema(node)
-        for key in node.get("required", []):
-            child = _resolve_schema(node["properties"][key])
-            value = current.get(key) if isinstance(current, dict) else None
-            field_path = (*path, key)
-            if child.get("required"):
-                yield from collect(child, value, field_path)
-            elif key not in (current or {}) or value == "" and not child.get("allow_empty"):
-                yield field_path
-
-    return list(collect({**schema, "required": [*schema["required"], *required]}, effective))
-
-def _validate_config(value, source: Path, path=()) -> None:
-    """Validate supplied fields at each layer; setup checks the merged required fields."""
-    field = config_field(path)
-    kinds = field.get("type", [])
-    kinds = [kinds] if isinstance(kinds, str) else kinds
-    if not kinds and path and (_connection_field(path[-1]) or path[-1] == "api_key_env"):
-        kinds = ["string", "null"]
-    types = {"object": dict, "array": list, "string": str, "integer": int,
-             "number": (int, float), "boolean": bool, "null": type(None)}
-    valid = not kinds or any(isinstance(value, types[kind]) and (not isinstance(value, bool) or kind == "boolean") for kind in kinds)
-    if isinstance(value, str) and "string_values" in field:
-        valid = value.strip().lower() in field["string_values"]
-        if not valid and "integer" in kinds:
-            try:
-                value = int(value)
-                valid = True
-            except ValueError:
-                pass
-    if valid and isinstance(value, (int, float)) and not isinstance(value, bool):
-        valid = all(test for key, test in (
-            ("minimum", value >= field.get("minimum", value)),
-            ("exclusiveMinimum", value > field.get("exclusiveMinimum", value - 1)),
-            ("maximum", value <= field.get("maximum", value)),
-        ) if key in field)
-    if not valid:
-        raise ConfigError(f"配置 {source}: 字段 {'.'.join(path) or '<root>'} 类型或范围错误；{field.get('description', '')}", path=path)
-    if isinstance(value, dict):
-        for key, child in value.items():
-            _validate_config(child, source, (*path, key))
-    if isinstance(value, list) and field.get("items", {}).get("type") == "string" and not all(isinstance(item, str) for item in value):
-        raise ConfigError(f"配置 {source}: 字段 {'.'.join(path)} 必须是字符串列表", path=path)
 
 
 def _parse_config(path: Path, raw: bytes | None, *, dotenv=False) -> dict:
@@ -229,35 +219,21 @@ def _parse_config(path: Path, raw: bytes | None, *, dotenv=False) -> dict:
                 if parts[-1] in node or not all(parts):
                     raise ConfigError(f"配置 {path}: 字段 {binding.key} 重复或结构冲突")
                 node[parts[-1]] = value
-        _validate_config(result, path)
+        if not isinstance(result, dict):
+            raise ConfigError(f"配置 {path}: JSON 根节点必须是对象")
         return result
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ConfigError(f"配置 {path}: 无效编码或 JSON，无法读取") from exc
 
-def _merge_config(target, incoming, origins, source, path=()):
-    """较高层逐字段覆盖；空白连接配置才继续使用低层值。"""
-    for key, value in incoming.items():
-        field = (*path, key)
-        if _connection_field(key) and (value is None or isinstance(value, str) and not value.strip()):
-            continue
-        if _model_selection_field(field) and key in target and (
-            value is None or isinstance(value, str) and not value.strip()
-        ):
-            continue
-        if isinstance(value, dict):
-            if not isinstance(target.get(key), dict):
-                target[key] = {}
-            _merge_config(target[key], value, origins, source, field)
-        else:
-            target[key] = deepcopy(value)
-            origins[field] = source
+def _read_config(path, *, dotenv):
+    return _parse_config(path, path.read_bytes() if path.is_file() else None, dotenv=dotenv)
 
 @contextmanager
 def _config_locks(timeout):
     """Acquire all configuration writer locks in a stable order."""
     from redlotus.runtime.resources import file_lock
 
-    paths = set(path for path in config_sources() if path.exists())
+    paths = set(path for path in (config_sources()[0], config_sources()[-1]) if path.exists())
     paths.add(config_file())
     with ExitStack() as locks:
         for path in sorted(paths):
@@ -265,61 +241,27 @@ def _config_locks(timeout):
         yield
 
 def settings() -> dict[str, Any]:
-    """从各配置来源的一次完整字节快照解析，并返回独立副本。"""
-    global _CONFIG
-    version = tuple((path, path.read_bytes() if path.is_file() else None) for path in config_sources())
-    cached = _CONFIG
-    if cached is None or version != cached[0]:
-        value, origins = {}, {}
-        for index in reversed(range(len(version))):
-            path, raw = version[index]
-            _merge_config(value, _parse_config(path, raw, dotenv=index == 1), origins, index)
-        cached = version, ConfigValues(value, origins=origins)
-        _CONFIG = cached
-    return deepcopy(cached[1])
+    """逐参数先项目 JSON，再项目 .env，最后全局 JSON；不读取未用的低层。"""
+    sources = [partial(_read_config, path, dotenv=index == 1)
+               for index, path in enumerate(config_sources())]
+    sources[0] = sources[0]()
+    return ConfigValues(sources=sources)
 
-def load_config() -> dict[str, Any]:
-    global _CONFIG
-    _CONFIG = None
-    return settings()
-
-reload_config = load_config
-
-def credential_value(gateway_name: str, cfg: dict) -> str:
-    """命名网关的直接值和命名引用按各自来源排序，同层优先直接值。"""
-    gateway = cfg["gateways"][gateway_name]
-    candidates = [(gateway.get("api_key"), ("gateways", gateway_name, "api_key"))]
-    if reference := gateway.get("api_key_env"):
-        candidates.append((get_env(reference, warn=False, cfg=cfg), (reference,)))
-    origins = getattr(cfg, "origins", {})
-    candidates.sort(key=lambda item: origins.get(item[1], 0))
-    return next((str(value).strip() for value, _ in candidates if value is not None and str(value).strip()), "")
+load_config = reload_config = settings
 
 def get_env(key: str, *, warn: bool = True, default: str = "", cfg=None) -> str:
     """旧标量读取接口共享配置快照；不从宿主环境变量读取业务值。"""
-    configuration = settings() if cfg is None else cfg
-    raw = configuration.get(key)
-    if isinstance(raw, (dict, list)):
-        raise ConfigError(f"配置字段 {key} 必须是标量；检查来源: {config_source_summary()}")
-    value = str(raw).strip() if raw is not None else ""
-    if not value and warn and not default:
-        raise ConfigError(f"缺少配置 {key}；检查来源: {config_source_summary()}")
-    return value or default
-
-def _missing_keys(keys: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(key for key in keys if not get_env(key, warn=False).strip())
+    purpose = "模型或检索服务地址" if "BASE" in key.upper() or "URL" in key.upper() else "服务认证或连接参数"
+    raw = config_value(settings() if cfg is None else cfg, (key,), default,
+                       purpose=purpose if warn and not default else None,
+                       kind=str if _connection_field(key) else (str, int, float, bool))
+    return (str(raw).strip() if raw is not None else "") or default
 
 def missing_main_api_keys() -> tuple[str, ...]:
-    _, params = get_model_and_params("coordinator")
-    if params.get("gateway"):
-        from redlotus.runtime.network import ModelTarget
-
-        target = ModelTarget.for_role("coordinator")
-        return () if target.api_key else (f"gateways.{params['gateway']}.api_key",)
-    return _missing_keys(("BASE_URL", "API_KEY"))
+    return tuple(key for key in ("BASE_URL", "API_KEY") if not get_env(key, warn=False))
 
 def missing_rag_api_keys() -> tuple[str, ...]:
-    return _missing_keys(("SILICONFLOW_BASE", "SILICONFLOW_KEY"))
+    return tuple(key for key in ("SILICONFLOW_BASE", "SILICONFLOW_KEY") if not get_env(key, warn=False))
 
 def _persist_changes(target, before, after):
     """只把用户改动落到写入层，不复制回退层的其他字段。"""
@@ -329,8 +271,12 @@ def _persist_changes(target, before, after):
         if key in before and before[key] == value:
             continue
         if isinstance(value, dict) and isinstance(before.get(key), dict):
-            child = target.setdefault(key, {})
-            _persist_changes(child, before[key], value)
+            nested = target.get(key)
+            if not isinstance(nested, dict):
+                nested = {}
+            _persist_changes(nested, before[key], value)
+            if nested:
+                target[key] = nested
         else:
             target[key] = deepcopy(value)
 
@@ -347,32 +293,25 @@ def update_config(change, *, lock_timeout=None) -> None:
             after = deepcopy(before)
             change(after)
             _persist_changes(raw, before, after)
-            _validate_config(raw, path)
             atomic_write_json(path, raw)
     except OSError as exc:
         raise ConfigError(f"无法写入配置 {path}: {exc}") from None
-    reload_config()
 
 def get_agent_usage_limits() -> "_UsageLimits":
     """单次 Agent 运行对模型请求次数上限"""
     from pydantic_ai.usage import UsageLimits
 
     cfg = settings()
-    raw = cfg["request_limit"]
+    raw = config_value(cfg, ("request_limit",), purpose="单次 Agent 模型请求上限；null 或空字符串表示不限制", kind=(int, str, type(None)))
     if raw is None or str(raw).strip().lower() in ("none", "unlimited", "null", ""):
         return UsageLimits(request_limit=None)
     return UsageLimits(request_limit=int(raw))
-
-def get_agent_run_policy() -> AgentRunPolicy:
-    """Construct the execution policy only when configuration is requested."""
-
-    return AgentRunPolicy.from_config(settings())
 
 def supported_thinking_efforts(model_name: str | None) -> tuple[str, ...]:
     from redlotus.runtime.network import _lookup_openrouter_meta
 
     meta = _lookup_openrouter_meta(model_name) if model_name else None
-    configured = settings()["model_metadata"]["supported_thinking_efforts"]
+    configured = config_value(settings(), ("model_metadata", "supported_thinking_efforts"), purpose="可选择的思考档位名称", kind=list)
     available = (meta or {}).get("supported_efforts") or configured
     return tuple(value for value in configured if value in available)
 
@@ -397,36 +336,17 @@ def apply_thinking_config(model_params, *, model_name=None):
 
 def get_model_and_params(role: str, *, cfg=None) -> tuple[str, dict[str, Any]]:
     cfg = settings() if cfg is None else cfg
-    raw = deepcopy((cfg.get("models") or {}).get(role) or {})
-    if isinstance(raw, str):
-        raw = {"preset": raw}
-    preset = raw.pop("preset", None)
-    if preset is not None and str(preset).strip():
-        if not isinstance(preset, str) or preset not in cfg.get("model_presets", {}):
-            raise ConfigError(
-                f"配置 models.{role}.preset 引用了不存在的 model_presets.{preset}；"
-                f"检查来源: {config_source_summary()}"
-            )
-        base = deepcopy(cfg["model_presets"][preset])
-        origins = getattr(cfg, "origins", {})
-        selection = origins.get(("models", role, "preset"), 0)
-        raw = {key: value for key, value in raw.items()
-               if min((rank for path, rank in origins.items()
-                       if path[:3] == ("models", role, key)), default=0) <= selection}
-        raw = {**base.pop("settings", {}), **base, **raw.pop("settings", {}), **raw}
-    raw = {**raw.pop("settings", {}), **raw}
-    gateway = raw.get("gateway")
-    if gateway is not None and str(gateway).strip():
-        if not isinstance(gateway, str) or gateway not in cfg.get("gateways", {}):
-            raise ConfigError(
-                f"配置 models.{role}.gateway 引用了不存在的 gateways.{gateway}；"
-                f"检查来源: {config_source_summary()}"
-            )
-        raw["gateway"] = gateway
+    models = cfg.get("models")
+    if not isinstance(models, dict):
+        raise ConfigError(f"配置 models 必须是对象；检查来源: {config_source_summary()}", path=("models",))
+    raw = deepcopy(models.get(role, {}))
+    if not isinstance(raw, dict):
+        raise ConfigError(f"配置 models.{role} 必须是模型对象；检查来源: {config_source_summary()}", path=("models", role))
     name = raw.pop("name", None)
+    if name is not None and not isinstance(name, str):
+        raise ConfigError(f"配置 models.{role}.name 必须是字符串；检查来源: {config_source_summary()}")
     if not isinstance(name, str) or not name.strip():
-        path = ("model_presets", preset, "name") if preset in cfg.get("model_presets", {}) else ("models", role, "name")
-        raise ConfigError(f"缺少有效配置 {'.'.join(path)}；检查来源: {config_source_summary()}", path=path, missing=True)
+        config_value({}, ("models", role, "name"), purpose="选择 Agent 模型，使用服务:模型标识", kind=str)
     name = name.strip()
     return name, raw
 
@@ -434,11 +354,8 @@ def set_model_name(role: str, model_name: str) -> None:
     selection = model_name.strip()
 
     def change(cfg):
-        if selection in cfg.get("model_presets", {}):
-            cfg["models"][role] = {"preset": selection}
-        else:
-            _, parameters = get_model_and_params(role, cfg=cfg)
-            cfg["models"][role] = {"name": selection, **parameters}
+        _, parameters = get_model_and_params(role, cfg=cfg)
+        cfg["models"][role] = {"name": selection, **parameters}
 
     update_config(change)
 

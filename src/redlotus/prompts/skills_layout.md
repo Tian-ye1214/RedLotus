@@ -1,6 +1,6 @@
 ## Skills Directory Description
 
-- Skills are loaded from **two roots**: shipped baseline skills inside the RedLotus package, plus a **writable overlay** at `{skills_root_path}`. New installs go to the overlay path shown above.
+- Skills are loaded from shipped baseline skills inside the RedLotus package and an optional writable overlay. Available roots: {skills_root_path}. When configured, the final root is the writable overlay for new installs.
 
 - **Stored by Skill directory:** Each **subfolder** under a skills root corresponds to one Skill. The folder name can differ from the `name` field in `SKILL.md` YAML; the system registers by `name`.
 

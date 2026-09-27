@@ -10,6 +10,7 @@ from contextlib import AsyncExitStack
 from copy import deepcopy
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
+from typing import get_args, get_type_hints
 
 import httpx
 from pydantic_ai import ModelSettings
@@ -26,10 +27,10 @@ from pydantic_ai.providers.deepseek import DeepSeekProvider
 
 from redlotus.runtime import logging as logger
 from redlotus.runtime.config import (
+    config_value,
     ConfigError,
     apply_thinking_config,
     config_source_summary,
-    credential_value,
     get_context_config,
     get_env,
     get_model_and_params,
@@ -84,7 +85,6 @@ class InputLimitError(ValueError):
 class ModelInputPolicy:
     max_files: int
     max_file_bytes: int
-    reference_download_timeout_seconds: float
     max_request_bytes: int | None = None
 
     @classmethod
@@ -94,10 +94,9 @@ class ModelInputPolicy:
     @classmethod
     def from_limits(cls, values: dict) -> "ModelInputPolicy":
         return cls(
-            max_files=int(values["max_files"]),
-            max_file_bytes=int(values["max_file_bytes"]),
-            reference_download_timeout_seconds=values["reference_download_timeout_seconds"],
-            max_request_bytes=values.get("max_request_bytes"),
+            max_files=int(config_value(values, ("max_files",), purpose="单次请求允许引用的文件数", kind=int)),
+            max_file_bytes=int(config_value(values, ("max_file_bytes",), purpose="单个引用文件允许的字节数", kind=int)),
+            max_request_bytes=config_value(values, ("max_request_bytes",), kind=(int, type(None))),
         )
 
     def check(self, sizes: list[int]) -> None:
@@ -169,7 +168,7 @@ class ModelTarget:
 
     @classmethod
     def for_role(cls, role: str) -> ModelTarget:
-        config = deepcopy(settings())
+        config = settings()
         name, parameters = get_model_and_params(role, cfg=config)
         return cls.from_values(name, parameters, role=role, config=config)
 
@@ -179,41 +178,26 @@ class ModelTarget:
     ) -> ModelTarget:
         params = deepcopy(parameters)
         cfg = settings() if config is None else config
-        gateway_name = params.pop("gateway", None)
-        gateway = cfg["gateways"][gateway_name] if gateway_name else {}
         protocol, name = parse_model_id(name)
         if not protocol or not name:
             field_name = f"models.{role}.name" if role else "model name"
             raise ConfigError(
                 f"配置 {field_name} 需要 Pydantic AI 的 服务:模型 标识；检查来源: {config_source_summary()}"
             )
-        params.pop("provider", None)
-        base = (
-            gateway.get("base_url")
-            if gateway_name
-            else get_env("BASE_URL", warn=False, cfg=cfg)
-        )
-        if gateway_name:
-            key = credential_value(gateway_name, cfg)
-        else:
-            key = get_env("API_KEY", warn=False, cfg=cfg)
+        base = get_env("BASE_URL", warn=False, cfg=cfg)
+        key = get_env("API_KEY", warn=False, cfg=cfg)
         context = get_context_config(role, cfg=cfg) if role else {}
         for field_name in ("max_context_windows", "auto_compress_ratio", "compress_head_turns", "compress_tail_turns"):
             if field_name in params:
                 context[field_name] = params.pop(field_name)
-        params.pop("context", None)
-        limits = cfg.get("input_limits", {})
         params["parallel_tool_calls"] = True
-        timeout = float(gateway["timeout"] if "timeout" in gateway else cfg["MODEL_HTTP_TIMEOUT"])
+        timeout = float(config_value(cfg, ("MODEL_HTTP_TIMEOUT",), purpose="模型 HTTP 请求的超时秒数", kind=(int, float)))
+        request_limits = deepcopy(cfg.get("input_limits", {}).get("defaults", {}))
+        for limit_name, kind in get_type_hints(ModelInputPolicy).items():
+            if limit_name in request_limits:
+                request_limits[limit_name] = config_value(request_limits, (limit_name,), kind=(int, float) if kind is float else get_args(kind) or kind)
         options = {
-            "credential_field": f"gateways.{gateway_name}.api_key" if gateway_name else "API_KEY",
-            "connect_timeout": float(gateway.get("connect_timeout", timeout)),
-            "limits": {
-                **limits.get("defaults", {}),
-                **gateway.get("input_limits", {}),
-                **params.pop("input_limits", {}),
-                **limits.get(role, {}),
-            },
+            "limits": dict(request_limits),
             "context": context,
             "settings": params,
         }
@@ -229,7 +213,27 @@ class ModelTarget:
 def context_length_exceeded(error) -> bool:
     """Recognize the capacity rejection observed from the configured service."""
     return (error.status_code == 400 and isinstance(error.body, dict)
-            and str(error.body.get("message", "")).startswith("This model's maximum context length is "))
+             and str(error.body.get("message", "")).startswith("This model's maximum context length is "))
+
+
+def is_transport_interruption(error) -> bool:
+    """Recognize transport wrappers; every grouped branch must be an interruption."""
+    pending = [(error, set())]
+    while pending:
+        error, seen = pending.pop()
+        while error is not None and id(error) not in seen:
+            seen.add(id(error))
+            if isinstance(error, BaseExceptionGroup):
+                pending.extend((child, set(seen)) for child in error.exceptions)
+                break
+            if isinstance(error, (httpx.RemoteProtocolError, httpx.NetworkError, httpx.TimeoutException)):
+                break
+            if isinstance(error, OSError):
+                return False
+            error = error.__cause__ or error.__context__
+        else:
+            return False
+    return True
 
 
 class CompatibleChatModel(OpenAIChatModel):
@@ -248,12 +252,12 @@ def _anthropic_uses_httpx2() -> bool:
     parameter = inspect.signature(AsyncAnthropic).parameters.get("http_client")
     return parameter is not None and "httpx2" in str(parameter.annotation)
 
-def _create_anthropic_http_client(timeout: float, connect_timeout: float, policy):
+def _create_anthropic_http_client(timeout: float, policy):
     """Create the transport required by current Anthropic SDK releases."""
     import httpx2
 
     client = httpx2.AsyncClient(
-        timeout=httpx2.Timeout(timeout=timeout, connect=connect_timeout),
+        timeout=timeout,
         headers={"User-Agent": get_user_agent()},
     )
     if policy.max_request_bytes is not None:
@@ -303,10 +307,9 @@ def _adapt_anthropic_message_api(client):
 
 def _create_anthropic_provider(target: ModelTarget, policy: ModelInputPolicy):
     """Bind Anthropic to the HTTP client type supported by its installed SDK."""
-    connect_timeout = target.options["connect_timeout"]
     if not _anthropic_uses_httpx2():
         client = get_client(
-            f"model:anthropic:{target.timeout}:{connect_timeout}:{policy.max_request_bytes}",
+            f"model:anthropic:{target.timeout}:{policy.max_request_bytes}",
             lambda: _create_http_client(target, policy),
         )
         return AnthropicProvider(
@@ -316,9 +319,9 @@ def _create_anthropic_provider(target: ModelTarget, policy: ModelInputPolicy):
     from anthropic import AsyncAnthropic
 
     transport = get_client(
-        f"model:anthropic-httpx2:{target.timeout}:{connect_timeout}:{policy.max_request_bytes}",
+        f"model:anthropic-httpx2:{target.timeout}:{policy.max_request_bytes}",
         lambda: _create_anthropic_http_client(
-            target.timeout, connect_timeout, policy
+            target.timeout, policy
         ),
     )
     client = AsyncAnthropic(
@@ -329,9 +332,7 @@ def _create_anthropic_provider(target: ModelTarget, policy: ModelInputPolicy):
     return AnthropicProvider(anthropic_client=_adapt_anthropic_message_api(client))
 
 def _create_http_client(target: ModelTarget, policy: ModelInputPolicy):
-    client = create_async_http_client(
-        timeout=target.timeout, connect=target.options["connect_timeout"]
-    )
+    client = create_async_http_client(timeout=target.timeout)
     if policy.max_request_bytes is not None:
         client.event_hooks["request"].append(policy.check_http_request)
     return client
@@ -342,7 +343,7 @@ def _create_provider(provider_name: str, target: ModelTarget, policy: ModelInput
     if provider_type is AnthropicProvider:
         return _create_anthropic_provider(target, policy)
     client = get_client(
-        f"model:{provider_name}:{target.timeout}:{target.options['connect_timeout']}:{policy.max_request_bytes}",
+        f"model:{provider_name}:{target.timeout}:{policy.max_request_bytes}",
         lambda: _create_http_client(target, policy),
     )
     parameters = inspect.signature(provider_type).parameters
@@ -365,10 +366,8 @@ def create_model(model_name: str | ModelTarget, parameter: dict | None = None):
         else ModelTarget.from_values(model_name, parameter or {})
     )
     options = target.options
-    credential_field = options.get("credential_field", "API_KEY")
-    address_field = credential_field.removesuffix("api_key") + "base_url" if credential_field.startswith("gateways.") else "BASE_URL"
-    missing = credential_field if not target.api_key else (
-        address_field if not target.base_url else None
+    missing = "API_KEY" if not target.api_key else (
+        "BASE_URL" if not target.base_url else None
     )
     if missing:
         raise ConfigError(f"缺少配置 {missing}；检查来源: {config_source_summary()}")
@@ -408,9 +407,9 @@ def _ensure_openrouter_maps() -> None:
             if path.exists():
                 raw = json.loads(path.read_text(encoding="utf-8"))
             else:
-                metadata = settings()["model_metadata"]
-                with httpx.Client(timeout=metadata["timeout"]) as client:
-                    response = client.get(metadata["url"])
+                metadata = config_value(settings(), ("model_metadata",), purpose="模型容量元数据的地址和请求参数", kind=dict)
+                with httpx.Client(timeout=config_value(metadata, ("timeout",), purpose="查询模型容量元数据的超时秒数", kind=(int, float))) as client:
+                    response = client.get(config_value(metadata, ("url",), purpose="查询模型容量元数据的服务地址", kind=str))
                     response.raise_for_status()
                     raw = response.json()
                 path.parent.mkdir(parents=True, exist_ok=True)

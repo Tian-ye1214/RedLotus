@@ -7,28 +7,27 @@ import functools
 import inspect
 import io
 import json
+import os
 import re
 import shlex
 import subprocess
 import threading
 import time
 import tokenize
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from itertools import islice
 from pathlib import Path
 from typing import Any, Callable
 
 import yaml
 
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import settings
 from redlotus.runtime.resources import (
+    WorkspaceContext,
     skills_dir,
-    user_skills_dir,
-)
-from redlotus.runtime.resources import (
     skills_dir as shipped_skills_dir,
+    user_skills_dir,
 )
 from redlotus.sessions.context import (
     TRACE_STORE,
@@ -350,31 +349,17 @@ class JavaScriptCommandCheck(PythonCommandCheck):
 
 def readable_roots(*, work_base: Path) -> tuple[Path, ...]:
     """Agent 可读根：当前项目 + 随包基线技能 + 运行时技能 overlay。"""
-    roots = [work_base.resolve()]
-    for d in (skills_dir(), user_skills_dir()):
-        try:
-            roots.append(d.resolve())
-        except OSError:
-            pass
-    return tuple(roots)
-
-
-def is_under_root(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
+    overlay = user_skills_dir(WorkspaceContext.from_path(work_base), required=False)
+    return tuple(path.resolve() for path in (work_base, skills_dir(), overlay) if path is not None)
 
 
 def assert_readable_path(path: Path, *, work_base: Path) -> Path:
     """解析后的路径必须落在 当前项目 或技能目录（基线 / overlay）下。"""
     resolved = path.resolve()
-    for root in readable_roots(work_base=work_base):
-        if is_under_root(resolved, root):
-            return resolved
-    roots = ", ".join(str(r) for r in readable_roots(work_base=work_base))
-    raise ValueError(f"Path not allowed (must be under: {roots}): {resolved}")
+    roots = readable_roots(work_base=work_base)
+    if any(resolved.is_relative_to(root) for root in roots):
+        return resolved
+    raise ValueError(f"Path not allowed (must be under: {', '.join(map(str, roots))}): {resolved}")
 
 
 def resolve_readable_path(name: str, *, work_base: Path) -> Path:
@@ -384,29 +369,19 @@ def resolve_readable_path(name: str, *, work_base: Path) -> Path:
         raise ValueError("Path name must not be empty")
     work = work_base.resolve()
 
-    p_in = Path(name).expanduser()
-    if p_in.is_absolute():
-        return assert_readable_path(p_in, work_base=work)
-
     norm = name.replace("\\", "/").strip("/")
-    low = norm.lower()
     # 兼容旧写法 src/skills；归一到 skills/...
-    if low == "src/skills" or low.startswith("src/skills/"):
+    if norm.lower() == "src/skills" or norm.lower().startswith("src/skills/"):
         norm = norm[len("src/") :]
-        low = norm.lower()
-    if low == "skills" or low.startswith("skills/"):
+    path = Path(name).expanduser()
+    if not path.is_absolute() and (norm.lower() == "skills" or norm.lower().startswith("skills/")):
         rel = norm[len("skills") :].lstrip("/")
-        for base in (skills_dir(), user_skills_dir()):
-            cand = (base / rel).resolve() if rel else base.resolve()
-            if cand.exists():
-                return assert_readable_path(cand, work_base=work)
+        candidates = [root / rel for root in readable_roots(work_base=work)[1:]]
         # 默认落在可写 overlay（供新建 / 安装技能）
-        cand = (
-            (user_skills_dir() / rel).resolve() if rel else user_skills_dir().resolve()
-        )
-        return assert_readable_path(cand, work_base=work)
-
-    return assert_readable_path((work / name).resolve(), work_base=work)
+        path = next((candidate for candidate in candidates if candidate.exists()), None)
+        if path is None:
+            path = (user_skills_dir(WorkspaceContext.from_path(work), required=False) or skills_dir()) / rel
+    return assert_readable_path(work / path, work_base=work)
 
 
 @dataclass
@@ -425,11 +400,9 @@ class SkillsManager:
     IGNORED_RESOURCE_DIRS = {".git", "__pycache__", ".idea", ".vscode"}
 
     def __init__(self, skills_dir: str | Path | None = None, *, workspace=None):
-        self.skills_dir = (
-            Path(skills_dir) if skills_dir is not None else user_skills_dir(workspace)
-        )
+        self.skills_dir = Path(skills_dir) if skills_dir is not None else user_skills_dir(workspace, required=False)
         self.workspace = workspace
-        self._roots = (shipped_skills_dir(), self.skills_dir)
+        self._roots = (shipped_skills_dir(), *((self.skills_dir,) if self.skills_dir is not None else ()))
         self._refresh_lock = threading.Lock()
         self.skills = {}
         self.refresh()
@@ -454,7 +427,8 @@ class SkillsManager:
         with self._refresh_lock:
             fresh = {}
             # Only the writable overlay is created; its entries override bundled Skills.
-            self.skills_dir.mkdir(parents=True, exist_ok=True)
+            if self.skills_dir is not None:
+                self.skills_dir.mkdir(parents=True, exist_ok=True)
             for root in self._roots:
                 for path in root.glob("*/SKILL.md"):
                     try:
@@ -558,7 +532,8 @@ class SkillsManager:
         Args:
             skill_name: The exact registered Skill name.
             script_name: A Python, shell, batch or PowerShell script relative to the Skill directory.
-            args: Arguments for the script; quote arguments that contain spaces.
+            args: Whitespace-separated arguments. Quote spaces with single or double
+                quotes; on Windows backslashes stay literal, including before a quote.
             timeout: Optional seconds, capped by the configured command limit; omitted uses that limit.
 
         Returns:
@@ -573,10 +548,17 @@ class SkillsManager:
             script = self._resource_path(skill_name, script_name)
             if not script.is_file():
                 raise FileNotFoundError(script_name)
+            if os.name == "nt":
+                lexer = shlex.shlex(args, posix=True)
+                lexer.whitespace_split = True
+                lexer.commenters = lexer.escape = ""
+                script_args = list(lexer)
+            else:
+                script_args = shlex.split(args)
             command = [
                 *executors[script.suffix.lower()],
                 str(script),
-                *shlex.split(args),
+                *script_args,
             ]
             result = await run_subprocess(
                 command,
@@ -643,20 +625,13 @@ def wrap_tools_for_user_notify(tools: list[Any]) -> list[Any]:
 def _notify(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
     """把一次调用以 "🔧 名字 [agent] · 参数" 推给用户；无回调则降级为 debug。"""
 
-    policy = settings()["ui"]
-
-    def brief(v: Any) -> str:
-        text = repr(v)
-        limit = policy["tool_argument_preview_chars"]
-        return text if len(text) <= limit else f"{text[:limit-1]}…"
-
     parts = [f"🔧 {name}"]
     if agent_id := current_short_agent_id():
         parts.append(f"[{agent_id}]")
+    if args:
+        parts.append(", ".join(repr(value) for value in args))
     if kwargs:
-        parts.append(", ".join(f"{k}={brief(v)}" for k, v in islice(kwargs.items(), policy["tool_keyword_limit"])))
-    elif args:
-        parts.append(", ".join(brief(v) for v in islice(args, policy["tool_positional_limit"])))
+        parts.append(", ".join(f"{key}={value!r}" for key, value in kwargs.items()))
     line = " · ".join(parts)
 
     callback = _notify_callback.get()
@@ -691,21 +666,16 @@ def _record(
     )
 
 
-def _run_wrapped(
-    fn: Callable[..., Any],
-    name: str,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-) -> Any:
+@contextmanager
+def _tool_call(name, args, kwargs):
+    """Share telemetry and failure handling across synchronous and async tools."""
     t0 = time.monotonic()
     _notify(name, args, kwargs)
     try:
-        result = fn(*args, **kwargs)
-    except Exception as e:
+        yield lambda result: _record(name, t0, tool_result_succeeded(result), result=result)
+    except BaseException as e:
         _record(name, t0, False, error=e)
         raise
-    _record(name, t0, tool_result_succeeded(result), result=result)
-    return result
 
 
 def _wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -718,20 +688,18 @@ def _wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
 
         @functools.wraps(fn)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            t0 = time.monotonic()
-            _notify(name, args, kwargs)
-            try:
+            with _tool_call(name, args, kwargs) as record:
                 result = await fn(*args, **kwargs)
-            except BaseException as e:
-                _record(name, t0, False, error=e)
-                raise
-            _record(name, t0, tool_result_succeeded(result), result=result)
+                record(result)
             return result
     else:
 
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return _run_wrapped(fn, name, args, kwargs)
+            with _tool_call(name, args, kwargs) as record:
+                result = fn(*args, **kwargs)
+                record(result)
+            return result
 
     wrapper._notify_tool_wrapped = True  # type: ignore[attr-defined]
     return wrapper

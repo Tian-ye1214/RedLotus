@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
 
-from redlotus.runtime.config import get_agent_run_policy, settings
+from redlotus.runtime.config import settings, config_value
 
 _SEPARATORS = {";", "&", "&&", "|", "||", "\n"}
 _PYTHON_NAMES = {"python", "python.exe", "python3", "python3.exe"}
@@ -110,7 +110,7 @@ def existing_python() -> Path:
         result = subprocess.run(
             [launcher, "-3", "-c", "import sys; print(sys.executable)"],
             capture_output=True,
-            timeout=get_agent_run_policy().max_command_timeout_seconds,
+            timeout=config_value(settings(), ("agent_run_policy", "max_command_timeout_seconds"), purpose="命令执行的最长秒数", kind=int),
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         if not result.returncode:
@@ -563,12 +563,17 @@ def _unquote_shell_word(word: str) -> str:
 
 async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
     """杀掉子进程及其后代（无 psutil 依赖），并收尸。"""
-    timeout = settings()["lifecycle"]["process_termination_timeout_seconds"]
+    timeout = config_value(settings(), ('lifecycle', 'shutdown_grace_seconds'), kind=(int, float))
+    deadline = asyncio.get_running_loop().time() + timeout if timeout is not None else None
+
+    async def within(awaitable):
+        return await asyncio.wait_for(awaitable, timeout=max(0, deadline - asyncio.get_running_loop().time()) if deadline is not None else None)
+
     if proc.returncode is not None:
         # An exited parent can leave inherited pipes open. Do not claim tree
         # cleanup before they close, or target a PID whose owner may have changed.
         try:
-            await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            await within(proc.communicate())
         except TimeoutError as exc:
             raise RuntimeError(
                 "Parent exited but inherited pipes remain open; descendant ownership is unknown and cleanup is unverified."
@@ -577,7 +582,7 @@ async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
     try:
         if _platform.system() == "Windows":
             # /T 杀整棵树：shell 会经 cmd.exe 再起真正的子进程。
-            killer = await asyncio.create_subprocess_exec(
+            killer = await within(asyncio.create_subprocess_exec(
                 "taskkill",
                 "/F",
                 "/T",
@@ -586,22 +591,40 @@ async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            await asyncio.wait_for(killer.wait(), timeout=timeout)
-            if killer.returncode and proc.returncode is None:
+            ))
+            try:
+                await within(killer.wait())
+            except TimeoutError as exc:
+                try:
+                    killer.kill()
+                except ProcessLookupError:
+                    pass
+                raise RuntimeError("taskkill timed out; process tree cleanup is unverified.") from exc
+            if killer.returncode:
                 raise PermissionError(
                     f"taskkill could not terminate process tree {proc.pid} (exit {killer.returncode})"
                 )
         else:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
+    except Exception as exc:
+        exc.add_note("Process tree cleanup is unverified.")
         if proc.returncode is None:
-            proc.kill()
-        await proc.wait()
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            await within(proc.wait())
+            await within(proc.communicate())
+        except Exception:
+            pass  # Keep the original tree-kill error; cleanup was not verified.
         raise  # Do not report successful tree cleanup when the OS denied it.
     # Drain inherited pipes too: descendants can still be releasing files after
     # the root process has exited.
-    await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    try:
+        await within(proc.communicate())
+    except TimeoutError as exc:
+        raise RuntimeError("Process tree cleanup is unverified; inherited pipes remain open.") from exc
 
 
 async def run_subprocess(
@@ -614,7 +637,8 @@ async def run_subprocess(
     workspace=None,
 ) -> CommandResult:
     """Run a command with its launch evidence, reclaiming owned processes on cancellation."""
-    timeout = get_agent_run_policy().clamp_command_timeout(timeout)
+    maximum = config_value(settings(), ("agent_run_policy", "max_command_timeout_seconds"), purpose="命令执行的最长秒数", kind=int)
+    timeout = maximum if timeout is None else max(1, min(timeout, maximum))
     await asyncio.to_thread(validate_agent_command, args, cwd=cwd)
     python_required = any(
         _program_name(values[0]) in _PYTHON_NAMES | _PY_LAUNCHER_NAMES | _PIP_NAMES
@@ -710,9 +734,6 @@ def page_action(operation):
         async with self._lock:
             try:
                 await self._start()
-                policy = settings()["browser"]
-                self._page.set_default_timeout(policy["action_timeout_seconds"] * 1000)
-                self._page.set_default_navigation_timeout(policy["navigation_timeout_seconds"] * 1000)
                 return await operation(self, *args, **kwargs)
             except (ImportError, RuntimeError) as exc:
                 return f"Error: Browser unavailable: {exc}"
@@ -739,12 +760,8 @@ class PlaywrightBrowserSession:
         self._browser_error = Error
         self._playwright = await async_playwright().start()
         try:
-            config = settings()
-            headless = str(config["BROWSER_HEADLESS"]).strip().lower() not in ("0", "false", "no")
-            self._browser = await self._playwright.chromium.launch(headless=headless)
-            self._page = await self._browser.new_page(
-                viewport=config["browser"]["viewport"], locale=config["browser"]["locale"]
-            )
+            self._browser = await self._playwright.chromium.launch()
+            self._page = await self._browser.new_page()
         except BaseException:
             await self._close()
             raise
@@ -847,7 +864,7 @@ class PlaywrightBrowserSession:
 
         Args:
             selector: A Playwright selector for the intended element.
-            timeout_ms: Optional milliseconds; omitted uses the configured browser action timeout.
+            timeout_ms: Optional milliseconds; omitted uses Playwright's timeout.
 
         Returns:
             The visible selector, or a browser error."""

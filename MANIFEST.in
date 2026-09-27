@@ -1,5 +1,9 @@
 include README.md
-include src/redlotus/config.schema.json
+recursive-include tests *.py
+include scripts/check_structure.py
+include scripts/verify_wheel.py
+include scripts/verify_live.py
+include scripts/live_cases.py
 global-exclude config.json
 global-exclude .env
 recursive-include src/redlotus/prompts *.md

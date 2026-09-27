@@ -18,7 +18,7 @@ from lancedb.index import IvfPq
 
 from redlotus.runtime import config as app_config
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import get_env, settings
+from redlotus.runtime.config import get_env, settings, config_value
 from redlotus.runtime.network import get_client, openai_base_url
 from redlotus.runtime.resources import user_data_dir
 
@@ -61,19 +61,16 @@ def missing_rag_settings(
 
 
 def _require_rag_model(role: str) -> str:
-    name = settings()["RAG_models"][role].strip()
-    if not name:
-        raise app_config.ConfigError(f"缺少配置 RAG_models.{role}；检查来源: {app_config.config_source_summary()}")
-    return name
+    return config_value(settings(), ("RAG_models", role), purpose="检索使用的向量或重排模型名称", kind=str).strip()
 
 
 def _get_shared_client() -> httpx.AsyncClient:
     """当前事件循环的 embedding/rerank 连接池；配置地址变化时使用新池。"""
-    config = settings()["rag_service"]
+    config = config_value(settings(), ("rag_service",), purpose="向量与重排服务的请求参数", kind=dict)
     kwargs = dict(
         base_url=openai_base_url(get_env("SILICONFLOW_BASE", warn=False)),
-        http2=config["http2"],
-        timeout=config["timeout"],
+        http2=config_value(config, ("http2",), purpose="检索 HTTP 连接是否启用 HTTP/2", kind=bool, choices=(True, False)),
+        timeout=config_value(config, ("timeout",), purpose="检索 HTTP 请求的超时秒数", kind=(int, float, type(None))),
     )
     return get_client(f"{httpx.AsyncClient.__name__}:{kwargs}", lambda: httpx.AsyncClient(**kwargs))
 
@@ -109,7 +106,7 @@ async def embed_texts(
         texts = [texts]
     logger.debug("RAG embed: batch_size=%d", len(texts))
     model = model or _require_rag_model("embedding")
-    batch_size = int(settings()["rag_service"]["embedding_batch_size"])
+    batch_size = int(config_value(settings(), ('rag_service', 'embedding_batch_size'), purpose="每次向量请求发送的文本数量", kind=int))
     vectors: list[list[float]] = []
     for start in range(0, len(texts), batch_size):
         body = {"model": model, "input": texts[start : start + batch_size]}
@@ -266,10 +263,10 @@ class EmbedDataBase:
         if table is None:
             return False
         count = await table.count_rows()
-        if count < int(self._index_config["min_rows"]):
+        if count < int(config_value(self._index_config, ("min_rows",), purpose="建立向量索引所需的最少行数", kind=int)):
             return False
         if await table.list_indices() and self._rows_since_index < int(
-            self._index_config["rebuild_every_n_adds"]
+            config_value(self._index_config, ("rebuild_every_n_adds",), purpose="每次重建向量索引之间新增的记录数", kind=int)
         ):
             return False
         dim = (await table.schema()).field("vector").type.list_size
@@ -277,12 +274,12 @@ class EmbedDataBase:
             "vector",
             replace=True,
             config=IvfPq(
-                distance_type=self._index_config["metric"],
+                distance_type=config_value(self._index_config, ("metric",), purpose="向量索引的距离度量", kind=str, choices=("l2", "cosine", "dot")),
                 num_partitions=max(
-                    1, count // self._index_config["rows_per_partition"]
+                    1, count // config_value(self._index_config, ("rows_per_partition",), purpose="向量索引每个分区的记录数", kind=int)
                 ),
                 num_sub_vectors=max(
-                    1, dim // self._index_config["dimensions_per_sub_vector"]
+                    1, dim // config_value(self._index_config, ("dimensions_per_sub_vector",), purpose="向量索引每个子向量的维度数", kind=int)
                 ),
             ),
         )
@@ -298,7 +295,7 @@ class EmbedDataBase:
             query = query.where(where)
         rows = (
             await query.nearest_to(query_embedding)
-            .distance_type(self._index_config["metric"])
+            .distance_type(config_value(self._index_config, ("metric",), purpose="向量索引的距离度量", kind=str, choices=("l2", "cosine", "dot")))
             .limit(top_k)
             .to_arrow()
         )
@@ -328,18 +325,18 @@ class RAG:
         """Point this index at the table owned by one embedding model name."""
         self.embedding_model = model
         space = hashlib.sha256(model.encode()).hexdigest()[:12]
-        table_name = str(self.config["table_name"]) + "_records_v2_" + space
+        table_name = str(config_value(self.config, ("table_name",), purpose="记忆数据库表名", kind=str)) + "_records_v2_" + space
         self._db = EmbedDataBase(
-            str(self.config["db_path"]),
+            str(config_value(self.config, ("db_path",), purpose="记忆数据库目录", kind=str)),
             table_name=table_name,
-            index_config=self.config["index"],
+            index_config=config_value(self.config, ("index",), purpose="向量索引参数", kind=dict),
         )
         self.index_key = json.dumps(
             [
                 self._db.db_path,
                 table_name,
-                self.config["turn_token_limit"],
-                self.config["turn_chunk_overlap_tokens"],
+                config_value(self.config, ("turn_token_limit",), purpose="每个记忆分块的 Token 上限", kind=int),
+                config_value(self.config, ("turn_chunk_overlap_tokens",), purpose="相邻记忆分块的重叠 Token 数", kind=int),
             ]
         )
 
@@ -360,8 +357,8 @@ class RAG:
 
     def _chunks(self, text: str) -> list[str]:
         # A conservative multilingual budget keeps long imported episodes embeddable.
-        limit = int(self.config["turn_token_limit"])
-        overlap = int(self.config["turn_chunk_overlap_tokens"])
+        limit = int(config_value(self.config, ("turn_token_limit",), purpose="每个记忆分块的 Token 上限", kind=int))
+        overlap = int(config_value(self.config, ("turn_chunk_overlap_tokens",), purpose="相邻记忆分块的重叠 Token 数", kind=int))
         if not 0 <= overlap < limit:
             raise ValueError("RAG chunk overlap must be smaller than its chunk budget")
         chunks = []
@@ -444,10 +441,10 @@ class RAG:
             )
         )[0]
         candidates = await database.vector_search(
-            vector, int(self.config["vector_search_limit"]), where=self.where
+            vector, int(config_value(self.config, ("vector_search_limit",), purpose="向量检索候选数量", kind=int)), where=self.where
         )
-        minimum = float(self.config["min_similarity"])
-        metric = self.config["index"]["metric"]
+        minimum = float(config_value(self.config, ("min_similarity",), purpose="向量检索保留结果的相似度阈值", kind=(int, float)))
+        metric = config_value(self.config, ("index",), purpose="向量索引参数", kind=dict)["metric"]
         candidates = [
             row
             for row in candidates
@@ -457,7 +454,7 @@ class RAG:
             >= minimum
         ]
         self.last_error = ""
-        if candidates and self.config["use_rerank"]:
+        if candidates and config_value(self.config, ("use_rerank",), purpose="是否使用重排服务", kind=bool):
             try:
                 ranked = await rerank_documents(
                     query, [row["text"] for row in candidates], top_n=len(candidates)
@@ -483,7 +480,7 @@ class RAG:
         unique = {}
         for row in candidates:
             unique.setdefault(row["record_id"], row)
-        return list(unique.values())[: int(self.config["final_top_k"])]
+        return list(unique.values())[: int(config_value(self.config, ("final_top_k",), purpose="记忆检索最终返回的条数", kind=int))]
 
     async def row_count(self) -> int:
         await self.refresh_embedding_space()

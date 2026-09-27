@@ -26,7 +26,7 @@ from redlotus.memory.records import (
 from redlotus.memory.store import MemoryReader, MemoryStore
 from redlotus.prompts.prompt import load_prompt
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import settings
+from redlotus.runtime.config import settings, config_value
 from redlotus.runtime.network import ModelTarget
 from redlotus.runtime.resources import (
     WorkspaceContext,
@@ -52,17 +52,12 @@ class MemoryService:
         self.evidence = EvidenceReader(self.references)
         self.reader = MemoryReader(self.store, self.long_term, self.references, owner_memory_allowed)
         self._perception_factory = factory
-        self.perception, self.current, self.session = None, None, None
+        self.perception = None
         self._input_source = lambda: self.current.user_inputs if self.current else []
         self._injection_snapshot = None
-        self._context_notices = []
         self._processing, self._explicit = asyncio.Lock(), asyncio.Lock()
-        self.last_error = ""
-        self._background = None
-        self._background_running = False
         self._schedule_lock = threading.Lock()
-        self._pending_end = 0
-        self._targets = {}
+        self.unbind_session()
 
     def bind_session(self, session):
         """Bind storage only: new/load must never schedule automatic perception."""
@@ -129,9 +124,9 @@ class MemoryService:
             self.current = None
 
     def _route(self):
-        config = settings()["memory_perception"]
+        config = config_value(settings(), ("memory_perception",), purpose="记忆感知角色与回合窗口参数", kind=dict)
         recipe = {
-            **asdict(ModelTarget.for_role(config["model_role"])),
+            **asdict(ModelTarget.for_role(config_value(config, ("model_role",), purpose="记忆感知使用的已配置模型角色", kind=str))),
             "perception": config,
             "prompt": load_prompt("memory_perception_system.md"),
         }
@@ -153,7 +148,7 @@ class MemoryService:
         return read_locked_json(path).get("cleared_at", "") if path.exists() else ""
 
     def _job(self, job):
-        saved = self.session.job(job.id)
+        saved = self.session.job(job if isinstance(job, str) else job.id)
         if saved is not None:
             saved["events"] = self.observations.read(saved.pop("event_ids"))
             return MemoryJob.model_validate(saved)
@@ -433,8 +428,8 @@ class MemoryService:
         with file_lock(self.session.path.parent / "schedule"):
             start = self.observations.reserved_cursor()
             while window := self.observations.window(through=through, start=start):
-                config = deepcopy(settings()["memory_perception"])
-                frozen = ModelTarget.for_role(config["model_role"])
+                config = deepcopy(config_value(settings(), ("memory_perception",), purpose="记忆感知角色与回合窗口参数", kind=dict))
+                frozen = ModelTarget.for_role(config_value(config, ("model_role",), purpose="记忆感知使用的已配置模型角色", kind=str))
                 self._targets[window.id] = frozen
                 target = asdict(frozen)
                 target.pop("api_key")
@@ -558,9 +553,8 @@ class MemoryService:
                     return
                 for identity in self.session.pending_jobs():
                     saved = self.session.job(identity)
-                    saved["events"] = self.observations.read(saved.pop("event_ids"))
-                    job = MemoryJob.model_validate(saved)
-                    if job.window and job.window.end_position > through:
+                    job = self._job(identity)
+                    if job.window and job.window.end_position > through and not saved.get("turn_count_migration", {}).get("committed"):
                         continue
                     if not job.done and not await self._execute(job, retry=recover):
                         return
@@ -571,6 +565,7 @@ class MemoryService:
         return {
             **await self.store.snapshot("project"),
             "observed_turns": total,
+            "turn_count_incomplete": bool(self.session and self.session.metadata.get("turn_count_incomplete")),
             "consumed_turns": consumed,
             "pending_turns": total - consumed,
             "window_turns": self.observations.window_turns,
@@ -603,14 +598,14 @@ class MemoryService:
         async with self._processing:
             await self._clear("project")
 
-    async def wait_idle(self, timeout):
+    async def wait_idle(self):
         if self._processing.locked():
             return False
         if self._background is None:
             return True
         future = asyncio.wrap_future(self._background._future)
-        done, _ = await asyncio.wait([future], timeout=timeout)
-        if not done or future.cancelled():
+        await asyncio.wait([future])
+        if future.cancelled():
             return False
         future.result()
         return True

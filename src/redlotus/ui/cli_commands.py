@@ -30,7 +30,6 @@ from redlotus.runtime.config import (
     get_model_and_params,
     role_supported_thinking_efforts,
     set_model_name,
-    settings,
     update_config,
 )
 from redlotus.runtime.network import (
@@ -41,7 +40,7 @@ from redlotus.runtime.network import (
 )
 from redlotus.runtime.resources import conversations_root, current_workspace
 from redlotus.sessions.context import TRACE_STORE, ChatHistory
-from redlotus.sessions.storage import SessionFile
+from redlotus.sessions.storage import SessionFile, session_status
 from redlotus.tools.registry import SkillsManager
 from redlotus.ui.presentation import (
     build_panel_snapshot,
@@ -108,7 +107,7 @@ def print_cli_help() -> None:
                 "|---|---|",
                 *rows,
                 "",
-                '用 @路径、@"含空格路径" 或 @{路径} 引用文件，支持 Tab 补全；最多 20 个。'
+                '用 @路径、@"含空格路径" 或 @{路径} 引用文件，支持 Tab 补全。'
                 "图片、视频按原生多模态协议传递，具体支持取决于当前网关。",
             ]
         )
@@ -246,7 +245,7 @@ def _format_usage_report(report: UsageReport) -> str:
                 f"  missing price: {summary.price_unavailable_responses} responses"
             )
     lines.extend(
-        [f"Files: {len(report.files)}", *(str(item.path) for item in report.files[:settings()["ui"]["usage_file_limit"]])]
+        [f"Files: {len(report.files)}", *(str(item.path) for item in report.files)]
     )
     return "\n".join(lines)
 
@@ -331,10 +330,10 @@ async def _print_lifecycle_status(system: Any) -> None:
     lines.append(
         f"Active: {len(active)}; recent completed: {sum(row.state == AgentInvocationState.COMPLETED for row in recent)}; failed/cancelled: {sum(row.state in (AgentInvocationState.FAILED, AgentInvocationState.CANCELLED) for row in recent)}"
     )
-    for row in [*active, *recent[-5:]]:
+    for row in [*active, *recent]:
         elapsed = (row.finished_at or time.monotonic()) - row.started_at
         lines.append(
-            f"({row.state.value}) {row.role} inv={row.invocation_id[:8]} parent={(row.parent_invocation_id or '-')[:8]} turn={row.turn_id} {elapsed:.1f}s"
+            f"({row.state.value}) {row.role} inv={row.invocation_id} parent={row.parent_invocation_id or '-'} turn={row.turn_id} {elapsed:.1f}s"
         )
     print_panel("\n".join(lines), title="Agent 生命周期")
 
@@ -350,7 +349,7 @@ def _format_stm_snapshot(snapshot: dict) -> str:
         "db_path": "LanceDB",
         "table_name": "记忆表",
         "row_count": "项目记录数",
-        "observed_turns": "当前会话已结束回合",
+        "observed_turns": "当前会话已确认完成回合",
         "consumed_turns": "当前会话已处理回合",
         "pending_turns": "当前会话待处理回合",
         "window_turns": "窗口大小",
@@ -358,6 +357,7 @@ def _format_stm_snapshot(snapshot: dict) -> str:
     }
     lines = [
         "## 项目情景记忆",
+        *( ["历史计数不完整；仅展示已确认数量。"] if snapshot.get("turn_count_incomplete") else []),
         *(f"- {label}: {snapshot.get(key, '')}" for key, label in fields.items()),
     ]
     lines.extend(
@@ -412,28 +412,23 @@ class SlashCommands:
         return await value if inspect.isawaitable(value) else value
 
     async def panel(self):
-        include_all = any(part.strip().lower() == "--all" for part in self.parts[1:])
         snapshot = await build_panel_snapshot(
             log_root=conversations_root(),
             system=self.system,
             coordinator_history=self.state.history,
             manager_history=self.system._manager_history,
-            include_all=include_all,
         )
         console.print(render_panel(snapshot))
-        return None
 
     async def trace(self):
         if len(self.parts) < 2:
             print_error("用法: /trace <turn_id>")
             return None
         print_markdown(TRACE_STORE.format_turn(self.parts[1].strip()))
-        return None
 
     async def stop(self):
         msg = await self.system.stop_current_turn()
         console.print(msg)
-        return None
 
     async def cancel(self):
         if len(self.parts) < 2:
@@ -477,7 +472,6 @@ class SlashCommands:
                 return None
         self.system.record_control_result("cancel", iid, "not_found", accepted=False)
         print_warning(f"未找到活跃 invocation_id={iid!r}（支持 UUID 前缀匹配）。")
-        return None
 
     async def memory(self):
         global_scope = self.parts[0].lower() == "/ltm"
@@ -509,7 +503,7 @@ class SlashCommands:
             answer = await self.system.toolkit.ask_user(
                 f"Type CLEAR {label} to clear {label}. This cannot be undone."
             )
-            if answer.strip() == "CLEAR " + label:
+            if getattr(answer, "return_value", answer).strip() == "CLEAR " + label:
                 await (
                     memory.clear_long_term()
                     if global_scope
@@ -518,7 +512,6 @@ class SlashCommands:
                 print_success(label + " cleared.")
         else:
             print_error(f"Usage: /{label} show | clear | retry")
-        return None
 
     async def agent(self):
         roles = get_agent_roles()
@@ -538,10 +531,7 @@ class SlashCommands:
                 if target:
                     console.print(f"最近请求使用的配置模型: {target['name']}")
                 console.print(f"服务返回的模型标识: {latest.model_name}")
-            console.print(f"切换模型: /agent <{role_text}> <预设或模型名称>")
-            presets = settings().get("model_presets", {})
-            if presets:
-                console.print("可用预设: " + "、".join(presets))
+            console.print(f"切换模型: /agent <{role_text}> <模型名称>")
             return None
         if len(self.parts) < 3:
             print_error(f"用法: /agent <{role_text}> <模型名称>")
@@ -561,7 +551,6 @@ class SlashCommands:
             print_success(f"已选择 [{role}] {model_name}；{when}。")
         except ValueError as e:
             print_error(str(e))
-        return None
 
     async def effort(self):
         if len(self.parts) == 1:
@@ -598,9 +587,11 @@ class SlashCommands:
             embedding=len(self.parts) == 2,
             ask=self.controller.config_prompt,
         )
-        return None
 
     async def cd(self):
+        if self.controller.is_transitioning:
+            print_error("会话仍在切换，当前目录未改变。")
+            return
         if len(self.parts) < 2:
             print_error("用法：/cd <path>")
             return
@@ -610,9 +601,9 @@ class SlashCommands:
         if not target.is_dir():
             print_error(f"目录不存在: {target}")
             return
-        await self.controller.reset_session(self.state.history, workspace=target)
+        loaded = await self.controller.enter_current_workspace(state=self.state, workspace=target)
         print_success(f"已切换工作目录: {target}")
-        return not await self.controller.enter_current_workspace(state=self.state)
+        return not loaded
 
     async def load(self):
         loaded = await self.controller.enter_current_workspace(
@@ -657,22 +648,20 @@ class WorkspaceSnapshot:
         return value if isinstance(value, int) and value >= 0 else 0
 
     @property
+    def turn_count_label(self) -> str:
+        return (f"已确认 {self.completed_turns} 回合（历史计数不完整）"
+                if self.meta.get("turn_count_incomplete") else f"{self.completed_turns} 回合")
+
+    @property
     def status(self) -> str:
         if not self.is_loadable:
             return "损坏"
-        cached = {
+        return {
             "active": "进行中",
             "interrupted": "上次已中断",
             "completed": "已完成",
             "new": "未开始",
-        }.get(self.meta.get("status"))
-        if cached:
-            return cached
-        if self.meta.get("active_turn"):
-            return "进行中"
-        if self.meta.get("interrupted_turn"):
-            return "上次已中断"
-        return "已完成" if self.completed_turns else "未开始"
+        }[session_status(self.meta)]
 
     @property
     def local_activity_time(self) -> str:
@@ -680,7 +669,7 @@ class WorkspaceSnapshot:
 
     @property
     def error_summary(self) -> str:
-        return " ".join(self.error.split())[:settings()["ui"]["session_error_max_chars"]] or "会话文件不可读取"
+        return " ".join(self.error.split()) or "会话文件不可读取"
 
     @property
     def label(self):
@@ -691,7 +680,7 @@ class WorkspaceSnapshot:
             )
         return (
             f"标题：{self.title} · 本地活动：{self.local_activity_time} · "
-            f"{self.completed_turns} 回合 · 状态：{self.status} · 会话：{self.session_id}"
+            f"{self.turn_count_label} · 状态：{self.status} · 会话：{self.session_id}"
         )
 
 
@@ -704,7 +693,6 @@ def list_workspace_snapshots(*, root=None, include_unloadable=False):
                 path, meta, datetime.fromisoformat(meta["saved_at"]), "coordinator",
                 meta["saved_at"][:10], meta["title"], 0
             ))
-            continue
         else:
             from redlotus.ui.presentation import print_warning
             print_warning(f"会话无法加载: {path}: {entry.error}")

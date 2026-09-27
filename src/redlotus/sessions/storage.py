@@ -20,11 +20,10 @@ from pydantic_ai.messages import (
     ToolSearchCallPart,
 )
 
-from redlotus.runtime.config import settings
 from redlotus.runtime.resources import (
     conversations_root,
 )
-from redlotus.sessions.journal import SessionJournal, _json
+from redlotus.sessions.journal import SessionJournal, _journal_lock
 
 
 def _response_id(message):
@@ -63,6 +62,15 @@ class SessionScanInfo:
     error: str = ""
 
 
+def session_status(info):
+    """Use the same persisted state in discovery and conversation views."""
+    return info.get("status") or (
+        "active" if info.get("active_turn") else "interrupted"
+        if info.get("interrupted_turn") or info.get("paused_turn") else "completed"
+        if info.get("completed_turns", 0) else "new"
+    )
+
+
 class SessionFile(SessionJournal):
     """Append completed updates; compact only when retained evidence changes."""
 
@@ -77,7 +85,7 @@ class SessionFile(SessionJournal):
         header = dict(session_id=identity, project_id=project_id, title=title, input_accounting=1,
                       created_at=datetime.now(timezone.utc).isoformat())
         path.parent.mkdir(parents=True, exist_ok=True)
-        with FileLock(path.with_suffix(".lock"), timeout=settings()["storage"]["file_lock_timeout_seconds"]):
+        with _journal_lock(FileLock(path.with_suffix(".lock"))):
             if path.exists():
                 raise FileExistsError(path)
             cls._replace_file(path, {**header, "updates": []}, workspace=workspace)
@@ -85,21 +93,37 @@ class SessionFile(SessionJournal):
 
     @classmethod
     def load(cls, path, *, lock=None, recover=True, commit_recovery=True, workspace=None):
-        return cls(path, lock=lock, recover=recover, commit_recovery=commit_recovery, workspace=workspace)
+        session = cls(path, lock=lock, recover=recover, commit_recovery=commit_recovery, workspace=workspace)
+        if commit_recovery:
+            session.correct_turn_counts()
+        else:
+            turns, metadata = session._completion_projection()
+            session._apply(dict(turns=turns, metadata=metadata))
+        return session
+
+    @classmethod
+    def correct_project_turn_counts(cls, root=None, *, workspace):
+        """Correct only journals belonging to this project; never run memory producers."""
+        result = dict(sessions=0, corrected=0, incomplete=0, completed_turns=0)
+        for path in Path(root or conversations_root(workspace)).glob("*/model_messages.json"):
+            session = cls(path, commit_recovery=False, workspace=workspace)
+            if session.project_id != workspace.project_id:
+                continue
+            result["corrected"] += session.correct_turn_counts()
+            result["sessions"] += 1
+            result["incomplete"] += bool(session.metadata.get("turn_count_incomplete"))
+            result["completed_turns"] += session.completed_turns
+        return result
 
     @staticmethod
     def _scan_record(info):
         if not isinstance(info, dict):
             return None
-        status = info.get("status") or (
-            "active" if info.get("active_turn") else "interrupted"
-            if info.get("interrupted_turn") else "completed"
-            if info.get("completed_turns", 0) else "new"
-        )
         record = {
             "session_id": info.get("session_id"), "project_id": info.get("project_id"),
             "title": info.get("topic", info.get("title", "")), "saved_at": info.get("saved_at"),
-            "completed_turns": info.get("completed_turns", 0), "status": status,
+            "completed_turns": info.get("completed_turns", 0), "status": session_status(info),
+            "turn_count_incomplete": info.get("turn_count_incomplete", False),
         }
         try:
             if (
@@ -124,7 +148,7 @@ class SessionFile(SessionJournal):
         index = root / "index.json"
         try:
             cached = json.loads(index.read_text(encoding="utf-8"))
-            cached = cached["sessions"] if cached.get("version") == 1 and isinstance(cached["sessions"], dict) else {}
+            cached = cached["sessions"] if cached.get("version") == 2 and isinstance(cached["sessions"], dict) else {}
         except (OSError, TypeError, ValueError, KeyError, AttributeError):
             cached = {}
         rows, scanned = {}, []
@@ -135,40 +159,31 @@ class SessionFile(SessionJournal):
                 continue
             signature = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
             key = path.relative_to(root).as_posix()
-            previous = cached.get(key)
-            if isinstance(previous, dict) and previous.get("signature") == signature:
-                if set(previous) == {"signature", "error"} and previous["error"] is True:
-                    rows[key] = previous
-                    scanned.append(SessionScanInfo(path, {}, "会话文件不可读取"))
-                    continue
-                info = cls._scan_record(previous.get("info", {}))
-                if set(previous) == {"signature", "info"} and info:
-                    rows[key] = {"signature": signature, "info": info}
-                    scanned.append(SessionScanInfo(path, info))
-                    continue
-            try:
-                info = cls._scan_record(cls.load(path, commit_recovery=False).info())
-                if info is None:
-                    raise ValueError("会话元数据无效")
-                stat = path.stat()
-                rows[key] = {"signature": {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}, "info": info}
-                scanned.append(SessionScanInfo(path, info))
-            except (OSError, ValueError, KeyError, TypeError) as exc:
-                rows[key] = {"signature": signature, "error": True}
-                scanned.append(SessionScanInfo(path, {}, str(exc)))
+            previous = cached.get(key) if isinstance(cached.get(key), dict) else {}
+            info, error = cls._scan_record(previous.get("info")), previous.get("error", "")
+            if previous.get("signature") != signature or not (info or isinstance(error, str) and error):
+                try:
+                    info = cls._scan_record(cls.load(path, commit_recovery=False).info())
+                    if info is None:
+                        raise ValueError("会话元数据无效")
+                    error = ""
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    info, error = {}, str(exc)
+            rows[key] = dict(signature=signature, info=info, error=error)
+            scanned.append(SessionScanInfo(path, info or {}, error))
         if rows != cached:
             try:
                 # Session-file locks are released before this unrelated cache lock is attempted.
                 with FileLock(index.with_suffix(".lock"), timeout=0):
                     from redlotus.runtime.resources import atomic_write_json
-                    atomic_write_json(index, {"version": 1, "sessions": rows})
+                    atomic_write_json(index, {"version": 2, "sessions": rows})
             except (OSError, Timeout):
                 pass
         return scanned
 
     def acquire_use(self):
         """Protect this loaded instance from cleanup until its owner releases it."""
-        with self._mutex, self._lock:
+        with _journal_lock(self._lock):
             if self._use_lock is None:
                 if not self.path.is_file():
                     raise FileNotFoundError(f"会话恢复文件已不存在: {self.path}")
@@ -180,7 +195,7 @@ class SessionFile(SessionJournal):
 
     def release_use(self):
         """Release only this instance's ownership marker, including repeated shutdown."""
-        with self._mutex, self._lock:
+        with _journal_lock(self._lock):
             if self._use_lock is not None:
                 self._use_lock.release()
                 Path(self._use_lock.lock_file).unlink(missing_ok=True)
@@ -204,19 +219,18 @@ class SessionFile(SessionJournal):
             raise ValueError(f"Invalid session role: {role}")
         if role == self.role:
             return self
-        with self._mutex:
+        path = self.path.with_name(f"model_messages.{role}.json")
+        if role == "coordinator":
+            path = self.path.with_name("model_messages.json")
+        with _journal_lock(FileLock(path.with_suffix(".lock"))) as lock:
             if role in self._roles:
                 return self._roles[role]
-            path = self.path.with_name(f"model_messages.{role}.json")
-            if role == "coordinator":
-                path = self.path.with_name("model_messages.json")
-            with FileLock(path.with_suffix(".lock"), timeout=settings()["storage"]["file_lock_timeout_seconds"]) as lock:
-                if not path.exists():
-                    if not create:
-                        return None
-                    header = {key: self.header[key] for key in ("session_id", "project_id", "title", "created_at")}
-                    self._replace_file(path, dict(header, role=role, updates=[]), workspace=self.workspace)
-                child = SessionFile.load(path, lock=lock, workspace=self.workspace)
+            if not path.exists():
+                if not create:
+                    return None
+                header = {key: self.header[key] for key in ("session_id", "project_id", "title", "created_at")}
+                self._replace_file(path, dict(header, role=role, updates=[]), workspace=self.workspace)
+            child = SessionFile.load(path, lock=lock, workspace=self.workspace)
             if child.session_id != self.session_id or child.project_id != self.project_id or child.role != role:
                 raise ValueError(f"Role journal belongs to another session: {path}")
             self._roles[role] = child
@@ -287,35 +301,35 @@ class SessionFile(SessionJournal):
 
 
     def _append(self, update):
+        """Filter state deltas once, then publish a single journal transaction."""
         if self._pending_update is not None:
             raise OSError(f"存在尚未确认保存的批次，请先重试: {self.path}")
         self._split_legacy_roles()
-        update = self._pack({key: value for key, value in update.items()
-                             if value or key in {"context", "contexts"}})
+        for name in ("metadata", "turns", "jobs", "prompts", "usage", "inputs"):
+            previous = getattr(self, "_" + name)
+            rows = {key: value for key, value in update.get(name, {}).items() if key not in previous or value != previous[key]}
+            if name in {"turns", "jobs"}:
+                rows = {key: {field: value for field, value in row.items()
+                              if field not in previous.get(key, {}) or value != previous[key][field]}
+                        for key, row in rows.items()}
+            update[name] = {key: value for key, value in rows.items() if value} if name in {"turns", "jobs"} else rows
+        update = {key: value for key, value in update.items() if value or key in {"context", "contexts"}}
+        if not update or set(update) == {"agent_id"}:
+            return
+        update = self._pack(update)
         update["commit"] = self._commit_tag(update, self._count + 1)
         self._pending_update = update
         self._write_update(update)
 
-
-
     def update(self, *, metadata=None, turns=None, jobs=None):
         """Append only changed metadata, turn fields, and perception job fields."""
         with self._locked_state():
-            changes = {}
-            for name, value, previous in (("metadata", metadata, self._metadata), ("turns", turns, self._turns), ("jobs", jobs, self._jobs)):
-                if value:
-                    delta = {key: item for key, item in value.items() if item != previous.get(key)}
-                    if name != "metadata":
-                        delta = {key: {field: item for field, item in row.items() if item != previous.get(key, {}).get(field)}
-                                 for key, row in delta.items()}
-                    if delta:
-                        changes[name] = delta
-            if changes:
-                self._append(changes)
+            self._append(dict(metadata=metadata or {}, turns=turns or {}, jobs=jobs or {}))
 
-    def save_context(self, messages, *, turn_id, metadata=None, agent_id="", invocation=None):
+    def save_context(self, messages, *, turn_id, metadata=None, agent_id="", invocation=None, completed_turn=None):
         """Serialize the changed suffix; old SDK message objects stay untouched."""
         with self._locked_state():
+            self.correct_turn_counts()
             previous_view = self._views.get(agent_id, [])
             previous_context = self._contexts.get(agent_id, [])
             prefix = 0
@@ -326,7 +340,8 @@ class SessionFile(SessionJournal):
             start = max(0, prefix - 1)
             view = previous_view[:start]
             next_id = self._next_id
-            additions, prompts, usage, pending_digests = {}, {}, {}, {}
+            additions, prompts, usage = {}, {}, {}
+            known = {id(message): key for message, key in previous_view}
             for offset, message in enumerate(messages[start:], start=start):
                 from redlotus.tools.references import reference_message_data
                 raw = ModelMessagesTypeAdapter.dump_python([message], mode="json")[0]
@@ -336,32 +351,27 @@ class SessionFile(SessionJournal):
                     if identity not in self._prompts:
                         prompts[identity] = instructions
                     raw["instructions"] = {"prompt_id": identity}
-                digest = hashlib.sha256(_json(raw).encode()).hexdigest()
-                key = pending_digests.get(digest, self._digests.get((agent_id, digest)))
+                key = known.get(id(message))
+                if key is None and offset < len(previous_context) and self._records[previous_context[offset]]["message"] == raw:
+                    key = previous_context[offset]
                 if key is None:
-                    if offset < prefix:
-                        key = previous_view[offset][1]
-                    else:
-                        key = str(next_id)
-                        next_id += 1
-                    previous_record = self._records.get(key, {})
-                    previous_message = previous_record.get("message", {})
+                    key = str(next_id)
+                    next_id += 1
+                previous_record = self._records.get(key, {})
+                previous_message = previous_record.get("message", {})
+                if raw != previous_message:
                     additions[key] = dict(
                         turn_id=previous_record.get("turn_id", turn_id),
                         message={field: value for field, value in raw.items()
                                  if field not in previous_message or value != previous_message[field]},
+                        **({"agent_id": agent_id} if agent_id else {}),
+                        **({"invocation": invocation} if invocation else {}),
                     )
-                    if agent_id:
-                        additions[key]["agent_id"] = agent_id
-                    if invocation:
-                        additions[key]["invocation"] = invocation
-                    pending_digests[digest] = key
                 usage.update(self._usage_updates([message],
                     turn_id=self._records.get(key, {}).get("turn_id", turn_id),
                     agent_id=agent_id, invocation=invocation,
                 ))
                 view.append((message, key))
-            changed_meta = {key: value for key, value in (metadata or {}).items() if value != self._metadata.get(key)}
             context = [key for _, key in view]
             shared = 0
             for current, previous in zip(context, previous_context):
@@ -369,13 +379,21 @@ class SessionFile(SessionJournal):
                     break
                 shared += 1
             update = dict(messages=additions, prompts=prompts, usage=usage,
-                          metadata=changed_meta)
+                          metadata=metadata or {})
+            if completed_turn is not None:
+                event = {**completed_turn, "final_response_completed": True}
+                event["number"] = self._turns.get(event["id"], {}).get("number", len(self._turns) + 1)
+                records = {**self._records, **{key: {**self._records.get(key, {}), **record,
+                            "message": {**self._records.get(key, {}).get("message", {}), **record["message"]}}
+                            for key, record in additions.items()}}
+                turns, totals = self._completion_projection(event, records)
+                turns[event["id"]] = {**event, **turns[event["id"]]}
+                update.update(turns=turns, metadata={**(metadata or {}), **totals})
             if agent_id:
                 update["agent_id"] = agent_id
             if context != previous_context:
                 update["context_delta"] = dict(start=shared, ids=context[shared:])
-            if additions or prompts or usage or changed_meta or "context_delta" in update:
-                self._append(update)
+            self._append(update)
             self._views[agent_id] = view
             return list(self._contexts.get(agent_id, []))
 
@@ -393,29 +411,35 @@ class SessionFile(SessionJournal):
     def model_messages(self, *, agent_id=""):
         """Restore the current SDK context from its retained message IDs."""
         with self._locked_state():
-            return self._decode([self._records[key] for key in self._contexts.get(agent_id, [])])
+            messages = self._decode([self._records[key] for key in self._contexts.get(agent_id, [])])
+            self._views[agent_id] = list(zip(messages, self._contexts.get(agent_id, [])))
+            return messages
 
-    def read_turn(self, turn_id):
-        """Decode retained main-Agent evidence belonging to one real user turn."""
+    def read_turn(self, turn_id, *, sources=False):
+        """Decode retained evidence while preserving each original audit message offset."""
         with self._locked_state():
-            return self._decode([row for row in self._records.values() if row["turn_id"] == turn_id])
+            aliases = next((row.get("audit_turn_ids", [turn_id]) for key, row in self._turns.items()
+                            if turn_id in (key, row.get("turn_id"))), [turn_id])
+            records = [row for row in self._records.values() if row["turn_id"] in aliases and (not sources or not row.get("agent_id"))]
+            messages = self._decode(records)
+            owners = {row.get("turn_id"): key for key, row in self._turns.items()}
+            return [(owners.get(row["turn_id"], turn_id), row["source_index"], message)
+                    for row, message in zip(records, messages)] if sources else messages
 
     def finish_turn(self, turn_id, details):
-        """Assign a completed turn its stable sequence number without recounting replays."""
+        """Save outcome details; only an atomic final-response checkpoint counts."""
         with self._locked_state():
-            previous = self._turns.get(turn_id)
-            number = previous["number"] if previous else self.completed_turns + 1
-            turn = dict(details, id=turn_id, number=number, session_id=self.session_id)
-            metadata = {"completed_turns": max(number, self.completed_turns)}
-            if (self._metadata.get("active_turn") or {}).get("id") == turn_id:
-                metadata["active_turn"] = None
-            self._append(dict(turns={turn_id: turn}, metadata=metadata))
-            return deepcopy(turn)
+            turn = {**details, "id": turn_id, "session_id": self.session_id}
+            turn["number"] = self._turns.get(turn_id, {}).get("number", len(self._turns) + 1)
+            self.update(turns={turn_id: turn}, metadata={"active_turn": None})
+            return self.turn(turn_id)
 
     def pending_turns(self, after):
-        """Return current-session turn evidence after the given consumed position."""
+        """Return reusable evidence in completion order, not audit order."""
         with self._locked_state():
-            return deepcopy(sorted((row for row in self._turns.values() if row["number"] > after), key=lambda row: row["number"]))
+            return deepcopy(sorted((row for row in self._turns.values()
+                                    if (row.get("completion_number") or 0) > after and row.get("evidence_ready")
+                                    ), key=lambda row: row["completion_number"]))
 
     def job(self, identity):
         """Read one persisted perception job without exposing mutable stored state."""
@@ -517,6 +541,9 @@ class SessionFile(SessionJournal):
         with self._locked_state():
             if self._pending_update is not None:
                 raise OSError(f"尚未确认保存的批次不能被清理覆盖: {self.path}")
+            retained = set(keep_turn_ids) | {key for job in self._jobs.values()
+                                           if not job.get("indexed") for key in job.get("event_ids", [])}
+            keep_turn_ids = retained | {alias for key in retained for alias in self._turns.get(key, {}).get("audit_turn_ids", [])}
             contexts = {agent: context for agent, context in self._contexts.items()
                         if release_turn_id is None or agent in keep_agent_ids or not any(
                             self._records[key]["turn_id"] == release_turn_id for key in context
@@ -526,10 +553,10 @@ class SessionFile(SessionJournal):
             owners = {row["turn_id"] for row in records.values()}
             retained_turns = keep_turn_ids | {key for key, row in self._turns.items() if row.get("turn_id", key) in owners}
             prompts = {row["message"]["instructions"]["prompt_id"] for row in records.values() if isinstance(row["message"].get("instructions"), dict)}
-            snapshot = dict(messages=records, prompts={key: self._prompts[key] for key in prompts},
+            snapshot = dict(messages=records, next_id=self._next_id, message_offsets=self._message_offsets, prompts={key: self._prompts[key] for key in prompts},
                             contexts=contexts, metadata=self._metadata, jobs=self._jobs, usage=self._usage, inputs=self._inputs,
                             turns={key: row if key in retained_turns else
-                                   {field: row[field] for field in ("id", "number", "session_id", "status")}
+                                   dict({field: value for field, value in row.items() if field not in {"user_inputs", "reference_ids", "evidence_paths", "inline_messages"}}, evidence_ready=False)
                                    for key, row in self._turns.items()})
             update = self._pack(snapshot, snapshot=True)
             update["commit"] = self._commit_tag(update, 1)

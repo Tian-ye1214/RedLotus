@@ -46,8 +46,9 @@ def load_prompt(filename: str) -> str:
     return (prompts_dir() / filename).read_text(encoding="utf-8")
 
 def get_skills_layout_text(skills_manager: SkillsManager) -> str:
-    root = skills_manager.skills_dir.resolve()
-    skills_root_path = f"Local absolute path: `{root}`"
+    skills_root_path = "; ".join(f"`{root.resolve()}`" for root in skills_manager._roots)
+    if skills_manager.skills_dir is None:
+        skills_root_path += '; user installs require storage.runtime_dir (for example: WorkDatabase/runtime)'
     return load_prompt("skills_layout.md").format(skills_root_path=skills_root_path)
 
 

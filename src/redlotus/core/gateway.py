@@ -36,8 +36,9 @@ from redlotus.runtime.network import (
     ModelTarget,
     context_length_exceeded,
     create_model,
+    is_transport_interruption,
 )
-from redlotus.sessions.context import agent_context, current_agent_id, current_usage_recorder
+from redlotus.sessions.context import agent_context, current_agent_id, current_usage_recorder, pending_tool_calls
 
 
 class RequestPolicy(AbstractCapability):
@@ -133,7 +134,7 @@ class RequestPolicy(AbstractCapability):
     async def on_run_error(self, ctx, *, error):
         """Retain cancelled request usage without turning control receipts into responses."""
         pending = self._pending_requests.pop(ctx.run_id, None)
-        if pending and isinstance(error, asyncio.CancelledError):
+        if pending and (isinstance(error, asyncio.CancelledError) or is_transport_interruption(error)):
             context, request, start = pending
             response = next((message for message in context.messages[start:]
                              if isinstance(message, ModelResponse)
@@ -153,6 +154,16 @@ class RequestPolicy(AbstractCapability):
                 raise cause
             cause = cause.__cause__
         raise error
+
+
+def coordinator_stream_handler(system):
+    if not system.presentation.supports_model_stream():
+        return None
+    session, generation = system.session_key, system._session.generation
+    return system.presentation.TextEventStreamHandler(
+        title="Coordinator",
+        is_current=lambda: (system.session_key, system._session.generation) == (session, generation),
+    )
 
 
 class AgentRunner:
@@ -190,10 +201,8 @@ class AgentRunner:
                         if on_node:
                             # Audit the pending tool batch before a compressor changes the model view.
                             run.ctx.state.message_history.append(node.request)
-                            try:
-                                await on_node(run)
-                            finally:
-                                run.ctx.state.message_history.pop()
+                            await on_node(run)
+                            run.ctx.state.message_history.pop()
                         if before_request:
                             await before_request(run, node)
 
@@ -259,14 +268,7 @@ class AgentRunner:
 
     @staticmethod
     def _close_interrupted_calls(messages, results, error):
-        pending = {}
-        for message in messages:
-            for part in message.parts:
-                kind = getattr(part, "part_kind", "")
-                if kind == "tool-call":
-                    pending[part.tool_call_id] = part
-                elif kind in ("tool-return", "retry-prompt"):
-                    pending.pop(getattr(part, "tool_call_id", ""), None)
+        pending = pending_tool_calls(messages)
         completed = [part for part in results if part.tool_call_id in pending]
         for part in completed:
             pending.pop(part.tool_call_id, None)
@@ -287,7 +289,7 @@ class AgentRunner:
                     "interruption_status": status,
                 },
             )
-            for key, part in pending.items()
+            for key, (_, part) in pending.items()
         )
         if completed:
             messages.append(ModelRequest(parts=completed))

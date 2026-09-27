@@ -6,20 +6,30 @@ import hashlib
 import json
 import os
 import re
-import threading
 from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path
 from textwrap import indent
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
-from redlotus.runtime.config import settings
 from redlotus.sessions.cleanup import _write_with_cleanup
+from redlotus.sessions.context import _CANCELLING_WRITE
 
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+@contextmanager
+def _journal_lock(lock):
+    """Let the owner loop wait for contended checkpoint locks outside its writer."""
+    cancelled = _CANCELLING_WRITE.get()
+    was_cancelled = cancelled is not None and cancelled()
+    with lock.acquire(blocking=cancelled is None):
+        if not was_cancelled and cancelled is not None and cancelled():
+            raise Timeout(lock.lock_file)
+        yield lock
 
 
 class SessionJournal:
@@ -28,8 +38,7 @@ class SessionJournal:
     def __init__(self, path, *, lock=None, recover=True, commit_recovery=True, workspace=None):
         self.path = Path(path)
         self.workspace = workspace
-        self._lock = lock or FileLock(self.path.with_suffix(".lock"), timeout=settings()["storage"]["file_lock_timeout_seconds"])
-        self._mutex = threading.RLock()
+        self._lock = lock or FileLock(self.path.with_suffix(".lock"))
         self._recover_partial = recover
         self._commit_recovery = commit_recovery
         self.recovered_partial_write = False
@@ -46,7 +55,7 @@ class SessionJournal:
 
 
     def _read(self):
-        with self._mutex, self._lock:
+        with _journal_lock(self._lock):
             previous_views = self._views
             previous_records = getattr(self, "_records", {})
             data, self.recovered_partial_write = self._inspect(self.path.read_bytes())
@@ -58,8 +67,8 @@ class SessionJournal:
                     self._replace(data)
             self.header = {key: value for key, value in data.items() if key != "updates"}
             self._records, self._prompts, self._metadata, self._turns = {}, {}, {}, {}
-            self._jobs, self._usage, self._digests, self._inputs = {}, {}, {}, {}
-            self._texts = {}
+            self._jobs, self._usage, self._inputs = {}, {}, {}
+            self._texts, self._resume_links, self._pause_requests, self._message_offsets = {}, {}, {}, {}
             self._pending_jobs = set()
             self._contexts, self._views = {"": []}, {}
             self._next_id = 0
@@ -215,8 +224,8 @@ class SessionJournal:
 
     @contextmanager
     def _locked_state(self):
-        """Hold the thread/file locks and refresh once before reading or updating state."""
-        with self._mutex, self._lock:
+        """Hold the journal lock and refresh once before reading or updating state."""
+        with _journal_lock(self._lock):
             self._refresh()
             yield
 
@@ -230,11 +239,15 @@ class SessionJournal:
             target[path[-1]] = self._texts[identity]
         self._prompts.update(update.get("prompts", {}))
         self._metadata.update(update.get("metadata", {}))
+        for state in update.get("metadata", {}).values():
+            if isinstance(state, dict) and (request := state.get("request")) and isinstance(request, dict):
+                if (identity := request.get("id")) and (turn := state.get("turn_id")):
+                    self._resume_links[turn] = self._pause_requests.setdefault(identity, turn)
         for name, target in (("turns", self._turns), ("jobs", self._jobs)):
             for key, value in update.get(name, {}).items():
                 target.setdefault(key, {}).update(value)
                 if name == "jobs":
-                    if target[key].get("indexed"):
+                    if target[key].get("indexed") or target[key].get("superseded_by_turn_count_version"):
                         self._pending_jobs.discard(key)
                     else:
                         self._pending_jobs.add(key)
@@ -245,16 +258,13 @@ class SessionJournal:
             self._contexts[""] = update["context"]
         if delta := update.get("context_delta"):
             self._contexts.setdefault(update.get("agent_id", ""), [])[delta["start"]:] = delta["ids"]
+        self._message_offsets.update(update.get("message_offsets", {}))
         for key, record in update.get("messages", {}).items():
-            previous = self._records.setdefault(key, {"message": {}})
-            if previous["message"]:
-                digest = hashlib.sha256(_json(previous["message"]).encode()).hexdigest()
-                owner = previous.get("agent_id", "")
-                if self._digests.get((owner, digest)) == key:
-                    del self._digests[owner, digest]
+            owner = record.get("turn_id", self._records.get(key, {}).get("turn_id"))
+            previous = self._records.setdefault(key, {"message": {}, "source_index": self._message_offsets.get(owner, 0)})
             previous.update({name: value for name, value in record.items() if name != "message"})
             previous["message"].update(record["message"])
-            self._digests[previous.get("agent_id", ""), hashlib.sha256(_json(previous["message"]).encode()).hexdigest()] = key
+            self._message_offsets[owner] = max(self._message_offsets.get(owner, 0), previous["source_index"] + 1)
             self._next_id = max(self._next_id, int(key) + 1)
         self._next_id = max(update.get("next_id", 0), self._next_id)
 
@@ -326,7 +336,7 @@ class SessionJournal:
         """Settle an uncertain previous write before admitting another transaction."""
         for child in list(self._roles.values()):
             child.retry_pending()
-        with self._mutex, self._lock:
+        with _journal_lock(self._lock):
             pending = self._pending_update
             if pending is None:
                 return
@@ -340,3 +350,104 @@ class SessionJournal:
                 self._write_update(pending)
             else:
                 raise OSError("会话已有其他写入，未保存批次不能覆盖新的提交")
+
+
+    def _completion_projection(self, completed=None, records=None):
+        """Project completion and memory eligibility without changing audit identities."""
+        turns, records = dict(self._turns), self._records if records is None else records
+        if completed:
+            turns[completed["id"]] = {**turns.get(completed["id"], {}), **completed,
+                                      "final_response_completed": True}
+        links, bodies = {turn.get("turn_id", key): turn["logical_turn_id"] for key, turn in turns.items() if turn.get("logical_turn_id")}, {}
+        links.update(self._resume_links)
+        for record in records.values():
+            owner, message = record.get("turn_id"), record["message"]
+            if record.get("agent_id"):
+                continue
+            bodies.setdefault(owner, []).append(message)
+            for part in message.get("parts", []):
+                for item in part.get("content", []) if isinstance(part.get("content"), list) else []:
+                    if isinstance(item, dict) and (item.get("metadata") or {}).get("origin") == "runtime_control":
+                        try:
+                            control = json.loads(item.get("content", ""))
+                        except (ValueError, TypeError):
+                            continue
+                        if isinstance(control, dict) and control.get("command") == "resume" and control.get("turn_id"):
+                            links[owner] = control["turn_id"]
+        def root(identity):
+            seen = set()
+            while identity in links and links[identity] not in seen:
+                seen.add(identity)
+                identity = links[identity]
+            return identity
+        groups = {}
+        for identity, turn in turns.items():
+            groups.setdefault(root(turn.get("turn_id", identity)), []).append(identity)
+        sealed = {key for job in self._jobs.values() if job.get("window") and (job.get("done") or job.get("indexed")
+                  or {"sealed_at", "records_committed_at"}.intersection(job.get("timings", {}))) for key in job["window"].get("new_turn_ids", [])}
+        updates, confirmed, incomplete = {}, [], bool(self._metadata.get("turn_count_incomplete") or
+            self._metadata.get("turn_count_version") != 2 and self._metadata.get("completed_turns", 0) > len(turns))
+        for logical, ids in groups.items():
+            aliases = list(dict.fromkeys([logical, *(turns[key].get("turn_id", key) for key in ids)]))
+            candidates, ready = [], False
+            for identity in ids:
+                turn = turns[identity]
+                history = bodies.get(turn.get("turn_id", identity), [])
+                final = any(message.get("kind") == "response" and (message.get("metadata") or {}).get("origin") not in {"context_summary", "execution_status", "runtime_control"}
+                            and any(part.get("part_kind") == "text" for part in message.get("parts", []))
+                            and not any(part.get("part_kind") == "tool-call" for part in message.get("parts", [])) for message in history)
+                contradiction = any((message.get("metadata") or {}).get("origin") == "execution_status" for message in history)
+                success = turn.get("status") == "success" and turn.get("number", 0) > 0 and not contradiction
+                receipt = (turn.get("final_response_completed") or turn.get("completion_number") or
+                           self._metadata.get("turn_count_version") != 2 and success and (turn.get("turn_id") or identity in sealed))
+                if receipt:
+                    candidates.append(identity)
+                    ready |= bool(final and "user_inputs" in turn)
+                elif turn.get("status") not in {"cancelled", "failed", "needs_input", "running"}:
+                    incomplete = True
+                updates[identity] = dict(logical_turn_id=logical, audit_turn_ids=aliases, audit_event_ids=ids,
+                                         completion_number=None, evidence_ready=False)
+            if candidates:
+                representative = next((key for key in candidates if turns[key].get("completion_number")), candidates[-1])
+                confirmed.append(representative)
+                updates[representative].update(evidence_ready=ready, final_response_completed=True)
+        confirmed.sort(key=lambda key: (not turns[key].get("completion_number"),
+                                        turns[key].get("completion_number") or turns[key].get("number", len(turns) + 1)))
+        for ordinal, identity in enumerate(confirmed, 1):
+            updates[identity]["completion_number"] = ordinal
+        incomplete |= bool(set(bodies) - {turn.get("turn_id", key) for key, turn in turns.items()} - set(links.values()))
+        cursors = {key: self._metadata.get(key, 0) for key in ("perception_consumed", "perception_reserved")}
+        reopened = min((updates[key]["completion_number"] - 1 for key in confirmed if updates[key]["evidence_ready"]
+                        and not self._turns.get(key, {}).get("evidence_ready") and not self._turns.get(key, {}).get("memory_covered")),
+                       default=max(cursors.values()))
+        return updates, dict(completed_turns=len(confirmed), turn_count_version=2, turn_count_incomplete=incomplete,
+                             **{key: min(value, reopened) for key, value in cursors.items()})
+
+    def correct_turn_counts(self):
+        """Use one locked transaction for legacy counts, eligibility and job recovery."""
+        with self._locked_state():
+            if self.recovered_partial_write and not self._commit_recovery:
+                self._commit_recovery = True
+                self._read()
+            if self._metadata.get("turn_count_version") == 2 or self.header.get("role", "coordinator") != "coordinator":
+                return False
+            turns, metadata = self._completion_projection()
+            covered, jobs = set(), {}
+            for identity, job in self._jobs.items():
+                if not (window := job.get("window")):
+                    continue
+                committed = bool(job.get("done") or job.get("indexed") or "records_committed_at" in job.get("timings", {}))
+                ids = window.get("new_turn_ids", []) if committed else []
+                covered.update(ids)
+                jobs[identity] = dict(turn_count_migration=dict(committed=committed, covered_turn_ids=ids))
+                if not committed:
+                    jobs[identity]["superseded_by_turn_count_version"] = 2
+            turns = {key: dict(turn, memory_covered=bool(covered.intersection(turn["audit_event_ids"]))) for key, turn in turns.items()}
+            consumed = min((turn["completion_number"] - 1 for turn in turns.values()
+                            if turn["completion_number"] and turn["evidence_ready"] and not turn["memory_covered"]),
+                           default=metadata["completed_turns"])
+            metadata.update(perception_consumed=consumed, perception_reserved=consumed,
+                            legacy_turn_count={key: self._metadata.get(key, 0) for key in
+                                               ("completed_turns", "perception_consumed", "perception_reserved")})
+            self._append(dict(turns=turns, jobs=jobs, metadata=metadata))
+            return True

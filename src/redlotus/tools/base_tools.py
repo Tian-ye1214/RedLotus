@@ -12,9 +12,7 @@ import re
 import shlex
 import subprocess
 import threading
-import time
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import Callable
 
@@ -23,7 +21,7 @@ from ddgs import DDGS
 from pydantic_ai import BinaryContent, ToolReturn
 
 from redlotus.runtime import logging as logger
-from redlotus.runtime.config import get_env, settings
+from redlotus.runtime.config import get_env
 from redlotus.runtime.network import get_client
 from redlotus.runtime.resources import (
     WorkspaceContext,
@@ -48,24 +46,20 @@ async def generate_image_from_flux(prompt: str, width: int | None = None, height
     bfl_base_url = get_env("BFL_BASE_URL", warn=False)
     bfl_api_key = get_env("BFL_API_KEY", warn=False)
     if not bfl_api_key:
-        return "Error: BFL_API_KEY environment variable is not set. Please set it before using image generation."
+        return "Error: BFL_API_KEY environment variable is not set."
 
-    config = settings()
-    policy = config["image_generation"]
-    width = policy["width"] if width is None else width
-    height = policy["height"] if height is None else height
-    max_wait_time = policy["max_wait_seconds"] if max_wait_time is None else max_wait_time
-    timeout, redirects = policy["http_timeout_seconds"], config["input_limits"]["max_redirects"]
-    client = get_client(f"image_generation:{timeout}:{redirects}", partial(
-        httpx.AsyncClient, timeout=timeout, follow_redirects=True, max_redirects=redirects,
-    ))
+    client = get_client("image_generation", lambda: httpx.AsyncClient(follow_redirects=True))
     headers = {"accept": "application/json", "x-key": bfl_api_key}
     request_id = None
-    start_time = time.monotonic()
     try:
         async with asyncio.timeout(max_wait_time):
             logger.info("正在提交图像生成请求")
-            response = await client.post(bfl_base_url, headers=headers, json={"prompt": prompt, "width": width, "height": height})
+            payload = {"prompt": prompt}
+            if width is not None:
+                payload["width"] = width
+            if height is not None:
+                payload["height"] = height
+            response = await client.post(bfl_base_url, headers=headers, json=payload)
             response.raise_for_status()
             response_data = response.json()
             request_id = response_data.get("id")
@@ -73,11 +67,7 @@ async def generate_image_from_flux(prompt: str, width: int | None = None, height
             if not polling_url:
                 return f"Error: No polling_url received from API. Response: {response_data}"
             logger.info(f"请求已提交，Request ID: {request_id}")
-            poll_count = 0
             while True:
-                poll_count += 1
-                if poll_count % policy["progress_every_polls"] == 0:
-                    logger.info(f"仍在等待中... (已等待 {time.monotonic() - start_time:.1f} 秒)")
                 result_response = await client.get(polling_url, headers=headers)
                 result_response.raise_for_status()
                 result = result_response.json()
@@ -89,14 +79,15 @@ async def generate_image_from_flux(prompt: str, width: int | None = None, height
                     img_response = await client.get(image_url)
                     img_response.raise_for_status()
                     mime_type = img_response.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-                    info_text = f"Image generated successfully!\nImage URL: {image_url}\nPrompt: {prompt}\nDimensions: {width}x{height}"
+                    info_text = f"Image generated successfully!\nImage URL: {image_url}\nPrompt: {prompt}"
+                    if width is not None and height is not None:
+                        info_text += f"\nDimensions: {width}x{height}"
                     logger.info("图像生成成功！")
                     return img_response.content, mime_type, info_text
                 if status == "Failed":
                     error_msg = result.get("error", "Unknown error")
                     logger.error(f"图像生成失败: {error_msg}")
                     return f"Error: Image generation failed - {error_msg}"
-                await asyncio.sleep(policy["poll_interval_seconds"])
     except TimeoutError:
         return f"Error: Image generation timed out after {max_wait_time} seconds. Request ID: {request_id}"
     except (httpx.HTTPError, ValueError) as e:
@@ -115,18 +106,15 @@ class BasicToolkit:
         self.workspace = workspace or WorkspaceContext.from_path(current_workspace())
         if skills_manager is not None:
             skills_manager.workspace = self.workspace
-        self._clawhub_cwd = runtime_dir(self.workspace)
-        self._skills_overlay = user_skills_dir(self.workspace)
         self._WORK_DATABASE_ROOT = self.workspace.root / "WorkDatabase"
         self._artifact_dir = self._WORK_DATABASE_ROOT
-        self._base_dir: Path = self.workspace.root
         self._file_lock = threading.Lock()
         self._command_lock = asyncio.Lock()
-        self._review_store = PendingReviewStore(self._file_lock)
+        self.review_store = PendingReviewStore(self._file_lock)
         self._references = ReferenceStore(self.workspace)
         self._ask_user_handler = None
         self._show_diff = show_diff
-        self._skills_manager = skills_manager
+        self.skills_manager = skills_manager
         self._browser_session = PlaywrightBrowserSession(self.workspace)
         self._dangerous_patterns = [
             "rm -rf /",
@@ -154,14 +142,6 @@ class BasicToolkit:
             ),
         ]
 
-    @property
-    def skills_manager(self) -> SkillsManager:
-        return self._skills_manager
-
-    @property
-    def review_store(self) -> PendingReviewStore:
-        return self._review_store
-
     async def close(self) -> None:
         """进程退出时关闭 Playwright 等资源。"""
         await self._browser_session.close()
@@ -174,7 +154,7 @@ class BasicToolkit:
             workspace=self.workspace, show_diff=self._show_diff,
         )
         child._file_lock = self._file_lock
-        child._review_store = self._review_store
+        child.review_store = self.review_store
         child._artifact_dir = self._artifact_dir
         child.set_ask_user_handler(bind_to_loop(self.ask_user, owner_loop))
         return child
@@ -196,12 +176,11 @@ class BasicToolkit:
         return task_dir
 
     def reset_task_directory(self):
-        self._base_dir = self.workspace.root
         self._artifact_dir = self._WORK_DATABASE_ROOT
-        logger.info(f"📁 工作目录已重置为: {self._base_dir}")
+        logger.info(f"📁 工作目录已重置为: {self.workspace.root}")
 
     def _readable_path(self, name: str) -> Path:
-        return resolve_readable_path(name, work_base=self._base_dir)
+        return resolve_readable_path(name, work_base=self.workspace.root)
 
     def _safe_path(self, name: str) -> Path:
         path = self._readable_path(name)
@@ -223,12 +202,12 @@ class BasicToolkit:
             if re.search(r"\bclawhub\s+install(?:\s|$)", command_lower):
                 return False, (
                     "Blocked bare `npx clawhub install`. Use: "
-                    f"`npx clawhub --dir skills install <slug>`. Skills dir: {self._skills_overlay}"
+                    f"`npx clawhub --dir skills install <slug>`. Skills dir: {user_skills_dir(self.workspace)}"
                 )
             if re.search(r'--dir(?:=|\s+)["\']?[a-zA-Z]:', command):
                 return False, (
                     "Blocked `--dir` with a drive letter; use `--dir skills` (relative to the skills work dir). "
-                    f"Skills dir: {self._skills_overlay}"
+                    f"Skills dir: {user_skills_dir(self.workspace)}"
                 )
         return True, ""
 
@@ -247,7 +226,7 @@ class BasicToolkit:
         """
         self._ask_user_handler = handler
 
-    async def ask_user(self, question: str) -> str:
+    async def ask_user(self, question: str) -> str | ToolReturn:
         """
         Ask the user a question and return their reply.
 
@@ -330,23 +309,16 @@ class BasicToolkit:
             directory: Optional, subdirectory path, defaults to root directory
         """
         try:
-            target_dir = self._readable_path(directory) if directory else self._base_dir
+            target_dir = self._readable_path(directory) if directory else self.workspace.root
             if not target_dir.exists():
                 return f"Error: Directory '{directory}' does not exist"
 
-            items = []
-            base_r = self._base_dir.resolve()
-            for item in sorted(target_dir.iterdir()):
-                try:
-                    rel_path = str(item.relative_to(base_r))
-                except ValueError:
-                    rel_path = str(item)
-                if item.is_dir():
-                    items.append(f"{rel_path}/")
-                else:
-                    size = item.stat().st_size
-                    items.append(f"{rel_path} ({size} bytes)")
-
+            base_r = self.workspace.root
+            items = [
+                str(item.relative_to(base_r) if item.is_relative_to(base_r) else item)
+                + ("/" if item.is_dir() else f" ({item.stat().st_size} bytes)")
+                for item in sorted(target_dir.iterdir())
+            ]
             return "\n".join(items) if items else "Directory is empty"
         except ValueError as e:
             return str(e)
@@ -356,7 +328,7 @@ class BasicToolkit:
     def _update_file(self, name, update):
         try:
             path = self._safe_path(name)
-            old, content = self._review_store.write(path, name, update)
+            old, content = self.review_store.write(path, name, update)
             added, deleted, modified = self._show_diff(old, content, path=name)
             return f"Saved '{name}' ({len(content)} characters; +{added} -{deleted} ~{modified})"
         except (OSError, ValueError) as exc:
@@ -412,7 +384,7 @@ class BasicToolkit:
         """
         results = []
         try:
-            for file_path in self._base_dir.rglob("*"):
+            for file_path in self.workspace.root.rglob("*"):
                 if not file_path.is_file():
                     continue
                 if file_extension and file_path.suffix != file_extension:
@@ -421,7 +393,7 @@ class BasicToolkit:
                     with open(self._readable_path(str(file_path)), "r", encoding="utf-8", errors="ignore") as f:
                         for line_num, line in enumerate(f, 1):
                             if keyword.lower() in line.lower():
-                                rel_path = file_path.relative_to(self._base_dir)
+                                rel_path = file_path.relative_to(self.workspace.root)
                                 results.append(f"{rel_path}:{line_num}: {line.strip()}")
                 except Exception:
                     continue
@@ -438,27 +410,21 @@ class BasicToolkit:
 
         Args:
             query: Search keywords
-            max_results: Maximum number of results; omitted or null uses web_search.max_results from configuration.
+            max_results: Optional maximum number of results.
         """
-        policy = dict(settings()["web_search"])
-        if max_results is not None:
-            policy["max_results"] = max_results
         try:
-            with DDGS(timeout=policy.pop("timeout_seconds")) as ddgs:
-                results = list(ddgs.text(query, **policy))
+            with DDGS() as ddgs:
+                options = {"max_results": max_results} if max_results is not None else {}
+                results = list(ddgs.text(query, **options))
 
             if not results:
                 logger.warning("⚠️ 没有找到相关搜索结果")
                 return "No relevant search results found."
 
-            output = []
-            for i, result in enumerate(results, 1):
-                title = result.get("title", "No title")
-                link = result.get("href", "No link")
-                snippet = result.get("body", "No summary")
-                output.append(f"{i}. {title}\n   Link: {link}\n   Summary: {snippet}\n")
-
-            return "\n".join(output)
+            return "\n".join(
+                f"{i}. {result.get('title', 'No title')}\n   Link: {result.get('href', 'No link')}\n   Summary: {result.get('body', 'No summary')}\n"
+                for i, result in enumerate(results, 1)
+            )
         except Exception as e:
             logger.error(f"❌ 搜索出错: {e}")
             return f"Error during search: {e}"
@@ -479,33 +445,27 @@ class BasicToolkit:
             command: Command to execute
             timeout: Optional seconds, capped by the configured command limit; omitted uses that limit.
         """
-        is_safe, reason = self._is_command_safe(command)
-        if not is_safe:
-            return f"Error: Security check rejected the command: {reason}"
-
-        danger = self._command_needs_confirm(command)
-        if danger:
-            answer = (
-                (
-                    await self.ask_user(
-                        f"⚠ 该命令将递归删除文件:\n{command}\n确认执行？(y/N)"
-                    )
-                )
-                .strip()
-                .lower()
-            )
-            if answer not in ("y", "yes", "是", "确认"):
-                return f"已取消执行（用户未确认）: {danger}"
-
         try:
+            runtime_dir(self.workspace)
+            is_safe, reason = self._is_command_safe(command)
+            if not is_safe:
+                return f"Error: Security check rejected the command: {reason}"
+
+            danger = self._command_needs_confirm(command)
+            if danger:
+                answer = await self.ask_user(f"⚠ 该命令将递归删除文件:\n{command}\n确认执行？(y/N)")
+                text = answer.return_value if isinstance(answer, ToolReturn) else answer
+                if str(text).strip().lower() not in ("y", "yes", "是", "确认"):
+                    return f"已取消执行（用户未确认）: {danger}"
+
             async with self._command_lock:
                 use_shell = any(
                     c in command for c in ["|", ">", "<", "&&", "||", ";", "*", "?"]
                 )
-                cwd = str(self._base_dir.resolve())
+                cwd = str(self.workspace.root)
                 overrides = None
                 if re.search(r"\bclawhub\b", command, re.I):
-                    cwd = str(self._clawhub_cwd)
+                    cwd = str(runtime_dir(self.workspace))
                     if "--workdir" not in command:
                         overrides = {"CLAWHUB_WORKDIR": cwd}
 
@@ -528,7 +488,7 @@ class BasicToolkit:
     def execution_environment(self) -> str:
         """Report the existing interpreter, dependency install location and project cache paths."""
         return describe_execution_environment(
-            cwd=self._base_dir,
+            cwd=self.workspace.root,
             workspace=self.workspace,
         )
 
@@ -549,9 +509,9 @@ class BasicToolkit:
 
         Args:
             prompt: The text description of what image to generate. Be detailed and specific about the visual content, style, composition, colors, mood, etc. This is the most important parameter.
-            width: Image width in pixels; omitted or null uses image_generation.width from configuration.
-            height: Image height in pixels; omitted or null uses image_generation.height from configuration.
-            max_wait_time: Total seconds for submission, polling and download; omitted or null uses image_generation.max_wait_seconds.
+            width: Optional image width in pixels.
+            height: Optional image height in pixels.
+            max_wait_time: Optional total seconds for submission, polling and download.
 
         Returns:
             Success: The generated image displayed inline plus generation details.
@@ -585,13 +545,6 @@ class BasicToolkit:
         )
 
 
-def _opcodes(baseline: str, current: str):
-    a = baseline.splitlines(keepends=True)
-    b = current.splitlines(keepends=True)
-    sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
-    return a, b, sm.get_opcodes()
-
-
 @dataclass(frozen=True)
 class Hunk:
     """一处连续改动（baseline→current 中的一个非 equal 区块）。"""
@@ -609,9 +562,9 @@ class Hunk:
 
 def compute_hunks(baseline: str, current: str) -> list[Hunk]:
     """把 baseline→current 的差异切成逐块 Hunk 列表（equal 区块跳过）。"""
-    a, b, ops = _opcodes(baseline, current)
+    a, b = baseline.splitlines(keepends=True), current.splitlines(keepends=True)
     hunks: list[Hunk] = []
-    for tag, i1, i2, j1, j2 in ops:
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():
         if tag == "equal":
             continue
         hunks.append(Hunk(len(hunks), i1 + 1, a[i1:i2], j1 + 1, b[j1:j2]))
@@ -623,16 +576,12 @@ def reconstruct(baseline: str, current: str, rejected: set[int]) -> str:
 
     rejected 为空 → 完全等于 current；rejected 含全部块 → 完全等于 baseline。
     """
-    a, b, ops = _opcodes(baseline, current)
-    out: list[str] = []
-    idx = 0
-    for tag, i1, i2, j1, j2 in ops:
-        if tag == "equal":
-            out.extend(b[j1:j2])
-            continue
-        out.extend(a[i1:i2] if idx in rejected else b[j1:j2])
-        idx += 1
-    return "".join(out)
+    lines = current.splitlines(keepends=True)
+    for hunk in reversed(compute_hunks(baseline, current)):
+        if hunk.index in rejected:
+            start = hunk.new_start - 1
+            lines[start:start + len(hunk.new_lines)] = hunk.old_lines
+    return "".join(lines)
 
 
 @dataclass

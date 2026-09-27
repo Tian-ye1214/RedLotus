@@ -1,17 +1,49 @@
 """Conversation history, execution identity and recoverable outcome contracts."""
 from __future__ import annotations
 
+import json
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Literal
+from typing import Any, Callable, Literal, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.messages import ModelRequest, ToolReturnPart
 
-from redlotus.runtime.config import settings
 from redlotus.runtime.resources import WorkspaceContext, bind_context
+from redlotus.prompts.prompt import with_runtime_context
+from redlotus.prompts.message_text import message_has_user_prompt
+
+if TYPE_CHECKING:
+    from redlotus.tools.references import ReferenceFile
+
+
+@dataclass
+class UserMessage:
+    """User prompt text plus optional pydantic-AI multimodal content."""
+
+    text: str
+    attachments: list = field(default_factory=list)
+    original_text: str | None = None
+    references: list[ReferenceFile] = field(default_factory=list)
+    resume: dict | None = None
+
+    def to_prompt(self):
+        """Pass original requirements and explicitly labelled reference data together."""
+        if self.resume is not None:
+            from pydantic_ai.messages import TextContent
+            return [*([] if self.resume.get('submitted', True) else with_runtime_context([self.text])),
+                    TextContent(json.dumps({'command': 'resume', 'turn_id': self.resume['turn_id']}, ensure_ascii=False),
+                                metadata={'origin': 'runtime_control'}),
+                    *(item['text'] for item in self.resume['supplements']),
+                    *(part for ref in self.references if not self.resume.get('submitted', True) or any(ref.id in row.get('reference_ids', []) for row in self.resume['supplements']) for part in ref.to_prompt())]
+        parts = [self.text]
+        for reference in self.references:
+            parts.extend(reference.to_prompt())
+        parts.extend(self.attachments)
+        return with_runtime_context(parts)
+
 
 
 def _part_kind(part) -> str:
@@ -24,15 +56,9 @@ def _tool_key(part) -> str:
     )
 
 
-def _has_user_prompt(message) -> bool:
-    return any(
-        _part_kind(part) == "user-prompt"
-        for part in getattr(message, "parts", ()) or ()
-    )
-
-
-def messages_safe_for_new_prompt(messages: list) -> list:
-    pending: dict[str, int] = {}
+def pending_tool_calls(messages, *, closed_boundaries=None):
+    """Keep original call positions and parts for live interruption and history recovery."""
+    pending = {}
     for index, message in enumerate(messages):
         for part in getattr(message, "parts", ()) or ():
             kind = _part_kind(part)
@@ -40,13 +66,20 @@ def messages_safe_for_new_prompt(messages: list) -> list:
             if kind in ("tool-return", "retry-prompt"):
                 pending.pop(key, None)
             elif kind == "tool-call":
-                pending[key] = index
+                pending[key] = (index, part)
+        if closed_boundaries is not None and not pending:
+            closed_boundaries.append(index + 1)
+    return pending
+
+
+def messages_safe_for_new_prompt(messages: list) -> list:
+    pending = pending_tool_calls(messages)
     if not pending:
         return list(messages)
 
-    cut = min(pending.values())
+    cut = min(index for index, _ in pending.values())
     for index in range(cut, -1, -1):
-        if _has_user_prompt(messages[index]):
+        if message_has_user_prompt(messages[index]):
             cut = index
             break
     return list(messages[:cut])
@@ -54,14 +87,7 @@ def messages_safe_for_new_prompt(messages: list) -> list:
 
 def repair_interrupted_tool_calls(messages: list) -> list:
     """Close only persisted tool calls that have no recorded result."""
-    pending: dict[str, Any] = {}
-    for message in messages:
-        for part in getattr(message, "parts", ()) or ():
-            kind, key = _part_kind(part), _tool_key(part)
-            if kind == "tool-call" and key:
-                pending[key] = part
-            elif kind in ("tool-return", "retry-prompt") and key:
-                pending.pop(key, None)
+    pending = pending_tool_calls(messages)
     if not pending:
         return list(messages)
     metadata = {"origin": "runtime_control", "execution_outcome": "unknown"}
@@ -77,7 +103,7 @@ def repair_interrupted_tool_calls(messages: list) -> list:
             outcome="failed",
             metadata={**metadata, "tool_call_id": key},
         )
-        for key, part in pending.items()
+        for key, (_, part) in pending.items()
     ]
     return [*messages, ModelRequest(parts=returns, metadata=metadata)]
 
@@ -97,14 +123,13 @@ def _context_summary_metadata(message):
 class ChatHistory:
     __slots__ = (
         "_messages",
-        "_compress_summary_state",
+        "compress_summary_state",
         "_revision",
     )
 
-    def __init__(self):
-        self._messages: list = []
-        self._compress_summary_state: str | None = None
-        self._revision = 0
+    def __init__(self, messages=()):
+        self._revision = -1
+        self.set_messages(messages)
 
     def update(self, result) -> None:
         """从 RunResult / StreamedRunResult 提取完整消息列表并保存。"""
@@ -112,28 +137,17 @@ class ChatHistory:
         self._revision += 1
 
     def reset(self) -> None:
-        self._messages = []
-        self._compress_summary_state = None
-        self._revision += 1
+        self.set_messages([])
 
     def set_messages(self, messages: list) -> None:
         """直接替换消息列表（供上下文压缩等使用）。"""
         self._messages = list(messages)
-        self._compress_summary_state = None
+        self.compress_summary_state = None
         self._revision += 1
         for message in reversed(self._messages):
             if metadata := _context_summary_metadata(message):
-                self._compress_summary_state = metadata["summary"]
+                self.compress_summary_state = metadata["summary"]
                 return
-
-    @property
-    def compress_summary_state(self) -> str | None:
-        """上一轮压缩模型产出的 Markdown 摘要文本，供下次压缩合并。"""
-        return self._compress_summary_state
-
-    @compress_summary_state.setter
-    def compress_summary_state(self, value: str | None) -> None:
-        self._compress_summary_state = value
 
     @property
     def messages(self) -> list:
@@ -163,6 +177,7 @@ execution_role = partial(bind_context, _execution_role)
 _CURRENT_TURN_ID: ContextVar[str | None] = ContextVar("agent_turn_id", default=None)
 _CURRENT_AGENT_ID: ContextVar[str | None] = ContextVar("agent_id", default=None)
 _USAGE_RECORDER: ContextVar[Any] = ContextVar("usage_recorder", default=None)
+_CANCELLING_WRITE: ContextVar[Callable[[], bool] | None] = ContextVar("cancelling_write", default=None)
 current_usage_recorder = _USAGE_RECORDER.get
 
 
@@ -183,12 +198,10 @@ agent_context = partial(bind_context, _CURRENT_AGENT_ID)
 
 
 class TurnTraceStore:
-    def __init__(self, max_turns: int | None = None) -> None:
+    def __init__(self) -> None:
         self._events: dict[str, list[dict[str, Any]]] = {}
-        self._max_turns = max_turns
 
     def record(self, turn_id: str | None, kind: str, **fields: Any) -> None:
-        self._max_turns = settings()["lifecycle"]["trace_history_turns"] if self._max_turns is None else self._max_turns
         key = turn_id or "unbound"
         event = {
             "at": time.time(),
@@ -196,11 +209,6 @@ class TurnTraceStore:
             **fields,
         }
         self._events.setdefault(key, []).append(event)
-        while len(self._events) > self._max_turns:
-            oldest = next(iter(self._events))
-            if oldest == key:
-                break
-            del self._events[oldest]
 
     def events_for_turn(self, turn_id: str) -> list[dict[str, Any]]:
         return list(self._events.get(turn_id, []))

@@ -15,11 +15,13 @@ from pydantic_ai.messages import (
 )
 
 
-def pydantic_messages_to_text(messages: list) -> str:
+def pydantic_messages_to_text(messages: list, *, part_types=None) -> str:
     """Render complete textual evidence without clipping model-visible content."""
     lines = []
     for message in messages:
         for part in message.parts:
+            if part_types is not None and not isinstance(part, part_types):
+                continue
             if isinstance(part, UserPromptPart):
                 items = (
                     [part.content] if isinstance(part.content, str) else part.content
@@ -70,30 +72,16 @@ def message_has_user_prompt(msg: Any) -> bool:
 
 
 def turn_has_agent_content(messages: list) -> bool:
-    for msg in messages:
-        if isinstance(msg, ModelResponse):
-            for part in msg.parts:
-                if isinstance(part, (TextPart, ToolCallPart)):
-                    return True
-    return False
+    return any(isinstance(part, (TextPart, ToolCallPart))
+               for msg in messages if isinstance(msg, ModelResponse) for part in msg.parts)
 
 
 def split_messages_into_turns(messages: list) -> list[list]:
     """Split complete user turns by UserPromptPart boundaries."""
-    if not messages:
-        return []
     turns: list[list] = []
-    i = 0
-    n = len(messages)
-    while i < n:
-        if not message_has_user_prompt(messages[i]):
-            i += 1
-            continue
-        start = i
-        i += 1
-        while i < n and not message_has_user_prompt(messages[i]):
-            i += 1
-        chunk = messages[start:i]
-        if turn_has_agent_content(chunk):
-            turns.append(chunk)
-    return turns
+    for message in messages:
+        if message_has_user_prompt(message):
+            turns.append([])
+        if turns:
+            turns[-1].append(message)
+    return [turn for turn in turns if turn_has_agent_content(turn)]

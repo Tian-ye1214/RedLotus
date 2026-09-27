@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 from dataclasses import asdict
+from functools import cached_property
 from pathlib import Path
 from typing import Literal
 
@@ -15,7 +16,7 @@ from filelock import AsyncFileLock
 from pydantic import BaseModel, Field, computed_field
 from pydantic_ai.messages import BinaryContent, ImageUrl, TextContent
 
-from redlotus.runtime.config import settings
+from redlotus.runtime.config import settings, config_value
 from redlotus.runtime.network import ModelInputPolicy
 from redlotus.runtime.resources import (
     atomic_write,
@@ -173,9 +174,10 @@ class ObservedTurn(BaseModel):
 SECTIONS = ("用户画像", "可复用经验")
 EMPTY_MEMORY = "# MEMORY\n\n## 用户画像\n\n## 可复用经验\n"
 MEMORY_BLOCK = re.compile(
-    r"<!-- memory:(?P<id>[a-zA-Z0-9_-]+)(?: version:(?P<version>[0-9]+))? -->\n"
-    r"(?P<body>.*?)\n<!-- /memory -->", re.S,
+    r"<!-- memory:(?P<id>[a-zA-Z0-9_-]+)(?: version:(?P<version>[0-9]+))? -->\r?\n"
+    r"(?P<body>(?:(?!<!--\s*/?memory\b).)*?)\r?\n<!-- /memory -->", re.S,
 )
+MEMORY_MARKER = re.compile(r"<!--\s*/?memory\b")
 CREDENTIAL_PATTERN = re.compile(
     r"(?i)(?:\b(?:api[_ -]?key|access[_ -]?token|password|secret|密码|密钥)\s*[:=：]\s*\S+"
     r"|\bsk-[A-Za-z0-9_-]{12,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|Bearer\s+[A-Za-z0-9_.-]{12,})"
@@ -186,8 +188,16 @@ class LongTermMemory:
     """Editable core profile; complete semantic records belong to LanceDB."""
 
     def __init__(self, directory=None):
-        self.directory = Path(directory) if directory else memory_dir()
-        self.path = self.directory / "MEMORY.md"
+        if directory is not None:
+            self.directory = Path(directory)
+
+    @cached_property
+    def directory(self):
+        return memory_dir()
+
+    @cached_property
+    def path(self):
+        return self.directory / "MEMORY.md"
 
     def read(self):
         with file_lock(self.path):
@@ -212,18 +222,29 @@ class LongTermMemory:
             return self.path.read_text(encoding="utf-8")
 
     @staticmethod
-    def _parse(body):
-        parts = re.split(r"^## ([^\n]+)$", body, flags=re.M)
-        if len(parts) == 1:
+    def _blocks(body):
+        blocks = list(MEMORY_BLOCK.finditer(body))
+        if MEMORY_MARKER.search(MEMORY_BLOCK.sub("", body)):
+            raise MemoryConflict("MEMORY.md has malformed managed blocks")
+        return blocks
+
+    @classmethod
+    def _parse(cls, body):
+        blocks = cls._blocks(body)
+        headings = [heading for heading in re.finditer(r"^## ([^\n]+)$", body, re.M)
+                    if not any(block.start() <= heading.start() < block.end() for block in blocks)]
+        if not headings:
             raise ValueError("MEMORY.md requires section headings")
         aliases = {"用户偏好": "用户画像", "经验": "可复用经验"}
         sections = {
-            aliases.get(name.strip(), name.strip()): text.strip()
-            for name, text in zip(parts[1::2], parts[2::2])
+            aliases.get(heading[1].strip(), heading[1].strip()): body[heading.end():end].strip()
+            for heading, end in zip(headings, [item.start() for item in headings[1:]] + [len(body)])
         }
+        if len(sections) != len(headings):
+            raise MemoryConflict("Core memory has duplicate section headings; handwritten sections retained")
         for name in SECTIONS:
             sections.setdefault(name, "")
-        return parts[0].rstrip(), sections
+        return body[:headings[0].start()].rstrip(), sections
 
     @staticmethod
     def _render(prefix, sections):
@@ -242,6 +263,8 @@ class LongTermMemory:
 
     def get_injection(self, records, *, body=None):
         """Only formally committed managed blocks may enter a new session snapshot."""
+        body = self.read() if body is None else body
+        self._blocks(body)
         current = {row.id: row for row in records if row.state == "active" and row.projection != "none"}
 
         def verified(match):
@@ -252,13 +275,13 @@ class LongTermMemory:
                      match["body"].strip() == (row.content or row.result or row.goal).strip())
             return match[0] if valid else ""
 
-        return "<core_memory>\n" + MEMORY_BLOCK.sub(verified, self.read() if body is None else body) + "\n</core_memory>"
+        return "<core_memory>\n" + MEMORY_BLOCK.sub(verified, body) + "\n</core_memory>"
 
     @classmethod
     def project_record(cls, original, record, previous=None, *, baseline=None, core_old_text=""):
         """Calculate one projection without writing; retain edits outside its own block."""
         match, expected = (
-            next((item for item in MEMORY_BLOCK.finditer(text) if item["id"] == record.id), None)
+            next((item for item in cls._blocks(text) if item["id"] == record.id), None)
             for text in (original, original if baseline is None else baseline)
         )
         content = record.content or record.result or record.goal
@@ -281,6 +304,8 @@ class LongTermMemory:
         ):
             raise MemoryConflict("Core memory text belongs to another managed record")
         if active:
+            if len(cls._blocks(block)) != 1:
+                raise MemoryConflict("Core memory content contains reserved managed-block markers")
             if CREDENTIAL_PATTERN.search(content):
                 raise ValueError("Credentials cannot enter core memory")
             name = "用户画像" if record.projection == "profile" else "可复用经验"
@@ -289,7 +314,7 @@ class LongTermMemory:
                 if text.count(core_old_text) != 1:
                     raise MemoryConflict("Core memory changed; old text no longer matches")
                 sections[name] = text.replace(core_old_text, block, 1)
-            elif content not in text:
+            else:
                 sections[name] = (text + "\n\n" + block).strip()
         elif core_old_text and not match:
             if sum(text.count(core_old_text) for text in sections.values()) > 1:
@@ -321,14 +346,24 @@ class LongTermMemory:
 
 class ObservationStore:
     def __init__(self, workspace, *, window_turns=None, overlap_turns=None):
-        config = settings()["memory_perception"]
-        self.window_turns = config["window_turns"] if window_turns is None else window_turns
-        self.overlap_turns = config["overlap_turns"] if overlap_turns is None else overlap_turns
-        if not 0 <= self.overlap_turns < self.window_turns:
-            raise ValueError("Memory overlap must be smaller than its window")
+        if window_turns is not None:
+            self.window_turns = window_turns
+        if overlap_turns is not None:
+            self.overlap_turns = overlap_turns
         self.workspace = workspace
-        self.root = project_data_dir(workspace) / "memory"
         self.session = None
+
+    @cached_property
+    def window_turns(self):
+        return config_value(settings(), ("memory_perception", "window_turns"), purpose="每批记忆感知的新回合数", kind=int)
+
+    @cached_property
+    def overlap_turns(self):
+        return config_value(settings(), ("memory_perception", "overlap_turns"), purpose="相邻记忆感知批次复用的回合数", kind=int)
+
+    @cached_property
+    def root(self):
+        return project_data_dir(self.workspace) / "memory"
 
     def bind(self, session):
         """Select an existing session without consuming or producing any memory."""
@@ -357,7 +392,7 @@ class ObservationStore:
             self.session.update(metadata={"active_turn": value})
 
     def finish(self, event):
-        """Count exactly one finished outer turn, retaining its actual outcome."""
+        """Persist outcome details independently of final-response accounting."""
         event.finished_at = iso_utc_now()
         self.session.finish_turn(event.id, event.model_dump(mode="json"))
 
@@ -371,29 +406,42 @@ class ObservationStore:
         self.session.update(metadata={"perception_reserved": window.end_position})
 
     def read(self, ids):
-        return [ObservedTurn.model_validate(self.session.turn(key)) for key in ids]
+        return [ObservedTurn.model_validate({"project_id": self.workspace.project_id, "turn_id": "",
+                                            "origin": "legacy", **self.session.turn(key)}) for key in ids]
 
     def window(self, *, through=None, start=None):
+        if not 0 <= self.overlap_turns < self.window_turns:
+            raise ValueError("Memory overlap must be smaller than its window")
         """Select twenty new finished turns plus context-only overlap from this session."""
         if self.session is None:
             return None
         cursor = self.cursor() if start is None else start
         through = self.session.completed_turns if through is None else through
-        end = cursor + self.window_turns
-        if through < end:
+        rows = [row for row in self.session.pending_turns(0) if row["completion_number"] <= through]
+        reserved = {key for identity in self.session.pending_jobs() for key in
+                    (self.session.job(identity).get("window") or {}).get("new_turn_ids", [])}
+        fresh = [row["id"] for row in rows if row["completion_number"] > cursor
+                 and not row.get("memory_covered") and row["id"] not in reserved][:self.window_turns]
+        if len(fresh) < self.window_turns:
             return None
-        rows = self.session.pending_turns(max(0, cursor - self.overlap_turns))
-        events = [row for row in rows if row["number"] <= end]
-        fresh = [row["id"] for row in events if row["number"] > cursor]
-        overlap = [row["id"] for row in events if row["number"] <= cursor]
-        identity = hashlib.sha256(f"{self.session.session_id}\0{cursor}\0{end}".encode()).hexdigest()[:32]
+        end = self.session.turn(fresh[-1])["completion_number"]
+        overlap = [row["id"] for row in rows if row["completion_number"] <= cursor][-self.overlap_turns:] if self.overlap_turns else []
+        events = [row for row in rows if row["id"] in fresh + overlap]
+        identity = hashlib.sha256(f"v2\0{self.session.session_id}\0{cursor}\0{end}".encode()).hexdigest()[:32]
         return WindowManifest(id=identity, project_id=self.workspace.project_id,
                               new_turn_ids=fresh, overlap_turn_ids=overlap,
-                              reference_ids=list(dict.fromkeys(ref for row in events for ref in row["reference_ids"])),
+                              reference_ids=list(dict.fromkeys(ref for row in events for key in row["audit_event_ids"]
+                                                               for ref in self.session.turn(key).get("reference_ids", []))),
                               start_position=cursor, end_position=end)
 
     def commit(self, window):
-        self.session.update(metadata={"perception_consumed": max(self.cursor(), window.end_position)})
+        job = self.session.job(window.id) or {}
+        if not job.get("turn_count_migration", {}).get("committed"):
+            cursor = min((row["completion_number"] - 1 for row in self.session.pending_turns(0)
+                          if not row.get("memory_covered") and row["id"] not in window.new_turn_ids),
+                         default=self.session.completed_turns)
+            self.session.update(metadata={"perception_consumed": cursor},
+                                turns={key: {"memory_covered": True} for key in window.new_turn_ids})
 
 
 class EvidenceReader:
@@ -414,32 +462,30 @@ class EvidenceReader:
             for event in events
         }
         sources = {}
-        refs = {
-            key: await self.references.parse(self.references.load(key))
-            for key in dict.fromkeys(
-                key for event in events for key in event.reference_ids
-            )
-        }
         for event in events:
-            for index, text in enumerate(event.user_inputs):
-                sources[f"{event.id}:u{index}"] = dict(
-                    event_id=event.id,
-                    kind="user" if event.origin == "user" else "legacy_user",
-                    text=text,
-                    verified=event.origin == "user",
-                )
+            originals = [event.model_dump() if key == event.id else self.session.turn(key)
+                         for key in (self.session.turn(event.id) or {}).get("audit_event_ids", [event.id])]
+            packets[event.id]["user_inputs"] = [text for original in originals for text in original.get("user_inputs", [])]
+            packets[event.id]["reference_ids"] = list(dict.fromkeys(ref for original in originals for ref in original.get("reference_ids", [])))
+            for original in originals:
+                for index, text in enumerate(original.get("user_inputs", [])):
+                    sources[f"{original['id']}:u{index}"] = dict(
+                        event_id=event.id, source_event_id=original["id"],
+                        kind="user" if original.get("origin", "legacy") == "user" else "legacy_user",
+                        text=text, verified=original.get("origin", "legacy") == "user",
+                    )
+        refs = {key: await self.references.parse(self.references.load(key))
+                for key in dict.fromkeys(key for packet in packets.values() for key in packet["reference_ids"])}
         messages = []
         for event in events:
-            history = await asyncio.to_thread(self.session.read_turn, event.turn_id)
-            for index, message in enumerate(history):
-                if (getattr(message, "metadata", None) or {}).get("origin") == "context_summary":
-                    continue
-                messages.append((event, str(index), message))
-        for event, message_id, message in messages:
+            history = await asyncio.to_thread(self.session.read_turn, event.turn_id, sources=True)
+            messages.extend((event, source, index, message) for source, index, message in history
+                            if (getattr(message, "metadata", None) or {}).get("origin") != "context_summary")
+        for event, source, message_id, message in messages:
             for index, part in enumerate(message.parts):
                 kind = getattr(part, "part_kind", "")
                 content = getattr(part, "content", getattr(part, "args", ""))
-                source_id = f"{event.id}:{message_id}:{index}"
+                source_id = f"{source}:{message_id}:{index}"
                 if isinstance(content, list):
                     texts = []
                     for asset_index, item in enumerate(content):
@@ -471,7 +517,7 @@ class EvidenceReader:
                                 continue
                             reference = await self.references.import_binary(
                                 item, source=f"trace:{source_id}:{asset_index}",
-                                policy=ModelInputPolicy.for_role(settings()["memory_perception"]["model_role"]),
+                                policy=ModelInputPolicy.for_role(config_value(settings(), ('memory_perception', 'model_role'), purpose="记忆感知使用的已配置模型角色", kind=str)),
                             )
                             refs[reference.id] = reference
                             packets[event.id]["reference_ids"] = list(
@@ -506,6 +552,7 @@ class EvidenceReader:
                     evidence = dict(
                         id=source_id,
                         event_id=event.id,
+                        source_event_id=source,
                         kind=kind,
                         tool=tool,
                         text=content,
