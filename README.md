@@ -24,7 +24,7 @@ redlotus
 
 ## Features
 
-The earlier `1.0.1.post1` release plan used the title `1.0.1-release` and preserved the existing `1.0.1` release. Its validation exclusions cover Linux, macOS, live QQ/WeChat accounts, and unconfigured model protocols; those capabilities remain unverified. Old `1.0.1` startup and upgrade tests are outside the scope. The current terminal-control changes do not publish or replace release artifacts. See the [project design](docs/design.md) and [GitHub Releases](https://github.com/Tian-ye1214/RedLotus/releases) for recorded status and artifact hashes.
+See [GitHub Releases](https://github.com/Tian-ye1214/RedLotus/releases) for each version's artifacts, hashes, validation results, and untested scope. Simulated transport tests do not establish real QQ/WeChat account compatibility.
 
 Before each model request, compression uses reported input tokens and the threshold `ceil(min(configured_ratio * context_capacity, context_capacity - max_output))`. A main, child, or memory request with a durable checkpoint that is rejected for context capacity is split at complete evidence and closed tool-call boundaries for concurrent compression, then retried once after the summaries are saved. Completed tools are not repeated. The capacity rejection is logged with unknown provider usage preserved. Original records and the system prompt remain intact.
 
@@ -211,6 +211,7 @@ New skills are discovered automatically on subsequent user turns.
 
 - Session traces and perception jobs stay in the project's `.redlotus`; immutable reference snapshots stay in its `WorkDatabase`. Compression changes the model view while retaining the original trace.
 - Project episodes and global records use the configured LanceDB directory under the user's `.redlotus`, with scope/project isolation, vector recall, reranking, and text fallback. Sessions and logs remain in each project's `.redlotus`; references, artifacts, dependencies, and caches stay in its `WorkDatabase`.
+- Local LanceDB transactions require a filesystem with hard-link support; use NTFS on Windows. exFAT cannot commit LanceDB records ([upstream limitation](https://github.com/lancedb/lancedb/issues/1231#issuecomment-2069322193)).
 - `MEMORY.md` contains the core profile, environment, constraints and general experience without a fixed character cap. Its complete contents and the system prompt are snapshotted for the session; memory writes do not rewrite that prefix. New confirmed information is consumed through tool results and retrieval, and a new session loads a fresh snapshot.
 - File and command tools use the current project. Generated artifacts go to `WorkDatabase/`. `/cd` cancels the old session before switching context.
 - Log cleanup runs once per session before input is enabled. It checks only `*.log` files directly in the log directory and deletes files whose modification age strictly exceeds `storage.cleanup.log_retention_days`. A missing or nonpositive value skips cleanup; there is no 14-day fallback. Logs do not rotate by size, and existing `.log.1` files are neither renamed nor deleted; new ones are not created. Ordinary logging and background timers do not trigger cleanup.
