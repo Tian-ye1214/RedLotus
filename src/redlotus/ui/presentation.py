@@ -12,9 +12,11 @@ from datetime import datetime
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from rich.ansi import AnsiDecoder
 from rich.align import Align
 from rich.console import Console, Group
 from rich.markdown import Markdown
@@ -49,6 +51,36 @@ class OutputSink(Protocol):
 
     def emit(self, renderable: Any) -> None: ...
     def update(self, action: str, *args) -> None: ...
+
+
+class TextualOutputSink(OutputSink):
+    def __init__(self, app: Any, log: Any) -> None:
+        self._app = app
+        self._log = log
+        self._ansi_decoder = AnsiDecoder()
+
+    supports_model_stream = True
+
+    def emit(self, renderable: Any) -> None:
+        parts = (
+            list(self._ansi_decoder.decode(renderable))
+            if isinstance(renderable, str) and "\x1b[" in renderable
+            else [renderable]
+        )
+
+        def write():
+            for part in parts:
+                self._log.write(part, scroll_end=True)
+
+        self._app.call_ui(write)
+
+    def update(self, action: str, *args) -> None:
+        if action == "rule":
+            self.emit(Text(args[0], style="dim"))
+        else:
+            self._app.call_ui(lambda: getattr(self._app, action)(*args))
+
+
 
 
 class LegacyOutputSink:
@@ -758,3 +790,38 @@ def handle_turn_error(e: Exception) -> None:
         return
     print_warning(f"未预期的系统错误: {e}")
     logger.error("详细信息:\n%s", traceback.format_exc())
+
+
+@dataclass(frozen=True)
+class VisibleConversationEntry:
+    role: Literal["用户", "助手"]
+    text: str
+
+
+def visible_conversation_entries(messages) -> list[VisibleConversationEntry]:
+    """Keep only human-readable turns when replaying a restored conversation."""
+    entries = []
+    for message in messages:
+        if isinstance(message, ModelRequest):
+            parts = []
+            for part in message.parts:
+                if not isinstance(part, UserPromptPart):
+                    continue
+                content = part.content
+                if isinstance(content, str):
+                    parts.append(content)
+                elif isinstance(content, (list, tuple)) and content:
+                    # UserMessage.to_prompt() keeps the original request first;
+                    # later entries are references, media, or runtime metadata.
+                    if isinstance(content[0], str):
+                        parts.append(content[0])
+            role = "用户"
+        elif isinstance(message, ModelResponse):
+            parts = [part.content for part in message.parts if isinstance(part, TextPart)]
+            role = "助手"
+        else:
+            continue
+        text = "\n".join(part for part in parts if part.strip())
+        if text:
+            entries.append(VisibleConversationEntry(role, text))
+    return entries

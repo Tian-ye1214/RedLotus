@@ -92,8 +92,18 @@ The panel compares each session's API usage with its title, exact Token count an
 pip install "redlotus[browser]"  # Browser automation
 pip install "redlotus[bots]"     # QQ and WeChat bots
 pip install "redlotus[viz]"      # Plotting and image tools
+pip install "redlotus[speech]"   # Local CPU speech recognition and synthesis
+pip install "redlotus[pets]"     # Optional desktop pixel pet
 pip install "redlotus[all]"      # All optional dependencies
 ```
+
+With `speech` installed, startup independently prepares and loads ASR and TTS in the background, and prewarms ASR and both the Chinese and English TTS voices. Missing verified model packages download to `~/.redlotus/model`; text interaction stays available while they prepare. Wheels and executables contain no model weights. A single TTS model uses the English voice for English-only segments and the Chinese voice for Chinese or mixed segments; English-only numbers are spoken in English. Once ASR is ready, hold the TUI recording button to transcribe into an editable draft, then submit it yourself. Voice replies start disabled; use the session switch or `/voice on|off`. `/voice test` plays a fixed bilingual sample through the normal TTS and speaker path without an LLM call or switch change. Local CLI model management uses `/voice status`, `/voice prepare`, `/voice update`, `/voice rollback asr|tts`, and `/voice clean`. See the [speech design](docs/design.md#本地语音输入与输出) for offline import, version reuse, and QQ/WeChat behavior.
+
+The TUI microphone menu starts in **Follow system default** mode and shows the actual input device in use. The selector uses at most 44 terminal columns and shrinks in narrow windows, with **Refresh** and the voice reply switch beside it. You can choose another microphone for this program run and refresh after connecting or unplugging a device. The choice stays in effect across sessions, resets to the system default when the program restarts, and never changes system sound settings or private configuration. If a selected device disappears or cannot be identified uniquely after refresh, choose a microphone again; recording will not silently switch to another one. Playback uses the operating system's default output device. Recording is unavailable while the device changes or a recording finishes.
+
+As soon as capture begins, the TUI shows “录音中，请说话…” without waiting for the first recognized word. Microphone PCM goes directly to ASR, with no transcription WAV, original-audio evidence, or audio reference. A nonempty transcription remains editable; only the edited draft is submitted. If nothing is recognized, the TUI shows “未识别到语音，请重试。” and leaves the draft unchanged, without attaching audio or starting an Agent turn. Device and recognition failures show a short message, with details in the project's voice log. QQ and WeChat voice input is recognized in memory; its audio bytes are removed from the prepared message after transcription, while other attachments follow the normal reference process. Replies are encoded and sent from memory.
+
+With `pets` installed, `/pets` toggles one desktop pet; `/pets on charcoal` and `/pets on ivory` select the two characters, and `/pets off` or `/pets status` stop it or report its state. The pet starts disabled and runs in a separate Qt process. Hover, click and drag trigger its five built-in actions; right-click offers an exit menu. You can also run `python -m redlotus.pets.desktop` independently, without model configuration. See the [desktop-pet design](docs/design.md#桌面像素宠物) for resource and lifecycle details.
 
 Install Chromium before using browser automation:
 
@@ -182,6 +192,7 @@ References can be adjacent or separated by punctuation, for example `@review.md,
 | `/compress` | Compress Manager and Coordinator context |
 | `/status` · `/trace` · `/tasks` | Inspect lifecycle, invocation traces, and task status |
 | `/stop` · `/cancel` | Stop the current turn or cancel an invocation |
+| `/pets` · `/pets on [charcoal\|ivory]` · `/pets off` · `/pets status` | Toggle, select, stop or inspect the desktop pet |
 
 </details>
 
@@ -268,6 +279,6 @@ python -m playwright install chromium
 pyinstaller build.spec
 ```
 
-The main package lives in `src/redlotus/`, organized into `runtime`, `sessions`, `core`, `tools`, `memory`, `prompts`, `ui`, and `api`. The `redlotus` command maps to `redlotus.api.base:main`.
+The main package lives in `src/redlotus/`, organized into ten modules: `runtime`, `sessions`, `core`, `tools`, `memory`, `prompts`, `ui`, `api`, `TTS`, and `pets`. The `redlotus` command maps to `redlotus.api.base:main`.
 
 Regressions cover the current runtime-directory, phone-channel, and turn-counting/migration contracts without restoring deleted obsolete assertions. CI runs source tests and tests of an isolated wheel installation; `python scripts/verify_wheel.py dist` checks actual import origins. Zero collected tests fail. Real models, QQ/WeChat accounts, physical terminals, and long-running acceptance remain separate from simulated regression results. See the [project design](docs/design.md) and [development rules](docs/development.md).

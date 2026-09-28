@@ -28,19 +28,42 @@ class UserMessage:
     original_text: str | None = None
     references: list[ReferenceFile] = field(default_factory=list)
     resume: dict | None = None
+    voice: bool = False
+    speech_body: str | None = None
 
     def to_prompt(self):
         """Pass original requirements and explicitly labelled reference data together."""
+        def body_parts(body, references, *, speech):
+            parts = [body]
+            for reference in references:
+                if speech and reference.transcript is not None:
+                    parts.append(reference.transcript)
+                parts.extend(reference.to_prompt())
+            return parts
+
         if self.resume is not None:
             from pydantic_ai.messages import TextContent
-            return [*([] if self.resume.get('submitted', True) else with_runtime_context([self.text])),
-                    TextContent(json.dumps({'command': 'resume', 'turn_id': self.resume['turn_id']}, ensure_ascii=False),
-                                metadata={'origin': 'runtime_control'}),
-                    *(item['text'] for item in self.resume['supplements']),
-                    *(part for ref in self.references if not self.resume.get('submitted', True) or any(ref.id in row.get('reference_ids', []) for row in self.resume['supplements']) for part in ref.to_prompt())]
-        parts = [self.text]
-        for reference in self.references:
-            parts.extend(reference.to_prompt())
+            saved = self.resume
+            by_id = {reference.id: reference for reference in self.references}
+            def selected(ids):
+                return [by_id[key] for key in dict.fromkeys(ids) if key in by_id]
+            parts = []
+            if not saved.get('submitted', True):
+                request = saved['request']
+                supplement_ids = {key for row in saved['supplements'] for key in row.get('reference_ids', [])}
+                main_ids = request.get('reference_ids', [key for key in by_id if key not in supplement_ids])
+                body = request.get('speech_body', self.speech_body)
+                parts.extend(with_runtime_context(body_parts(
+                    self.text if body is None else body, selected(main_ids), speech=body is not None)))
+            parts.append(TextContent(json.dumps({'command': 'resume', 'turn_id': saved['turn_id']}, ensure_ascii=False),
+                                     metadata={'origin': 'runtime_control'}))
+            for row in saved['supplements']:
+                body = row.get('speech_body')
+                parts.extend(body_parts(row['text'] if body is None else body,
+                                        selected(row.get('reference_ids', [])), speech=body is not None))
+            return parts
+        parts = body_parts(self.text if self.speech_body is None else self.speech_body,
+                           self.references, speech=self.speech_body is not None)
         parts.extend(self.attachments)
         return with_runtime_context(parts)
 

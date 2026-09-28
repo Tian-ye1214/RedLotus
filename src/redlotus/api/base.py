@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import importlib
 import mimetypes
 import os
 import signal
@@ -25,8 +26,9 @@ from redlotus.runtime.config import (
 )
 from redlotus.runtime.network import close_all_clients
 
-from redlotus.runtime.resources import WorkspaceContext, current_workspace
+from redlotus.runtime.resources import WorkspaceContext, current_workspace, finish_io
 from redlotus.sessions.control import SessionController, UserMessage
+from redlotus.TTS import NoSpeechDetected, SpeechError
 from redlotus.tools import registry as tool_telemetry
 
 
@@ -93,6 +95,7 @@ class BotBase(ABC):
 
     async def _close_session(self, state):
         state.reset(discard=True)
+        await state.drain_voice()
         await state.queue.cancel(discard=True)
         await state.queue.join()
         if state.agent:
@@ -123,7 +126,10 @@ class BotBase(ABC):
         state.deliveries[admission.id] = (message, send_reply, asyncio.get_running_loop(), prepare)
         async def capture():
             await state.prepare_message(self._agent_for_session(identity), message, prepare=prepare)
+            request['text'] = message.text
             request['reference_ids'] = [ref.id for ref in message.references]
+            if message.speech_body is not None:
+                request['speech_body'] = message.speech_body
             if state.paused:
                 await state.save_pause(state.agent)
             return message
@@ -136,6 +142,7 @@ class BotBase(ABC):
             generation = state.generation
             _, send_reply, loop, prepare = state.deliveries[admission.id]
             self._agent_ctx.set((identity, state, send_reply, loop, generation))
+            self._bind_voice_output(identity, state, send_reply, generation)
             tool_telemetry.set_user_notify_callback(self._notify)
             try:
                 if prepared is not None and not prepared.cancelled():
@@ -143,6 +150,8 @@ class BotBase(ABC):
                 with logger.session_log_context(identity):
                     result = await state.start(self._agent_for_session(identity), message, state.history, admission,
                                                prepare=prepare if prepared is not None and prepared.cancelled() else None)
+            except NoSpeechDetected:
+                result = "未识别到语音，请重试。"
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 logger.error("[%s] Agent 请求失败: %s", self.platform_tag, error)
@@ -162,6 +171,32 @@ class BotBase(ABC):
         return mimetypes.guess_type(filename)[0] or self._MIME_MAP.get(
             media_type_key.lower(), "application/octet-stream"
         )
+
+    def _bind_voice_output(self, identity, state, reply, generation):
+        from contextlib import aclosing
+        sender = getattr(reply, "speech_sender", None)
+        if sender is None:
+            state.voice_output = None
+            return
+        def current():
+            return self._sessions.get(identity) is state and state.generation == generation and state.voice_enabled
+        async def output(pcm):
+            if problem := getattr(reply, "speech_error", None):
+                raise SpeechError(str(problem))
+            from redlotus.TTS.audio import AudioIO
+            from redlotus.TTS.service import SpeechService
+            service = await finish_io(asyncio.to_thread(SpeechService.shared))
+            async with aclosing(AudioIO.parse_output(pcm, target=reply.speech_format,
+                max_seconds=service.config.clip_seconds)) as clips:
+                async for segment in clips:
+                    if not current():
+                        return
+                    await sender(segment)
+        async def error(exc):
+            logger.warning("[%s] 语音失败，未自动重发: %s", self.platform_tag, exc)
+            if current():
+                await reply(f"语音处理或发送未确认，文字回复保留：{exc}")
+        state.voice_output, state.voice_error = output, error
 
     def _notify(self, text):
         identity, state, send_reply, loop, generation = self._agent_ctx.get()
@@ -194,6 +229,15 @@ class BotBase(ABC):
         if not session_id or self._released:
             return
         state = self._session(session_id)
+        if user_text.startswith("/voice"):
+            if user_text not in {"/voice on", "/voice off"}:
+                await send_reply("用法：/voice on 或 /voice off")
+            else:
+                state.voice_enabled = user_text.endswith(" on")
+                if not state.voice_enabled:
+                    state.stop_voice()
+                await send_reply("已开启语音回复，文字仍保留。" if state.voice_enabled else "已关闭语音回复。")
+            return
         if user_text == "/stop":
             if state.agent:
                 await state.agent.stop_current_turn()
@@ -223,7 +267,7 @@ class BotBase(ABC):
                 await state.prepare_message(self._agent_for_session(session_id), message, prepare=prepare)
             except asyncio.CancelledError:
                 return
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, SpeechError) as exc:
                 if generation == state.generation:
                     await send_reply(str(exc))
             else:
@@ -248,6 +292,8 @@ class BotBase(ABC):
         self._released = True
         sessions, self._sessions = list(self._sessions.values()), {}
         await asyncio.gather(*(self._close_session(state) for state in sessions))
+        from redlotus.TTS.service import SpeechService
+        await SpeechService.close_shared()
         await close_all_clients()
 
     def clean_text(self, raw):
@@ -420,6 +466,20 @@ def install_stop_handlers(stop_event: asyncio.Event) -> None:
         except (NotImplementedError, ValueError):
             signal.signal(sig, lambda *_: stop_event.set())
 
+async def start_speech():
+    def initialize():
+        speech = importlib.import_module("redlotus.TTS.service")
+        return speech.SpeechService.shared() if speech.ModelFactory.available() else None
+
+    try:
+        service = await finish_io(asyncio.to_thread(initialize))
+        if service is not None:
+            service.bootstrap()
+        return service
+    except Exception as exc:
+        logger.warning("语音准备失败，文字功能仍可使用: %s", exc, exc_info=True)
+
+
 async def run_cli(system=None):
     """Run the interactive RedLotus CLI/TUI."""
     from redlotus.core.system import AgentSystem
@@ -430,19 +490,28 @@ async def run_cli(system=None):
         system = AgentSystem(presentation=presentation)
     stop_event = asyncio.Event()
     install_stop_handlers(stop_event)
+    controller = AgentCliController(system)
+    speech_task = asyncio.create_task(start_speech(), name="speech-startup")
     try:
-        await AgentCliController(system).run_interactive(stop_event=stop_event)
+        await controller.run_interactive(stop_event=stop_event)
     finally:
-        seconds = config_value(settings(), ('lifecycle', 'shutdown_grace_seconds'), kind=(int, float))
-        deadline = ExitDeadline(seconds) if seconds is not None else None
-        if deadline is not None:
-            deadline.start()
         try:
-            await system.shutdown()
-            await close_all_clients()
+            await finish_io(controller.pets.close())
         finally:
+            speech_task.cancel()
+            await asyncio.gather(speech_task, return_exceptions=True)
+            seconds = config_value(settings(), ('lifecycle', 'shutdown_grace_seconds'), kind=(int, float))
+            deadline = ExitDeadline(seconds) if seconds is not None else None
             if deadline is not None:
-                deadline.close()
+                deadline.start()
+            try:
+                await system.shutdown()
+                from redlotus.TTS.service import SpeechService
+                await SpeechService.close_shared()
+                await close_all_clients()
+            finally:
+                if deadline is not None:
+                    deadline.close()
     return system
 
 def main(channel=None) -> None:

@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from redlotus.runtime.config import (
     set_model_name,
     update_config,
 )
+from redlotus.runtime import logging as logger
 from redlotus.runtime.network import (
     ModelTarget,
     _lookup_openrouter_meta,
@@ -53,6 +55,23 @@ from redlotus.ui.presentation import (
     print_warning,
     render_panel,
 )
+
+_VOICE_TEST_TEXT = "你好，欢迎使用本地语音。Hello, this is a voice test."
+
+
+def format_voice_model_status(status):
+    labels = {"missing": "未安装", "checking": "检查中", "waiting": "等待中", "downloading": "下载中",
+              "verifying": "校验中", "extracting": "解包中", "installing": "安装中", "installed": "已安装", "loading": "加载中",
+              "warming": "预热中", "ready": "就绪", "failed": "准备失败"}
+    lines = []
+    for kind, row in status.items():
+        line = f"{kind.value.upper()}：{labels.get(row.stage, '准备中')}"
+        if row.stage == "failed":
+            line += f" · /voice prepare {kind.value}"
+        elif row.total:
+            line += f" · {row.bytes}/{row.total} 字节"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _strip_quotes(text: str) -> str:
@@ -403,6 +422,8 @@ class SlashCommands:
             "/effort": self.effort,
             "/api": self.api,
             "/compress": self.compress,
+            "/voice": self.voice,
+            "/pets": self.pets,
         }
         handler = handlers.get(self.parts[0].lower())
         if handler is None:
@@ -410,6 +431,75 @@ class SlashCommands:
             return None
         value = handler()
         return await value if inspect.isawaitable(value) else value
+
+    async def pets(self):
+        print_panel(await self.controller.pets.command(self.parts[1:]), title="桌宠")
+
+    async def voice(self):
+        args = self.raw.split(maxsplit=3)[1:]
+        action = args[0] if args else "status"
+        try:
+            from redlotus.TTS import ModelKind, ModelStage
+            from redlotus.TTS.service import SpeechService
+            if action == "off":
+                self.state.stop_voice(disable=True)
+                print_success("已关闭语音回复。")
+                return
+            service = SpeechService._shared
+            if service is None:
+                from redlotus.api.base import start_speech
+                service = await start_speech()
+            if service is None:
+                print_warning("语音服务尚未就绪，请安装 RedLotus[speech] 或查看日志；文字功能仍可使用。")
+                return
+            if action in {"on", "test"}:
+                stage = service.status()[ModelKind.TTS].stage
+                if stage != ModelStage.READY:
+                    if action == "on":
+                        self.state.stop_voice(disable=True)
+                    print_warning("语音合成模型尚未就绪，正在准备；文字功能可正常使用。" if stage != ModelStage.FAILED
+                                  else "语音合成模型准备失败，请查看日志；文字功能可正常使用。")
+                    return
+                if self.state.voice_output is None:
+                    from redlotus.TTS.audio import AudioPlayer
+                    player = AudioPlayer(pcm_seconds=service.config.pcm_seconds)
+                    self.state.voice_output, self.state.voice_stop, self.state.voice_error = (
+                        player.play, player.stop, self._voice_error)
+                if action == "on":
+                    self.state.voice_enabled = True
+                    print_success("已开启语音回复，文字仍保留。")
+                else:
+                    self.state.start_voice_test(_VOICE_TEST_TEXT)
+                    print_success("正在播放中英文语音试听。")
+                return
+            kind = ModelKind(args[1]) if len(args) > 1 else None
+            if action == "prepare":
+                await service.prepare(kind, _strip_quotes(args[2]) if len(args) > 2 else None, warm=True)
+            elif action == "update":
+                await service.update(kind)
+            elif action == "rollback" and kind:
+                await service.rollback(kind)
+            elif action == "clean":
+                await service.clean()
+            elif action != "status":
+                print_warning("/voice on|off|test|status|prepare [asr|tts] [归档路径]|update [asr|tts]|rollback asr|tts|clean")
+                return
+            status = service.status()
+            for name, info in status.items():
+                if info.error:
+                    if action == "prepare" and kind in (None, name):
+                        print_warning(f"{name.value.upper()} 模型准备失败，请查看日志；文字功能仍可使用。")
+            print_panel("\n".join(f"{name.value}: {info.stage.value} · {info.bytes}/{info.total} bytes\n{info.target}\n"
+                + ("准备失败，请查看日志" if info.error else "")
+                for name, info in status.items()), title="本地语音模型")
+        except Exception:
+            logger.error("语音命令失败", exc_info=True)
+            print_warning("语音模型准备失败，请查看日志；文字功能仍可使用。" if action == "prepare"
+                          else "语音操作失败，请查看日志；文字功能仍可使用。")
+
+    def _voice_error(self, exc):
+        logger.error("语音播放失败: %s", exc, exc_info=True)
+        print_warning("语音播放失败，请检查输出设备或模型；文字回复仍可使用。")
 
     async def panel(self):
         snapshot = await build_panel_snapshot(
@@ -705,3 +795,42 @@ def list_workspace_snapshots(*, root=None, include_unloadable=False):
                     path, {}, saved_at, "coordinator", "", path.parent.name, 0, entry.error
                 ))
     return sorted(snapshots, key=lambda row: (row.saved_at, str(row.path)), reverse=True)
+
+
+class SnapshotAction(str, Enum):
+    NEW = "new"
+    RESTORE = "restore"
+    CANCEL = "cancel"
+
+
+@dataclass(frozen=True)
+class SnapshotSelection:
+    action: SnapshotAction
+    snapshot: WorkspaceSnapshot | None = None
+
+
+
+
+
+
+def format_snapshot_choices(snapshots: list[WorkspaceSnapshot]) -> str:
+    return "\n".join(
+        [
+            "选择新建会话或恢复（新 → 旧）：",
+            "",
+            "  0. 新建会话",
+            *(f"  {index}. {snapshot.label}" for index, snapshot in enumerate(snapshots, 1)),
+            "  c. 取消",
+            "",
+            "输入序号恢复，输入 0 新建，留空或 c 取消。",
+        ]
+    )
+
+
+class TuiRunMode(str, Enum):
+    REVIEW = "review"
+    PASS = "pass"
+    GOAL = "goal"
+
+    def next(self) -> "TuiRunMode":
+        return list(TuiRunMode)[(list(TuiRunMode).index(self) + 1) % len(TuiRunMode)]

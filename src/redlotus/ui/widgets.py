@@ -3,20 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.patch_stdout import patch_stdout
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
-from rich.ansi import AnsiDecoder
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
@@ -24,27 +15,24 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.suggester import Suggester
-from textual.widgets import Button, Footer, Input, Label, OptionList, ProgressBar, RichLog, Static
+from textual.widgets import Button, Footer, Input, Label, OptionList, ProgressBar, Select, Static, Switch
 from textual.widgets.option_list import Option
 
 from redlotus.runtime.config import (
-    config_value,
     get_agent_roles,
     role_supported_thinking_efforts,
-    settings,
     supported_thinking_efforts,
 )
-from redlotus.runtime.resources import current_workspace, user_data_dir
+from redlotus.runtime import logging as logger
+from redlotus.runtime.resources import current_workspace
 from redlotus.sessions.control import iter_reference_spans, quote_reference_path
-from redlotus.ui.cli_commands import WorkspaceSnapshot
+from redlotus.ui.cli_commands import (WorkspaceSnapshot, SnapshotAction, SnapshotSelection,
+                                      format_snapshot_choices, format_voice_model_status, TuiRunMode)
 from redlotus.ui.presentation import (
-    OutputSink,
-    print_error,
-    print_panel,
-    print_success,
-    print_warning,
+    visible_conversation_entries,
     render_panel,
 )
+
 
 COMMAND_HELP = {
     "/help": "显示本帮助",
@@ -70,6 +58,8 @@ COMMAND_HELP = {
     "/load": "选择并加载当前项目对话快照",
     "/trace": "/trace <turn_id>：查看追踪记录",
     "/tasks": "查看任务状态与依赖",
+    "/voice": "语音 on / off / test / status / prepare / update / rollback / clean",
+    "/pets": "桌宠开关；on [charcoal|ivory] / off / status",
 }
 COMMANDS = tuple(COMMAND_HELP)
 
@@ -82,6 +72,9 @@ _SUBCOMMAND_CHOICES: dict[str, tuple[str, ...]] = {
     "/stm": ("show", "clear", "retry"),
     "/cancel": ("agent",),
     "/api": ("embedding",),
+    "/voice": ("on", "off", "test", "status", "prepare", "update", "rollback", "clean"),
+    "/pets on": ("charcoal", "ivory"),
+    "/pets": ("on", "off", "status"),
 }
 
 
@@ -94,6 +87,260 @@ class InputCompletion:
     at_mode: bool = False
     choices: tuple[str, ...] = ()
     role: str = ""
+
+
+class RecordButton(Static):
+    def on_mouse_down(self, event: events.MouseDown):
+        if event.button == 1 and not self.disabled:
+            event.stop()
+            self.capture_mouse()
+            self.app.query_one(VoiceControls).start_recording()
+
+    async def on_mouse_up(self, event: events.MouseUp):
+        if event.button == 1:
+            event.stop()
+            self.release_mouse()
+            await self.app.query_one(VoiceControls).release_recording()
+
+
+class VoiceControls(Vertical):
+    DEFAULT_CSS = """
+    VoiceControls { height: auto; }
+    #voice-buttons { height: 3; align-vertical: middle; }
+    #voice-record { width: 14; height: 3; content-align: center middle; border: round $accent; }
+    #voice-input-device { width: 1fr; min-width: 10; max-width: 44; }
+    #voice-input-refresh { width: 6; min-width: 6; padding: 0; }
+    #voice-label { width: 10; padding: 1 0 0 1; }
+    #voice-enabled { width: 8; }
+    #voice-model-status, #voice-preview { height: auto; min-height: 1; color: $text-muted; }
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.record_task = self.capture = self.player = None
+        self._identity = None
+        self._serial = 0
+        self.device = None
+        self._devices = []
+        self._devices_task = None
+        self._device_invalid = False
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="voice-buttons"):
+            yield RecordButton("按住录音", id="voice-record")
+            yield Select([("跟随系统默认（正在读取设备）", -1)], value=-1, allow_blank=False, id="voice-input-device")
+            yield Button("刷新", id="voice-input-refresh")
+            yield Label("语音回复", id="voice-label")
+            yield Switch(False, id="voice-enabled", animate=False)
+        yield Static("", id="voice-model-status")
+        yield Static("", id="voice-preview")
+
+    def on_mount(self):
+        self.sync()
+        self.refresh_devices()
+        self.set_interval(0.5, self.sync)
+
+    def refresh_devices(self, *, refresh=False):
+        if self._devices_task is not None and not self._devices_task.done():
+            return
+        identity = self._current_identity()
+        async def load():
+            from redlotus.TTS import SpeechBusy
+            from redlotus.TTS.audio import AudioDevices
+            try:
+                self._devices = await AudioDevices.inputs(refresh=refresh)
+                default = next((item.name for item in self._devices if item.is_default), "暂无设备")
+                options = [(f"跟随系统默认（{default}）", -1)]
+                options.extend((f"{item.name} · {item.hostapi} [{item.index}]", item.index) for item in self._devices)
+                selected = -1
+                if self.device is not None:
+                    matches = [item for item in self._devices if (item.name, item.hostapi) == (self.device.name, self.device.hostapi)]
+                    self._device_invalid = len(matches) != 1
+                    if self._device_invalid:
+                        options.append(("所选麦克风不可用，请重新选择", -2))
+                        selected = -2
+                        if identity == self._current_identity():
+                            self.notice("所选麦克风不可用，请重新选择。")
+                    else:
+                        self.device = matches[0]
+                        selected = self.device.index
+                selector = self.query_one(Select)
+                selector.set_options(options)
+                selector.value = selected
+            except Exception as exc:
+                await logger.speech_log(identity[1], "刷新麦克风失败", None if isinstance(exc, SpeechBusy) else exc)
+                if identity == self._current_identity():
+                    self.notice(str(exc) if isinstance(exc, SpeechBusy) else "无法读取麦克风列表，请检查设备后刷新。")
+            finally:
+                self.call_after_refresh(self.sync)
+        self._devices_task = asyncio.create_task(load())
+        self.sync()
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "voice-input-refresh":
+            event.stop()
+            self.refresh_devices(refresh=True)
+
+    def on_select_changed(self, event: Select.Changed):
+        if event.value != event.select.value or event.value in (Select.NULL, -2):
+            return
+        self.device = next((item for item in self._devices if item.index == event.value), None)
+        if self._device_invalid:
+            self.notice("")
+        self._device_invalid = False
+        self._status_error = None
+        self.sync()
+
+    def edited(self):
+        self._serial += 1
+
+    def submitted(self):
+        self.edited()
+        if self.record_task is not None and not self.record_task.done():
+            self.record_task.cancel()
+            self.query_one(RecordButton).release_mouse()
+
+    def _current_identity(self):
+        return self.app.system._session, self.app.system.workspace, self.app.system._session.generation
+
+    def notice(self, message):
+        if self.is_mounted:
+            self.query_one("#voice-preview", Static).update(Text(str(message)))
+
+    def voice_error(self, exc):
+        self.app.system._session.track_preparation(logger.speech_log(self.app.system.workspace, "语音播放失败", exc))
+        self.notice("语音播放失败，请检查输出设备或模型；文字回复仍可使用。")
+
+    def sync(self):
+        current = self._current_identity()
+        if current != self._identity:
+            if self.record_task is not None:
+                self.record_task.cancel()
+            self.query_one(RecordButton).release_mouse()
+            self._identity = current
+            self.notice("")
+        state = current[0]
+        from redlotus.TTS import ModelKind, ModelStage
+        from redlotus.TTS.service import SpeechService
+        service = SpeechService._shared
+        status = {}
+        try:
+            if service is not None:
+                status = service.status()
+            if service is not None and self.player is None:
+                from redlotus.TTS.audio import AudioPlayer
+                self.player = AudioPlayer(pcm_seconds=service.config.pcm_seconds)
+            self._status_error = None
+        except Exception as exc:
+            signature = (current, type(exc), str(exc))
+            if signature != self._status_error:
+                self._status_error = signature
+                state.track_preparation(logger.speech_log(current[1], "读取语音模型状态失败", exc))
+            status = {}
+        self.query_one("#voice-model-status", Static).update(
+            format_voice_model_status(status) if status else
+            "语音模型状态暂不可用，请查看日志" if service else "语音模型正在初始化；文字输入可正常使用")
+        asr_ready = status.get(ModelKind.ASR) is not None and status[ModelKind.ASR].stage == ModelStage.READY
+        tts_ready = status.get(ModelKind.TTS) is not None and status[ModelKind.TTS].stage == ModelStage.READY
+        if self.player is not None:
+            state.voice_output, state.voice_stop, state.voice_error = self.player.play, self.player.stop, self.voice_error
+        busy = self.record_task is not None and not self.record_task.done()
+        refreshing = self._devices_task is not None and not self._devices_task.done()
+        self.query_one(Select).disabled = busy or refreshing
+        self.query_one("#voice-input-refresh", Button).disabled = busy or refreshing
+        self.query_one(RecordButton).disabled = not asr_ready or refreshing or self._device_invalid or self.app.query_one("#input", Input).disabled or self.app._ask_future is not None
+        switch = self.query_one(Switch)
+        switch.disabled, switch.value = not (tts_ready or state.voice_enabled), state.voice_enabled
+
+    def on_switch_changed(self, event: Switch.Changed):
+        state = self.app.system._session
+        if event.value != event.switch.value or event.value == state.voice_enabled:
+            return
+        if event.value:
+            from redlotus.TTS import ModelKind, ModelStage
+            from redlotus.TTS.service import SpeechService
+            service = SpeechService._shared
+            if service is None or service.status()[ModelKind.TTS].stage != ModelStage.READY:
+                event.switch.value = False
+                return
+        state.voice_enabled = event.value
+        if not event.value:
+            state.stop_voice()
+
+    def start_recording(self):
+        if self.record_task is not None and not self.record_task.done():
+            return
+        self.sync()
+        if self.query_one(RecordButton).disabled:
+            return
+        from redlotus.TTS.service import SpeechService
+        service = SpeechService._shared
+        identity, serial = self._identity, self._serial
+        state = identity[0]
+        self._started = False
+        self.notice("正在打开麦克风；松开可取消")
+
+        async def run():
+            from redlotus.TTS import NoSpeechDetected, SpeechUnavailable
+            from redlotus.TTS.asr import AudioCapture, StreamingRecognizer
+            try:
+                await state.drain_voice()
+                self.capture = AudioCapture(pcm_seconds=service.config.pcm_seconds, device=self.device)
+                def preview(result):
+                    if identity == self._current_identity():
+                        self.notice(result.text or "录音中…")
+                def started():
+                    self._started = True
+                    if identity == self._current_identity():
+                        self.notice("录音中，请说话…")
+                final = await StreamingRecognizer(service).record(self.capture, preview, on_started=started)
+                text = final.text.strip()
+                if identity != self._current_identity():
+                    return
+                if serial != self._serial:
+                    self.notice("保留已编辑草稿；录音转写：" + text)
+                    return
+                composer = self.app.query_one("#input", Input)
+                composer.value = (composer.value + " " + text).strip()
+                self.notice("转写已加入草稿，可编辑后手动提交")
+            except NoSpeechDetected as exc:
+                if identity == self._current_identity():
+                    self.notice("未识别到语音，请重试。")
+            except Exception as exc:
+                await logger.speech_log(identity[1], "录音或转写失败", exc)
+                if identity == self._current_identity():
+                    if isinstance(exc, SpeechUnavailable) and str(exc).startswith(("暂时无法使用麦克风，", "所选麦克风不可用")):
+                        message = str(exc)
+                    else:
+                        message = "录音失败，请检查麦克风与语音模型；文字输入仍可使用。"
+                    self.notice(message)
+            finally:
+                if self._started and self.capture is not None:
+                    await logger.speech_log(identity[1], f"采集统计：{getattr(self.capture, 'recording_stats', {})}")
+                self.capture = None
+                self.call_after_refresh(self.sync)
+        self.record_task = state.track_preparation(run())
+        self.sync()
+
+    async def release_recording(self):
+        if self.record_task is None or self.record_task.done():
+            return
+        if self._started and self.capture is not None:
+            self.notice("正在完成转写…")
+            await self.capture.stop()
+        else:
+            self.record_task.cancel()
+            self.notice("已取消录音准备")
+
+    async def on_unmount(self):
+        if self._devices_task is not None:
+            self._devices_task.cancel()
+            await asyncio.gather(self._devices_task, return_exceptions=True)
+        if self.record_task is not None:
+            self.record_task.cancel()
+            await asyncio.gather(self.record_task, return_exceptions=True)
+        if self.player is not None:
+            await self.player.close()
 
 
 def completion_for_input(text: str) -> InputCompletion | None:
@@ -218,219 +465,10 @@ def _iter_file_completions(fragment: str, *, at_mode: bool):
         )
 
 
-def _history_path() -> Path | None:
-    if not os.getenv("REDLOTUS_DATA_DIR") and config_value(settings(), ("storage", "state_dir"), ..., kind=(str, type(None))) is ...:
-        return None
-    (base := user_data_dir()).mkdir(parents=True, exist_ok=True)
-    return base / "history"
-
-
-class InteractiveRepl:
-    """TTY 交互循环；非 TTY 回退到标准 input。"""
-
-    def __init__(
-        self,
-        *,
-        prompt: str = "\n📝 请输入您的任务: ",
-        on_interrupt_during_handler: Callable[[], Awaitable[None]] | None = None,
-    ) -> None:
-        self.prompt = prompt
-        self._session: PromptSession | None = None
-        self._interrupt_hits = 0
-        self._on_interrupt_during_handler = on_interrupt_during_handler
-
-    def _create_prompt_session(self) -> PromptSession:
-        kb = KeyBindings()
-
-        @kb.add("c-c", eager=True)
-        def _interrupt(event) -> None:
-            if event.app.current_buffer.text:
-                self._interrupt_hits = 0
-                return event.app.current_buffer.reset()
-            # Use a regular exception so the input task cannot abort the event loop.
-            event.app.exit(exception=InterruptedError())
-
-        return PromptSession(
-            history=FileHistory(str(path)) if (path := _history_path()) is not None else None,
-            completer=AgentCompleter(),
-            complete_while_typing=False,
-            key_bindings=kb,
-            interrupt_exception=InterruptedError,
-        )
-
-    def _on_keyboard_interrupt(self) -> bool:
-        """处理空行 Ctrl+C。返回 True 表示应退出 REPL。"""
-        self._interrupt_hits += 1
-        if self._interrupt_hits < 2:
-            print_warning("再次按 Ctrl+C 退出，或输入 /exit、quit。")
-        return self._interrupt_hits >= 2
-
-    async def read_line(self, *, stop_event: asyncio.Event | None = None) -> str | None:
-        if sys.stdin.isatty() and sys.stdout.isatty():
-            if self._session is None:
-                self._session = self._create_prompt_session()
-            try:
-                with patch_stdout(raw=True):
-                    read_coro = self._session.prompt_async(self.prompt)
-                    if stop_event is None:
-                        return (await read_coro).strip()
-                    read_task = asyncio.create_task(read_coro)
-                    stop_task = asyncio.create_task(stop_event.wait())
-                    done, pending = await asyncio.wait(
-                        {read_task, stop_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    for t in pending:
-                        t.cancel()
-                        try:
-                            await t
-                        except asyncio.CancelledError:
-                            pass
-                    return None if stop_task in done else read_task.result().strip()
-            except (EOFError, asyncio.CancelledError):
-                return None
-        try:
-            return (await asyncio.to_thread(input, self.prompt)).strip()
-        except EOFError:
-            return None
-
-    async def run(
-        self,
-        handler: Callable[[str], Awaitable[str]],
-        *,
-        stop_event: asyncio.Event | None = None,
-    ) -> None:
-        """
-        handler 返回 "continue" | "break"。
-        空行 Ctrl+C：连按两次退出；有内容时 Ctrl+C 仅清空输入行。
-        """
-        while stop_event is None or not stop_event.is_set():
-            try:
-                line = await self.read_line(stop_event=stop_event)
-                if line is None:
-                    break
-                self._interrupt_hits = 0
-                action = await handler(line)
-                if action == "break":
-                    break
-            except (KeyboardInterrupt, InterruptedError):
-                if self._on_interrupt_during_handler is not None:
-                    try:
-                        await self._on_interrupt_during_handler()
-                        continue
-                    except KeyboardInterrupt:
-                        pass
-                if self._on_keyboard_interrupt():
-                    print_success("再见！")
-                    break
-            except asyncio.CancelledError:
-                break
-
-
-ReadLineFn = Callable[[], Awaitable[str | None]]
-
-
-class SnapshotAction(str, Enum):
-    NEW = "new"
-    RESTORE = "restore"
-    CANCEL = "cancel"
-
-
-@dataclass(frozen=True)
-class SnapshotSelection:
-    action: SnapshotAction
-    snapshot: WorkspaceSnapshot | None = None
-
-
-@dataclass(frozen=True)
-class VisibleConversationEntry:
-    role: Literal["用户", "助手"]
-    text: str
-
-
-def visible_conversation_entries(messages) -> list[VisibleConversationEntry]:
-    """Keep only human-readable turns when replaying a restored conversation."""
-    entries = []
-    for message in messages:
-        if isinstance(message, ModelRequest):
-            parts = []
-            for part in message.parts:
-                if not isinstance(part, UserPromptPart):
-                    continue
-                content = part.content
-                if isinstance(content, str):
-                    parts.append(content)
-                elif isinstance(content, (list, tuple)) and content:
-                    # UserMessage.to_prompt() keeps the original request first;
-                    # later entries are references, media, or runtime metadata.
-                    if isinstance(content[0], str):
-                        parts.append(content[0])
-            role = "用户"
-        elif isinstance(message, ModelResponse):
-            parts = [part.content for part in message.parts if isinstance(part, TextPart)]
-            role = "助手"
-        else:
-            continue
-        text = "\n".join(part for part in parts if part.strip())
-        if text:
-            entries.append(VisibleConversationEntry(role, text))
-    return entries
-
-
-def format_snapshot_choices(snapshots: list[WorkspaceSnapshot]) -> str:
-    return "\n".join(
-        [
-            "选择新建会话或恢复（新 → 旧）：",
-            "",
-            "  0. 新建会话",
-            *(f"  {index}. {snapshot.label}" for index, snapshot in enumerate(snapshots, 1)),
-            "  c. 取消",
-            "",
-            "输入序号恢复，输入 0 新建，留空或 c 取消。",
-        ]
-    )
-
-
-async def legacy_pick_snapshot(
-    snapshots: list[WorkspaceSnapshot],
-    read_line: ReadLineFn,
-) -> SnapshotSelection:
-    print_panel(format_snapshot_choices(snapshots), title="加载对话")
-    while True:
-        try:
-            raw = await read_line()
-        except (KeyboardInterrupt, InterruptedError):
-            raw = None
-        if raw is None:
-            return SnapshotSelection(SnapshotAction.CANCEL)
-        text = raw.strip()
-        if not text or text.lower() in ("c", "cancel"):
-            return SnapshotSelection(SnapshotAction.CANCEL)
-        if text == "0":
-            return SnapshotSelection(SnapshotAction.NEW)
-        if not text.isdigit():
-            print_error("请输入有效序号。")
-            continue
-        index = int(text)
-        if index < 1 or index > len(snapshots):
-            print_error(f"序号超出范围（1-{len(snapshots)}）。")
-            continue
-        snapshot = snapshots[index - 1]
-        if not snapshot.is_loadable:
-            print_error("该会话条目无法加载，请选择其他会话或新建会话。")
-            continue
-        return SnapshotSelection(SnapshotAction.RESTORE, snapshot)
 
 
 
 
-class TuiRunMode(str, Enum):
-    REVIEW = "review"
-    PASS = "pass"
-    GOAL = "goal"
-
-    def next(self) -> "TuiRunMode":
-        return list(TuiRunMode)[(list(TuiRunMode).index(self) + 1) % len(TuiRunMode)]
 
 
 class AgentInputSuggester(Suggester):
@@ -476,53 +514,6 @@ class AgentInput(Input):
         self.remove_class("ask")
         self.placeholder = "📝 请输入您的任务:"
         self.suggester = AgentInputSuggester(case_sensitive=True, use_cache=False)
-
-
-def terminal_driver():
-    if sys.platform != "win32":
-        return None
-    from ctypes import POINTER, cast
-    from textual.drivers import win32
-    from textual.drivers.windows_driver import WindowsDriver
-
-    class ControlEnterDriver(WindowsDriver):
-        def start_application_mode(self):
-            if hasattr(self, "_native_reader"):
-                return
-            native = self._native_reader = win32.KERNEL32.ReadConsoleInputW
-            def read(handle, records, size, count):
-                result = native(handle, records, size, count)
-                rows = cast(records, POINTER(win32.INPUT_RECORD))
-                for index in range(cast(count, POINTER(win32.DWORD)).contents.value):
-                    row = rows[index]
-                    key = row.Event.KeyEvent
-                    if (row.EventType == 1 and key.bKeyDown and key.wVirtualKeyCode == 13
-                            and key.dwControlKeyState & 0x000C and key.uChar.UnicodeChar == "\r"):
-                        key.uChar.UnicodeChar = "\n"
-                return result
-            read.argtypes, read.restype = native.argtypes, native.restype
-            win32.KERNEL32.ReadConsoleInputW = read
-            try:
-                super().start_application_mode()
-            except BaseException:
-                win32.KERNEL32.ReadConsoleInputW = self._native_reader
-                del self._native_reader
-                raise
-
-        def stop_application_mode(self):
-            if not hasattr(self, "_native_reader"):
-                return
-            try:
-                super().stop_application_mode()
-            finally:
-                win32.KERNEL32.ReadConsoleInputW = self._native_reader
-                del self._native_reader
-
-        def close(self):
-            self.stop_application_mode()
-            super().close()
-
-    return ControlEnterDriver
 
 
 class SessionFooter(Footer):
@@ -625,36 +616,6 @@ class SnapshotPickScreen(ModalScreen[SnapshotSelection]):
 
     def action_cancel(self) -> None:
         self.dismiss(SnapshotSelection(SnapshotAction.CANCEL))
-
-
-class TextualOutputSink(OutputSink):
-    def __init__(self, app: Any, log: RichLog) -> None:
-        self._app = app
-        self._log = log
-        self._ansi_decoder = AnsiDecoder()
-
-    supports_model_stream = True
-
-    def emit(self, renderable: Any) -> None:
-        parts = (
-            list(self._ansi_decoder.decode(renderable))
-            if isinstance(renderable, str) and "\x1b[" in renderable
-            else [renderable]
-        )
-
-        def write():
-            for part in parts:
-                self._log.write(part, scroll_end=True)
-
-        self._app.call_ui(write)
-
-    def update(self, action: str, *args) -> None:
-        if action == "rule":
-            self.emit(Text(args[0], style="dim"))
-        else:
-            self._app.call_ui(lambda: getattr(self._app, action)(*args))
-
-
 
 
 class UsagePanel(VerticalScroll):

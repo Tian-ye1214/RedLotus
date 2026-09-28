@@ -1,0 +1,277 @@
+{
+  "format": "redlotus.pet-actions",
+  "format_version": 1,
+  "id": "ivory",
+  "display_name": "米色针织衫",
+  "asset_version": "0.1",
+  "canvas": {
+    "width": 100,
+    "height": 100,
+    "anchor": [
+      50,
+      96
+    ],
+    "sampling": "nearest"
+  },
+  "atlas": {
+    "file": "sprites.png",
+    "width": 400,
+    "height": 400,
+    "columns": 4,
+    "rows": 4
+  },
+  "initial_action": "idle",
+  "frames": {
+    "idle_01": {
+      "rect": [
+        0,
+        0,
+        100,
+        100
+      ]
+    },
+    "idle_02": {
+      "rect": [
+        100,
+        0,
+        100,
+        100
+      ]
+    },
+    "idle_03": {
+      "rect": [
+        200,
+        0,
+        100,
+        100
+      ]
+    },
+    "look_01": {
+      "rect": [
+        300,
+        0,
+        100,
+        100
+      ]
+    },
+    "look_02": {
+      "rect": [
+        0,
+        100,
+        100,
+        100
+      ]
+    },
+    "happy_01": {
+      "rect": [
+        100,
+        100,
+        100,
+        100
+      ]
+    },
+    "happy_02": {
+      "rect": [
+        200,
+        100,
+        100,
+        100
+      ]
+    },
+    "happy_03": {
+      "rect": [
+        300,
+        100,
+        100,
+        100
+      ]
+    },
+    "drag_01": {
+      "rect": [
+        0,
+        200,
+        100,
+        100
+      ]
+    },
+    "drag_02": {
+      "rect": [
+        100,
+        200,
+        100,
+        100
+      ]
+    },
+    "drag_03": {
+      "rect": [
+        200,
+        200,
+        100,
+        100
+      ]
+    },
+    "sleep_01": {
+      "rect": [
+        300,
+        200,
+        100,
+        100
+      ]
+    },
+    "sleep_02": {
+      "rect": [
+        0,
+        300,
+        100,
+        100
+      ]
+    },
+    "sleep_03": {
+      "rect": [
+        100,
+        300,
+        100,
+        100
+      ]
+    }
+  },
+  "actions": {
+    "idle": {
+      "label": "待机 · 眨眼",
+      "mode": "loop",
+      "priority": 0,
+      "enter": [],
+      "sequence": [
+        {
+          "frame": "idle_01",
+          "duration_ms": 1600
+        },
+        {
+          "frame": "idle_02",
+          "duration_ms": 100
+        },
+        {
+          "frame": "idle_03",
+          "duration_ms": 140
+        },
+        {
+          "frame": "idle_02",
+          "duration_ms": 100
+        },
+        {
+          "frame": "idle_01",
+          "duration_ms": 1600
+        }
+      ]
+    },
+    "look": {
+      "label": "抬头 · 观察",
+      "mode": "hold",
+      "priority": 10,
+      "enter": [],
+      "sequence": [
+        {
+          "frame": "idle_01",
+          "duration_ms": 100
+        },
+        {
+          "frame": "look_01",
+          "duration_ms": 180
+        },
+        {
+          "frame": "look_02",
+          "duration_ms": 450
+        }
+      ]
+    },
+    "happy": {
+      "label": "开心 · 轻跳",
+      "mode": "once",
+      "priority": 20,
+      "enter": [],
+      "sequence": [
+        {
+          "frame": "idle_01",
+          "duration_ms": 80
+        },
+        {
+          "frame": "happy_01",
+          "duration_ms": 140
+        },
+        {
+          "frame": "happy_02",
+          "duration_ms": 260
+        },
+        {
+          "frame": "happy_03",
+          "duration_ms": 160
+        },
+        {
+          "frame": "idle_01",
+          "duration_ms": 180
+        }
+      ],
+      "on_complete": "resolve_pointer"
+    },
+    "drag": {
+      "label": "提起 · 摆动",
+      "mode": "loop",
+      "priority": 30,
+      "enter": [],
+      "sequence": [
+        {
+          "frame": "drag_01",
+          "duration_ms": 200
+        },
+        {
+          "frame": "drag_02",
+          "duration_ms": 220
+        },
+        {
+          "frame": "drag_01",
+          "duration_ms": 200
+        },
+        {
+          "frame": "drag_03",
+          "duration_ms": 220
+        }
+      ]
+    },
+    "sleep": {
+      "label": "睡眠 · 呼吸",
+      "mode": "loop",
+      "priority": 0,
+      "enter": [
+        {
+          "frame": "sleep_01",
+          "duration_ms": 350
+        }
+      ],
+      "sequence": [
+        {
+          "frame": "sleep_02",
+          "duration_ms": 900
+        },
+        {
+          "frame": "sleep_03",
+          "duration_ms": 900
+        }
+      ]
+    }
+  },
+  "interaction": {
+    "idle_after_ms": 30000,
+    "coalesce_repeated_action": "happy",
+    "events": {
+      "pointer_enter": "look",
+      "pointer_leave": "idle",
+      "primary_click": "happy",
+      "drag_start": "drag",
+      "drag_end": "resolve_pointer",
+      "idle_timeout": "sleep"
+    }
+  },
+  "provenance": {
+    "notice": "../ASSET-NOTICE.md"
+  }
+}

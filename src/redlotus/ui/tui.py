@@ -22,8 +22,10 @@ from textual.widgets.option_list import Option
 from redlotus.runtime import logging as logger
 from redlotus.sessions.context import current_short_agent_id
 from redlotus.ui.cli_commands import WorkspaceSnapshot
+from redlotus.ui.console import terminal_driver
 from redlotus.ui.presentation import (
     ContextUsageItem,
+    TextualOutputSink,
     PanelSnapshotCache,
     build_panel_snapshot,
     context_usage_renderable,
@@ -39,10 +41,9 @@ from redlotus.ui.widgets import (
     SnapshotAction,
     SnapshotPickScreen,
     SnapshotSelection,
-    TextualOutputSink,
     TuiRunMode,
     UsagePanel,
-    terminal_driver,
+    VoiceControls,
     visible_conversation_entries,
 )
 
@@ -126,6 +127,7 @@ class RedLotusTui(App[None]):
                 yield Static("", id="stream-content")
             yield RunStatus(id="status")
             yield Static(self._session_context_text(), id="session-context")
+            yield VoiceControls()
             with Horizontal(id="input-row"):
                 yield AgentInput(
                     placeholder="📝 请输入您的任务:",
@@ -436,6 +438,7 @@ class RedLotusTui(App[None]):
         if not self.is_running:
             return
         self.query_one(RunStatus).refresh()
+        self.query_one(VoiceControls).sync()
         if self._panel_mode:
             self.run_worker(self._refresh_panel, group="panel", exclusive=True)
         controller = self.controller
@@ -638,7 +641,12 @@ class RedLotusTui(App[None]):
                 self._turn_control_pending = None
                 self.refresh_status()
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "input":
+            self.query_one(VoiceControls).edited()
+
     async def on_input_submitted(self, event: Input.Submitted, *, urgent=False) -> None:
+        self.query_one(VoiceControls).submitted()
         value = event.value.strip()
         if self.controller.is_transitioning:
             return

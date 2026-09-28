@@ -135,6 +135,65 @@ def test_cleanup_does_not_remove_persistent_skills(workspace, isolated_config):
     assert skill.read_text(encoding='utf-8') == 'persistent'
 
 
+def test_recorded_tree_removal_requires_exact_plain_contents(tmp_path):
+    root = tmp_path / 'owned'
+    (root / 'nested').mkdir(parents=True)
+    (root / 'nested/file.bin').write_bytes(b'model')
+    marker = {'schema': 1, 'owner': 'test'}
+    resources.atomic_write_json(root / '.marker.json', marker)
+    extra = root / 'user-note.txt'
+    extra.write_text('keep')
+    assert not resources.remove_recorded_tree(root, '.marker.json', marker, ['nested/file.bin'], complete=True)
+    assert extra.exists()
+    extra.unlink()
+    assert resources.remove_recorded_tree(root, '.marker.json', marker, ['nested/file.bin'], complete=True)
+    assert not root.exists()
+    with pytest.raises(ValueError):
+        resources.owned_path(tmp_path, '../escape')
+
+
+@pytest.mark.parametrize('name,allowed', [('.', False), ('root/', True), ('root/file', True),
+                                           ('root/../escape', False), ('root\\file', False)])
+def test_safe_tar_name(name, allowed):
+    assert resources.safe_tar_name(name, 'root') is allowed
+
+
+@pytest.mark.skipif(resources.os.name != 'nt', reason='Windows sharing retry')
+def test_atomic_write_retries_temporary_sharing_error(tmp_path, monkeypatch):
+    destination = tmp_path / 'atomic.json'
+    real_replace = resources.os.replace
+    denied = []
+    def replace(source, target):
+        if target == destination and not denied:
+            denied.append(True)
+            error = PermissionError(13, 'temporary sharing error')
+            error.winerror = 5
+            raise error
+        return real_replace(source, target)
+    monkeypatch.setattr(resources.os, 'replace', replace)
+    resources.atomic_write_json(destination, {'ok': True})
+    assert denied and json.loads(destination.read_text()) == {'ok': True}
+
+
+@pytest.mark.skipif(resources.os.name != 'nt', reason='Windows sharing retry')
+def test_replace_retry_moves_directory_after_temporary_denial(tmp_path, monkeypatch):
+    source, destination = tmp_path / 'source', tmp_path / 'destination'
+    source.mkdir()
+    (source / 'model.bin').write_bytes(b'weight')
+    real_replace = resources.os.replace
+    denied = []
+    def replace(first, second):
+        if second == destination and not denied:
+            denied.append(True)
+            error = PermissionError(13, 'temporary directory denial')
+            error.winerror = 5
+            raise error
+        return real_replace(first, second)
+    monkeypatch.setattr(resources.os, 'replace', replace)
+    resources.replace_retry(source, destination)
+    assert denied and not source.exists() and (destination / 'model.bin').read_bytes() == b'weight'
+
+
 def test_cleanup_missing_optional_runtime_preserves_disk_full_error(workspace, isolated_config):
     from redlotus.sessions.cleanup import retry_after_storage_cleanup
     isolated_config['storage']['cleanup'] = {'enabled': True, 'execution_cache': True, 'session_retention_days': 1}

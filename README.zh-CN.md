@@ -93,8 +93,18 @@ Windows x64 安装包见 [GitHub Releases](https://github.com/Tian-ye1214/RedLot
 pip install "redlotus[browser]"  # 浏览器自动化
 pip install "redlotus[bots]"     # QQ / 微信机器人
 pip install "redlotus[viz]"      # 绘图与图像处理
+pip install "redlotus[speech]"   # 本地 CPU 语音识别与合成
+pip install "redlotus[pets]"     # 可选桌面像素宠物
 pip install "redlotus[all]"      # 全部可选依赖
 ```
+
+安装 `speech` 后，应用启动时即在后台独立准备、加载 ASR 和 TTS，并预热 ASR 及 TTS 的中英文音色；缺失的已校验模型下载到全局 `~/.redlotus/model`，准备期间文字交互仍可用。wheel 和 EXE 均不包含权重。同一个 TTS 模型对纯英文句段使用英文音色并把数字读作英文，对中文及含中文句段使用中文音色。ASR 就绪后，TUI 按住录音按钮，松开后得到可编辑草稿，由用户手动提交。语音回复默认关闭，使用会话滑块或 `/voice on|off` 开启。`/voice test` 不调用 LLM、不更改开关，使用正式 TTS 与扬声器路径播放固定双语测试句。本地 CLI 通过 `/voice status`、`/voice prepare`、`/voice update`、`/voice rollback asr|tts`、`/voice clean` 管理模型。离线导入、版本复用和 QQ／微信行为见[语音设计](docs/design.md#本地语音输入与输出)。
+
+TUI 的麦克风下拉框默认“跟随系统默认”，同时显示当前实际输入设备；连接或拔出设备后可点“刷新”。选择框最多占 44 个终端列，在窄窗中缩短，刷新按钮和语音回复开关紧随其后。也可在下拉框中选另一支麦克风，仅本次程序运行生效、跨会话保留，重启后恢复跟随系统默认，不修改系统声音设置或私人配置。刷新后若所选设备消失或无法唯一识别，须重新选择，不会悄悄切换到另一设备；设备切换及录音收尾期间不可开始新的录音。播放仍使用操作系统默认输出设备。
+
+实际采集开始即显示“录音中，请说话…”，不用等待识别首字。麦克风 PCM 直接进入 ASR，不生成转写 WAV、原始音频证据或音频引用。非空转写即使有错字也可在草稿中编辑后手动提交，只有编辑后的文字作为正文。空识别只显示“未识别到语音，请重试。”，不改草稿、不添加附件、不创建 Agent 回合。设备和识别故障在界面简短提示，详情写入项目语音日志。QQ／微信语音在内存中转写后从消息中移除原音频字节，其他附件照常准备；语音回复也从内存编码并发送。
+
+安装 `pets` 后，`/pets` 切换一只桌面宠物的开关；`/pets on charcoal` 与 `/pets on ivory` 选择深色外套或米色针织衫角色，`/pets off` 关闭，`/pets status` 查看状态。桌宠默认关闭，运行在独立 Qt 子进程中；悬停、点击和拖动触发五种内置动作，右键菜单可退出。也可通过 `python -m redlotus.pets.desktop` 独立启动，无需模型配置。资源与生命周期见[桌面像素宠物设计](docs/design.md#桌面像素宠物)。
 
 浏览器能力首次使用前还需要安装 Chromium：
 
@@ -183,6 +193,7 @@ API Key、Base URL 与所选角色的模型配置齐全即可进入交互；启�
 | `/compress` | 压缩 Manager / Coordinator 上下文 |
 | `/status` · `/trace` · `/tasks` | 查看生命周期、调用追踪和任务状态 |
 | `/stop` · `/cancel` | 中断当前回合或 invocation |
+| `/pets` · `/pets on [charcoal\|ivory]` · `/pets off` · `/pets status` | 切换、选角、关闭或查看桌宠状态 |
 
 </details>
 
@@ -269,6 +280,6 @@ python -m playwright install chromium
 pyinstaller build.spec
 ```
 
-项目主要代码位于 `src/redlotus/`，分为 `runtime`、`sessions`、`core`、`tools`、`memory`、`prompts`、`ui`、`api` 八个模块；命令入口为 `redlotus.api.base:main`。
+项目主要代码位于 `src/redlotus/`，分为 `runtime`、`sessions`、`core`、`tools`、`memory`、`prompts`、`ui`、`api`、`TTS`、`pets` 十个模块；命令入口为 `redlotus.api.base:main`。
 
 测试按现行运行目录、手机通道和回合计数／历史校正契约维护，不恢复已删除的过时断言。CI 分别运行源码测试及隔离安装 wheel 的测试；`python scripts/verify_wheel.py dist` 检查实际导入路径，零测试收集仍然失败。真实模型、QQ／微信账号、物理终端和长期验收与模拟回归分开记录，本地回归不代表这些项目已通过。详见[项目设计](docs/design.md)及[开发约定](docs/development.md)。

@@ -4,12 +4,15 @@ import asyncio
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from pydantic_ai import BinaryContent
 
+from redlotus.TTS import AudioSegment
 from redlotus.api.base import BotBase, main
 from redlotus.api.media import mime_magic
 from redlotus.runtime import logging as logger
+from redlotus.runtime.config import config_value, settings
 from redlotus.sessions.control import UserMessage
 
 if TYPE_CHECKING:
@@ -19,7 +22,7 @@ if TYPE_CHECKING:
 class WeChatAgentBot(BotBase):
     _MIME_MAP = {
         "image": "image/jpeg",
-        "voice": "audio/mpeg",
+        "voice": "audio/silk",
         "video": "video/mp4",
         "file": "application/octet-stream",
     }
@@ -58,12 +61,56 @@ class WeChatAgentBot(BotBase):
             return
         session_id = f"{self.session_prefix}{msg.user_id}"
         text = self.clean_text(msg.text or "")
+        if msg.voices:
+            text = "\n".join(item.get("text_item", {}).get("text", "")
+                             for item in (msg.raw or {}).get("item_list", []) if item.get("type") == 1)
+        reply = partial(bot.reply, msg)
+        try:
+            native = self._silk_verified(bot, msg.user_id)
+        except ValueError as exc:
+            native, reply.speech_error = False, exc
+        reply.speech_sender = partial(self.send_voice, bot, msg, native)
+        reply.speech_format = "silk" if native else "wav"
         return (
             session_id,
-            UserMessage(text=text, original_text=text),
-            partial(bot.reply, msg),
+            UserMessage(text=text, original_text=text, voice=bool(msg.voices)),
+            reply,
             partial(self._download_attachments, bot, msg) if any(getattr(msg, kind + "s") for kind in self._MIME_MAP) else None,
         )
+
+    def _silk_verified(self, bot: WeChatBot, recipient: str) -> bool:
+        targets = config_value(settings(), ("speech", "wechat_silk_verified_targets"), [], kind=list)
+        if any(not isinstance(target, str) for target in targets):
+            raise ValueError("speech.wechat_silk_verified_targets 必须是字符串数组")
+        credentials = bot.get_credentials() if hasattr(bot, "get_credentials") else None
+        account_id = getattr(credentials, "account_id", "")
+        return bool(account_id and f"{account_id}:{recipient}" in targets)
+
+    async def send_voice(self, bot: WeChatBot, msg, native: bool, segment: AudioSegment) -> None:
+        if native:
+            if segment.format != "silk" or not self._silk_verified(bot, msg.user_id):
+                raise ValueError("该微信账号与接收人未启用 SILK 原生语音")
+            if not msg._context_token:
+                raise ValueError("微信原生语音缺少原消息会话令牌")
+            send_media = getattr(bot, "_send_media_buffer", None)
+            if not callable(send_media):
+                raise RuntimeError("当前 wechatbot-sdk 不支持原生语音上传发送流程")
+            from wechatbot.client import _cdn_media_dict
+            from wechatbot.types import MediaType, MessageItemType
+
+            def build_item(upload):
+                return {"type": int(MessageItemType.VOICE), "voice_item": {
+                    "media": _cdn_media_dict(upload.media),
+                    "encode_type": 6,
+                    "playtime": round(segment.duration * 1000),
+                    "sample_rate": segment.sample_rate,
+                    "bits_per_sample": 16,
+                }}
+            await send_media(msg.user_id, msg._context_token, segment.data, MediaType.VOICE, build_item)
+        else:
+            if segment.format != "wav":
+                raise ValueError("微信附件语音回复需要 WAV 音频")
+            await bot.reply_media(msg, {"file": segment.data, "file_name": f"voice-{uuid4().hex}.wav"})
 
     async def _async_main(self) -> None:
         from wechatbot import WeChatBot
@@ -77,9 +124,11 @@ class WeChatAgentBot(BotBase):
         }
 
         bot = WeChatBot(**kwargs)
-        await bot.login()
-        bot.on_message(partial(self._handle_message, bot))
+        from redlotus.api.base import start_speech
         try:
+            await bot.login()
+            bot.on_message(partial(self._handle_message, bot))
+            await start_speech()
             await bot.start()
         finally:
             await self.release_all_resources_async()

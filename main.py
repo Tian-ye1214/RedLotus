@@ -18,6 +18,9 @@ def main():
             if Path(path).resolve() != source
             and not (Path(path).name == "src" and (Path(path) / "redlotus").is_dir())
         ]]
+    if sys.argv[1:2] == ["--pets-child"]:
+        from redlotus.pets.desktop import PetApplication
+        raise SystemExit(PetApplication.run(sys.argv[2:]))
     os.environ.setdefault("REDLOTUS_CONFIG_FILE", str(root / "src/redlotus/config.json"))
     os.environ.setdefault("REDLOTUS_DOTENV_FILE", str(root / ".env"))
     from redlotus.api.base import main as run

@@ -135,6 +135,7 @@ class AgentSystem:
         self.presentation.update_output("clear_model_stream")
         self._session.queue.discard()
         await self.cancel_current_turn()
+        await self._session.drain_voice()
         await self._session.queue.cancel()
         await self._factory.cancel_all()
         await self.toolkit.close()
@@ -480,6 +481,8 @@ class AgentSystem:
                     return None
                 await self._session.prepare_message(self, message)
                 pending_input['reference_ids'] = [ref.id for ref in message.references]
+                if message.speech_body is not None:
+                    pending_input['speech_body'] = message.speech_body
                 return message if self._session.accepts(admission) else None
             except (OSError, ValueError) as exc:
                 self._session.pending_inputs.pop(admission.id, None)
@@ -703,7 +706,7 @@ class AgentSystem:
         coord_aid = await self.registry.ensure_agent(
             self.session_key, "coordinator"
         )
-        stream_handler = None if _inside_goal else coordinator_stream_handler(self)
+        stream_handler = coordinator_stream_handler(self, display=not _inside_goal)
         async def _save_coordinator_node(run: Any) -> None:
             messages = list(run.all_messages())
             await self._checkpoint(messages, turn_id)

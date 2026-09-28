@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import socket
-from contextlib import ExitStack
+from contextlib import ExitStack, aclosing
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -35,6 +35,10 @@ def norm_url(url: str) -> str:
 
 
 def mime_magic(raw: bytes) -> str:
+    if raw.startswith((b"\x02#!SILK_V3", b"#!SILK_V3")):
+        return "audio/silk"
+    if len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE":
+        return "audio/wav"
     for signature, mime in ((b"\xff\xd8\xff", "image/jpeg"), (b"\x89PNG", "image/png"),
                             (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"), (b"BM", "image/bmp")):
         if raw.startswith(signature):
@@ -154,8 +158,8 @@ def iter_segments(event: BaseMessageEvent):
         for seg in segments:
             yield (seg.get("type", ""), seg.get("data", {})) if isinstance(seg, dict) else (seg.msg_seg_type, vars(seg))
     else:
-        for match in re.finditer(r"\[CQ:(\w+),([^\]]*)\]", getattr(event, "raw_message", "") or ""):
-            yield match[1], dict(field.split("=", 1) for field in match[2].split(",") if "=" in field)
+        for match in re.finditer(r"\[CQ:(\w+)(?:,([^\]]*))?\]", getattr(event, "raw_message", "") or ""):
+            yield match[1], dict(field.split("=", 1) for field in (match[2] or "").split(",") if "=" in field)
 
 
 async def file_id_to_binary(bot_api, event: BaseMessageEvent, file_id: str, filename: str) -> BinaryContent:
@@ -171,16 +175,59 @@ async def file_id_to_binary(bot_api, event: BaseMessageEvent, file_id: str, file
         raise ValueError(f"附件 {filename}（{file_id}）无法获取下载内容：{exc}") from exc
 
 
+async def record_to_binary(bot_api, data: dict, filename: str) -> BinaryContent:
+    """Prefer actual SILK/WAV bytes; ask NapCat for WAV only when needed."""
+    file, file_id, url = (str(data.get(key) or "").strip() for key in ("file", "file_id", "url"))
+    if file.startswith("base64://"):
+        direct = binary_b64(file)
+        mime = mime_magic(direct.data)
+        if mime not in {"audio/silk", "audio/wav"}:
+            raise ValueError("语音内容不是可解析的 SILK 或 WAV")
+        return BinaryContent(direct.data, media_type=mime, identifier=filename)
+    if url or file.startswith(("http://", "https://")):
+        direct = await asyncio.to_thread(download_to_binary, url or file, filename)
+        if (mime := mime_magic(direct.data)) in {"audio/silk", "audio/wav"}:
+            return BinaryContent(direct.data, media_type=mime, identifier=filename)
+    if not (file or file_id):
+        raise ValueError("语音段缺少文件名或文件 ID")
+    if not callable(getattr(bot_api, "get_record", None)):
+        raise ValueError("当前 NapCat 接口不支持 get_record WAV 转换")
+    converted = await bot_api.get_record(**({"file_id": file_id} if file_id else {"file": file}), out_format="wav")
+    result = converted if isinstance(converted, dict) else vars(converted)
+    converted_file = str(result.get("file") or "")
+    converted_url = str(result.get("url") or "")
+    encoded = str(result.get("base64") or "")
+    if converted_url or converted_file.startswith(("http://", "https://")):
+        downloaded = await asyncio.to_thread(download_to_binary, converted_url or converted_file, filename)
+        raw = downloaded.data
+    elif converted_file.startswith("base64://") or encoded:
+        raw = base64.b64decode((converted_file[9:] if converted_file.startswith("base64://") else encoded), validate=True)
+    elif converted_file and Path(converted_file).is_file():
+        raw = await asyncio.to_thread(Path(converted_file).read_bytes)
+    else:
+        raise ValueError("NapCat 转换结果没有可读取的音频文件")
+    mime = mime_magic(raw)
+    if mime not in {"audio/silk", "audio/wav"}:
+        raise ValueError("NapCat 转换结果不是可解析的 SILK 或 WAV")
+    return BinaryContent(raw, media_type=mime, identifier=filename)
+
+
 async def extract_media(bot_api, event: BaseMessageEvent) -> list:
     """Preserve SDK/raw segment order; any invalid item rejects the whole request."""
     attachments = []
     for index, (kind, data) in enumerate(iter_segments(event)):
-        if kind not in {"file", "image", "video"}:
+        if kind not in {"file", "image", "video", "record"}:
             continue
-        filename = data.get("name") or data.get("file") or f"{kind}[{index + 1}]"
+        file = data.get("file") or ""
+        if kind == "record":
+            filename = data.get("name") or (Path(file).name if file and not file.startswith(("base64://", "http://", "https://")) else "") or f"record[{index + 1}]"
+        else:
+            filename = data.get("name") or file or f"{kind}[{index + 1}]"
         try:
             if kind == "file":
                 item = await file_id_to_binary(bot_api, event, (data.get("file_id") or "").strip(), filename)
+            elif kind == "record":
+                item = await record_to_binary(bot_api, data, filename)
             elif item := binary_b64(data.get("file") or ""):
                 item = BinaryContent(item.data, media_type=item.media_type, identifier=data.get("name") or f"{kind}[{index + 1}]")
             else:
@@ -189,6 +236,34 @@ async def extract_media(bot_api, event: BaseMessageEvent) -> list:
         except Exception as exc:
             raise ValueError(f"附件 {filename} 准备失败：{exc}；请重新发送完整消息。") from exc
     return attachments
+
+
+async def transcribe_voice_message(system, message):
+    """Replace admitted channel audio with one local transcript in memory."""
+    from redlotus.TTS import NoSpeechDetected
+    from redlotus.TTS.asr import StreamingRecognizer
+    from redlotus.TTS.audio import AudioIO
+    policy = ModelInputPolicy.for_role("coordinator")
+    policy.check([len(item.data) for item in message.attachments if isinstance(item, BinaryContent)])
+    remaining, texts = [], []
+    for item in message.attachments:
+        if not isinstance(item, BinaryContent) or not (item.media_type.startswith("audio/") or b"#!SILK_V3" in item.data[:12]):
+            remaining.append(item)
+            continue
+        mime = "audio/silk" if b"#!SILK_V3" in item.data[:12] else item.media_type
+        text = ""
+        async with aclosing(AudioIO.parse_input(item.data, format=mime)) as pcm:
+            async with aclosing(StreamingRecognizer().recognize(pcm)) as results:
+                async for result in results:
+                    if result.is_final:
+                        text = result.text.strip()
+        if not text:
+            raise NoSpeechDetected("未识别到语音，请重试。")
+        texts.append(text)
+    message.text = "\n".join(part for part in [message.text, *texts] if part)
+    message.original_text = message.text
+    message.speech_body = None
+    message.attachments, message.voice = remaining, False
 
 
 # A period can end the preceding sentence; normal email local parts cannot end in one.

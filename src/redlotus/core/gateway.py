@@ -156,14 +156,186 @@ class RequestPolicy(AbstractCapability):
         raise error
 
 
-def coordinator_stream_handler(system):
-    if not system.presentation.supports_model_stream():
-        return None
-    session, generation = system.session_key, system._session.generation
-    return system.presentation.TextEventStreamHandler(
-        title="Coordinator",
-        is_current=lambda: (system.session_key, system._session.generation) == (session, generation),
-    )
+class GoalTextFilter:
+    """Hold incomplete control comments across deltas before exposing speech."""
+
+    MAX_PENDING = 512
+
+    def __init__(self):
+        self.pending = ""
+        self._discarding_goal = False
+        self._muted_prefix = 0
+
+    def mute_pending(self):
+        self._muted_prefix = len(self.pending)
+
+    def _take(self, count):
+        visible = self.pending[min(count, self._muted_prefix):count]
+        self.pending = self.pending[count:]
+        self._muted_prefix = max(0, self._muted_prefix - count)
+        return visible
+
+    @staticmethod
+    def _could_complete_goal(comment):
+        """Recognize a prefix of the goal marker without buffering other comments."""
+        body = comment[4:].lstrip()
+
+        def take(value, literal):
+            width = min(len(value), len(literal))
+            if value[:width].upper() != literal[:width]:
+                return None, value
+            return width == len(literal), value[width:]
+
+        for literal in ("REDLOTUS_GOAL", ":"):
+            complete, body = take(body, literal)
+            if complete is None:
+                return False
+            if not complete:
+                return True
+            body = body.lstrip()
+        for signal in ("CONTINUE", "DONE"):
+            complete, suffix = take(body, signal)
+            if complete is None:
+                continue
+            if not complete:
+                return True
+            if "-->".startswith(suffix.lstrip()):
+                return True
+        return False
+
+    def feed(self, text, *, final=False):
+        from redlotus.core.tasks import GOAL_MARKER_RE
+        self.pending += text
+        output = ""
+        while self.pending:
+            if self._discarding_goal:
+                end = self.pending.find("-->")
+                if end < 0:
+                    self._take(max(0, len(self.pending) - 2))
+                    break
+                self._take(end + 3)
+                self._discarding_goal = False
+                continue
+            start = self.pending.find("<!--")
+            if start < 0:
+                keep = 0 if final else next(
+                    (n for n in (3, 2, 1) if self.pending.endswith("<!--"[:n])), 0)
+                split = len(self.pending) - keep
+                output += self._take(split)
+                break
+            output += self._take(start)
+            end = self.pending.find("-->", 4)
+            if end < 0:
+                if self._could_complete_goal(self.pending):
+                    if len(self.pending) > self.MAX_PENDING:
+                        self._discarding_goal = True
+                        self._take(len(self.pending) - 2)
+                        continue
+                    break
+                output += self._take(1)
+            else:
+                comment = self.pending[:end + 3]
+                if GOAL_MARKER_RE.fullmatch(comment):
+                    self._take(end + 3)
+                else:
+                    output += self._take(1)
+        if final:
+            if not self._discarding_goal and not (self.pending.startswith("<!--") and self._could_complete_goal(self.pending)):
+                output += self._take(len(self.pending))
+            self._take(len(self.pending))
+            self._discarding_goal = False
+        return output
+
+
+class CoordinatorStreamHandler:
+    """Consume the SDK stream once, independently feeding display and speech."""
+
+    def __init__(self, system, *, display=True):
+        self.system, self.started = system, False
+        self.display = display and system.presentation.supports_model_stream()
+        identity = system.session_key, system._session.generation
+        self._is_current = lambda: (system.session_key, system._session.generation) == identity
+
+    async def __call__(self, _run_ctx, event_stream):
+        from redlotus.ui.presentation import _text_from_stream_event
+        system, response_started, reply, filtered = self.system, False, None, GoalTextFilter()
+        voice_failed = False
+
+        def cancel_voice():
+            nonlocal reply
+            filtered.mute_pending()
+            active, reply = reply, None
+            if active is not None:
+                try:
+                    active.cancel()
+                except Exception as exc:
+                    logger.warning("语音取消失败: %s", exc)
+
+        def discard_cancelled_voice():
+            task = getattr(reply, "task", None)
+            if task is not None and (task.cancelling() or task.cancelled()):
+                cancel_voice()
+
+        async def fail_voice(exc):
+            nonlocal voice_failed
+            if voice_failed:
+                return
+            voice_failed = True
+            cancel_voice()
+            report = getattr(system._session, "voice_error", None)
+            if report is None:
+                logger.warning("语音输出失败，文字继续: %s", exc)
+                return
+            try:
+                result = report(exc)
+                if isinstance(result, Awaitable):
+                    await result
+            except Exception as report_error:
+                logger.warning("语音输出失败 (%s)，错误通知失败: %s", exc, report_error)
+
+        try:
+            async for event in event_stream:
+                kind, text = _text_from_stream_event(event)
+                if not text or not self._is_current():
+                    continue
+                if self.display:
+                    if not self.started:
+                        system.presentation.update_output("begin_model_stream", "Coordinator 正在回复")
+                        self.started = True
+                    if not response_started:
+                        system.presentation.update_output("begin_model_response")
+                        response_started = True
+                    system.presentation.update_output("append_model_stream_delta", text, kind)
+                if kind == "text" and not voice_failed:
+                    try:
+                        discard_cancelled_voice()
+                        body = filtered.feed(text)
+                        if not system._session.voice_enabled:
+                            cancel_voice()
+                        if system._session.voice_enabled:
+                            if reply is None:
+                                reply = system._session.begin_voice(
+                                    system.workspace, is_current=self._is_current)
+                            if reply is not None and body:
+                                await reply.feed(body)
+                    except Exception as exc:
+                        await fail_voice(exc)
+            discard_cancelled_voice()
+            if reply is not None and not voice_failed:
+                try:
+                    tail = filtered.feed("", final=True)
+                    if tail and self._is_current() and system._session.voice_enabled:
+                        await reply.feed(tail)
+                    await reply.finish()
+                except Exception as exc:
+                    await fail_voice(exc)
+        except BaseException:
+            cancel_voice()
+            raise
+
+
+def coordinator_stream_handler(system, *, display=True):
+    return CoordinatorStreamHandler(system, display=display)
 
 
 class AgentRunner:

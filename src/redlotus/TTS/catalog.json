@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "models": {
+    "asr": {
+      "archive": "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
+      "sha256": "fa5f63d618e5a01526e275a358bb7772e403f84808a4769fba52cffd8160bf74",
+      "root": "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
+      "required": ["encoder.int8.onnx", "decoder.onnx", "joiner.int8.onnx", "tokens.txt", "bpe.model"],
+      "archive_limit": 150000000,
+      "unpack_limit": 190000000
+    },
+    "tts": {
+      "archive": "kokoro-multi-lang-v1_1.tar.bz2",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_1.tar.bz2",
+      "sha256": "a3f4c73d043860e3fd2e5b06f36795eb81de0fc8e8de6df703245edddd87dbad",
+      "root": "kokoro-multi-lang-v1_1",
+      "required": ["model.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt", "lexicon-zh.txt", "espeak-ng-data/", "dict/", "phone-zh.fst", "date-zh.fst", "number-zh.fst", "LICENSE"],
+      "archive_limit": 400000000,
+      "unpack_limit": 450000000,
+      "compatible": [{
+        "archive": "kokoro-int8-multi-lang-v1_1.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
+        "sha256": "a1e94694776049035c4f2c6529f003aaece993c76aae9a78995831c3c4dcafc6",
+        "root": "kokoro-int8-multi-lang-v1_1",
+        "required": ["model.int8.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt", "lexicon-zh.txt", "espeak-ng-data/", "dict/", "phone-zh.fst", "date-zh.fst", "number-zh.fst", "LICENSE"],
+        "archive_limit": 165000000,
+        "unpack_limit": 240000000
+      }]
+    }
+  }
+}

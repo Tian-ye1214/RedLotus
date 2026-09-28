@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import re
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from redlotus.TTS import AudioSegment
 from redlotus.api.base import BotBase, main
 from redlotus.api.media import extract_media, iter_segments
 from redlotus.runtime.config import user_config_dir
@@ -48,7 +50,9 @@ class QQBot(BotBase):
         return msg is not None and msg.is_user_at(config.bt_uin)
 
     async def _run_connection(self, connect) -> None:
+        from redlotus.api.base import start_speech
         try:
+            await start_speech()
             await connect()
         finally:
             await self.release_all_resources_async()
@@ -60,18 +64,35 @@ class QQBot(BotBase):
         is_group = event.is_group_msg()
         session_id = f"group_{event.group_id}" if is_group else f"private_{event.user_id}"
         user_text = self.clean_text(raw_text)
+        kinds = {kind for kind, _ in iter_segments(event)}
+        has_voice = "record" in kinds or bool(re.search(r"\[CQ:record(?:,|\])", raw_text))
+        has_media = bool(kinds & {"image", "video", "file", "record"}) or bool(
+            re.search(r"\[CQ:(?:image|video|file|record)(?:,|\])", raw_text)
+        )
+        reply = partial(event.reply, at=False) if is_group else partial(event.reply)
+        reply.speech_sender = partial(self.send_voice, event)
+        reply.speech_format = "silk"
         return (
             session_id,
             UserMessage(
                 text=user_text,
                 original_text=user_text,
+                voice=has_voice,
             ),
-            partial(event.reply, at=False) if is_group else event.reply,
-            partial(extract_media, self._bot_client.api, event) if (
-                any(kind in ("image", "video", "file") for kind, _ in iter_segments(event))
-                or re.search(r"\[CQ:(?:image|video|file),", raw_text)
-            ) else None,
+            reply,
+            partial(extract_media, self._bot_client.api, event) if has_media else None,
         )
+
+    async def send_voice(self, event: BaseMessageEvent, segment: AudioSegment) -> None:
+        if segment.format != "silk":
+            raise ValueError("QQ 语音回复需要 SILK 音频")
+        from ncatbot.core.event.message_segment import MessageArray, Record
+
+        message = MessageArray(Record(file="base64://" + base64.b64encode(segment.data).decode("ascii")))
+        if event.is_group_msg():
+            await event.reply(rtf=message, at=False)
+        else:
+            await event.reply(rtf=message)
 
     def _doctor(self) -> None:
         """启动前体检：配置缺失/无效时立即报错退出，避免 ncatbot 回退到 input() 静默卡死。"""

@@ -1,5 +1,7 @@
 import asyncio
+import base64
 from datetime import datetime
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +13,7 @@ from redlotus.api.WeChat import WeChatAgentBot
 from redlotus.api import media as qq
 from redlotus.runtime.resources import WorkspaceContext
 from redlotus.sessions.control import UserMessage
+from redlotus.TTS import AudioSegment
 from redlotus.tools.references import ReferenceStore
 
 
@@ -257,3 +260,307 @@ async def test_startup_configuration_invalid_policy_never_opens_dialog(isolated_
     with pytest.raises(base.ConfigError):
         await base.prepare_startup_configuration(ask=ask if interactive else None, emit=lambda text: None)
     assert prompts == []
+
+
+@pytest.mark.asyncio
+async def test_qq_record_is_voice_and_sends_record_in_original_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_FORMAT", "%(message)s")
+    monkeypatch.setenv("LOG_FILE_PATH", str(tmp_path / "ncatbot-logs"))
+    monkeypatch.setenv("NCATBOT_CONFIG_PATH", str(tmp_path / "missing-ncatbot.yaml"))
+    from ncatbot.core.event.message_segment import Record
+
+    bot = QQBot.__new__(QQBot)
+    BotBase.__init__(bot)
+    bot._bot_client = SimpleNamespace(api=object())
+    monkeypatch.setattr(bot, "_is_at_me", lambda event: True)
+    calls = []
+
+    async def reply(text=None, *, at=None, rtf=None):
+        calls.append((text, at, rtf))
+
+    event = SimpleNamespace(
+        raw_message="[CQ:at,qq=99] hello [CQ:record,file=voice.silk]",
+        message=[{"type": "record", "data": {"file": "voice.silk"}}],
+        is_group_msg=lambda: True, group_id="42", user_id="sender", reply=reply,
+    )
+    identity, message, send, prepare = bot.adapt_message(event)
+    assert identity == "group_42"
+    assert message.text == " hello "
+    assert message.voice is True
+    assert prepare is not None
+    assert isinstance(send, partial)
+    assert send.speech_format == "silk"
+    raw = b"\x02#!SILK_V3 synthetic"
+    await send.speech_sender(AudioSegment(raw, "silk", 1.0, 24000))
+    assert len(calls) == 1
+    assert calls[0][:2] == (None, False)
+    assert isinstance(calls[0][2].messages[0], Record)
+    assert calls[0][2].messages[0].file.startswith("base64://")
+    payload = calls[0][2].to_list()[0]
+    assert payload["type"] == "record"
+    assert payload["data"]["file"].startswith("base64://")
+    assert base64.b64decode(payload["data"]["file"][9:]) == raw
+
+
+@pytest.mark.asyncio
+async def test_qq_private_record_unknown_result_is_not_resent(tmp_path, monkeypatch):
+    bot = QQBot.__new__(QQBot)
+    BotBase.__init__(bot)
+    bot._bot_client = SimpleNamespace(api=object())
+    monkeypatch.setattr(bot, "_is_at_me", lambda event: True)
+    calls = []
+
+    async def reply(text=None, *, rtf=None):
+        calls.append((text, rtf))
+        raise TimeoutError("delivery unknown")
+
+    event = SimpleNamespace(
+        raw_message="[CQ:record,file=voice.silk]", message=None,
+        is_group_msg=lambda: False, user_id="owner", reply=reply,
+    )
+    identity, message, send, prepare = bot.adapt_message(event)
+    assert identity == "private_owner"
+    assert message.text == ""
+    assert message.voice is True
+    assert prepare is not None
+    assert isinstance(send, partial)
+    with pytest.raises(TimeoutError, match="delivery unknown"):
+        await send.speech_sender(AudioSegment(b"\x02#!SILK_V3 synthetic", "silk", 1.0, 24000))
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_wechat_voice_keeps_only_user_text_and_silk_mime(isolated_config):
+    from wechatbot.types import DownloadedMedia, IncomingMessage, VoiceContent
+
+    msg = IncomingMessage("recipient", "SDK transcript", "voice", datetime.now(),
+        voices=[VoiceContent()], raw={"item_list": [
+            {"type": 1, "text_item": {"text": "typed text"}},
+            {"type": 3, "voice_item": {"text": "SDK transcript"}},
+        ]})
+    async def download(single):
+        return DownloadedMedia(b"\x02#!SILK_V3 synthetic", "voice", format="silk")
+    async def reply(message, text):
+        pass
+    sdk = SimpleNamespace(download=download, reply=reply, get_credentials=lambda: None)
+    identity, message, send, prepare = WeChatAgentBot().adapt_message(sdk, msg)
+    assert identity == "wx_recipient"
+    assert message.text == "typed text"
+    assert message.voice is True
+    assert isinstance(send, partial)
+    assert send.speech_format == "wav"
+    assert (await prepare())[0].media_type == "audio/silk"
+    msg.raw = {"item_list": [{"type": 3, "voice_item": {"text": "SDK transcript"}}]}
+    assert WeChatAgentBot().adapt_message(sdk, msg)[1].text == ""
+
+
+@pytest.mark.asyncio
+async def test_wechat_unverified_target_sends_wav_attachment(isolated_config, tmp_path):
+    from wechatbot.types import Credentials, IncomingMessage
+
+    isolated_config["speech"] = {"wechat_silk_verified_targets": ["another:recipient"]}
+    msg = IncomingMessage("recipient", "hello", "text", datetime.now())
+    uploads = []
+
+    async def reply_media(message, content):
+        uploads.append((message, content))
+
+    sdk = SimpleNamespace(
+        reply=lambda *args: None, reply_media=reply_media,
+        get_credentials=lambda: Credentials("token", "https://unused.invalid", "account", "bot"),
+    )
+    _, _, send, _ = WeChatAgentBot().adapt_message(sdk, msg)
+    assert send.speech_format == "wav"
+    await send.speech_sender(AudioSegment(b"RIFF synthetic", "wav", 1.0, 24000))
+    assert len(uploads) == 1
+    assert uploads[0][0] is msg
+    assert uploads[0][1]["file"] == b"RIFF synthetic"
+    assert uploads[0][1]["file_name"].endswith(".wav")
+
+
+@pytest.mark.asyncio
+async def test_wechat_verified_target_sends_native_voice_once(isolated_config, tmp_path):
+    from wechatbot.types import CDNMedia, Credentials, IncomingMessage, UploadResult
+
+    isolated_config["speech"] = {"wechat_silk_verified_targets": ["account:recipient"]}
+    msg = IncomingMessage("recipient", "hello", "text", datetime.now(), _context_token="original-context")
+    calls = []
+
+    async def send_media_buffer(user_id, context_token, data, media_type, build_item):
+        item = build_item(UploadResult(CDNMedia("encrypted", "aeskey", 1), b"key", len(data)))
+        calls.append((user_id, context_token, data, media_type, item))
+        raise TimeoutError("delivery unknown")
+
+    async def reply_media(*args):
+        pytest.fail("native voice must not fall back after an unknown result")
+
+    sdk = SimpleNamespace(
+        reply=lambda *args: None, reply_media=reply_media,
+        get_credentials=lambda: Credentials("token", "https://unused.invalid", "account", "bot"),
+        _send_media_buffer=send_media_buffer,
+    )
+    _, _, send, _ = WeChatAgentBot().adapt_message(sdk, msg)
+    assert send.speech_format == "silk"
+    other = IncomingMessage("someone-else", "hello", "text", datetime.now())
+    assert WeChatAgentBot().adapt_message(sdk, other)[2].speech_format == "wav"
+    raw = b"\x02#!SILK_V3 synthetic"
+    with pytest.raises(TimeoutError, match="delivery unknown"):
+        await send.speech_sender(AudioSegment(raw, "silk", 1.25, 24000))
+    assert len(calls) == 1
+    assert calls[0][:4] == ("recipient", "original-context", raw, 4)
+    assert calls[0][4] == {"type": 3, "voice_item": {
+        "media": {"encrypt_query_param": "encrypted", "aes_key": "aeskey", "encrypt_type": 1},
+        "encode_type": 6, "playtime": 1250, "sample_rate": 24000, "bits_per_sample": 16,
+    }}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+async def test_wechat_cancel_in_memory_send_does_not_retry(isolated_config, tmp_path, monkeypatch, native):
+    from wechatbot.types import Credentials, IncomingMessage
+
+    isolated_config["speech"] = {"wechat_silk_verified_targets": ["account:recipient"]}
+    started = asyncio.Event()
+    sent = []
+    async def send(*args):
+        sent.append(args)
+        started.set()
+        await asyncio.Event().wait()
+    sdk = SimpleNamespace(reply_media=send, _send_media_buffer=send,
+        get_credentials=lambda: Credentials("token", "https://unused.invalid", "account", "bot"))
+    msg = IncomingMessage("recipient", "hello", "text", datetime.now(), _context_token="original-context")
+    task = asyncio.create_task(WeChatAgentBot().send_voice(
+        sdk, msg, native, AudioSegment(b"synthetic audio", "silk" if native else "wav", 1, 24000)))
+    await asyncio.wait_for(started.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(sent) == 1
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_qq_record_url_and_base64_keep_silk_bytes_and_order(monkeypatch):
+    silk = b"\x02#!SILK_V3 synthetic"
+    seen = []
+    def download(url, filename=""):
+        seen.append(url)
+        return BinaryContent(silk, media_type="application/octet-stream", identifier=filename)
+    async def unexpected(**kwargs):
+        pytest.fail("valid SILK should not request NapCat conversion")
+    monkeypatch.setattr(qq, "download_to_binary", download)
+    event = SimpleNamespace(message=[
+        {"type": "record", "data": {"name": "first.silk", "file": "first.silk", "url": "https://unused.invalid/first"}},
+        {"type": "file", "data": {"file_id": "f", "file": "middle.txt"}},
+        {"type": "record", "data": {"name": "last.silk", "file": "base64://" + base64.b64encode(silk).decode()}},
+    ], raw_message="", is_group_msg=lambda: False)
+    async def file_url(file_id):
+        return "https://unused.invalid/middle"
+    result = await qq.extract_media(SimpleNamespace(get_record=unexpected, get_private_file_url=file_url), event)
+    assert [item.identifier for item in result] == ["first.silk", "middle.txt", "last.silk"]
+    assert [item.media_type for item in result] == ["audio/silk", "application/octet-stream", "audio/silk"]
+    assert result[0].data == result[2].data == silk
+    assert seen == ["https://unused.invalid/first", "https://unused.invalid/middle"]
+
+
+@pytest.mark.asyncio
+async def test_qq_record_uses_napcat_wav_conversion_when_direct_silk_unavailable(tmp_path):
+    import wave
+    converted = tmp_path / "converted.wav"
+    with wave.open(str(converted), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(16000)
+        writer.writeframes(b"\x00\x00" * 160)
+    calls = []
+    async def get_record(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(file=str(converted), url=None, base64=None)
+    event = SimpleNamespace(message=None, raw_message="[CQ:record,file=original.silk,file_id=rec-id]",
+                            is_group_msg=lambda: False)
+    result = await qq.extract_media(SimpleNamespace(get_record=get_record), event)
+    assert calls == [{"file_id": "rec-id", "out_format": "wav"}]
+    assert len(result) == 1
+    assert result[0].media_type == "audio/wav"
+    assert result[0].data == converted.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_transcribed_audio_keeps_images_but_no_audio_snapshots(isolated_config, tmp_path, monkeypatch):
+    from io import BytesIO
+    from PIL import Image
+    from redlotus.TTS import Transcript, asr, audio
+    isolated_config["storage"]["runtime_dir"] = "WorkDatabase/runtime"
+    store = ReferenceStore(WorkspaceContext.from_path(tmp_path))
+    system = SimpleNamespace(toolkit=SimpleNamespace(_references=store))
+    class FakeAudioIO:
+        @staticmethod
+        async def parse_input(source, **kwargs):
+            yield object()
+    recognized = 0
+    class FakeRecognizer:
+        def __init__(self, service=None):
+            pass
+        async def recognize(self, pcm):
+            nonlocal recognized
+            async for _ in pcm:
+                pass
+            recognized += 1
+            yield Transcript(f"spoken-{recognized}", True)
+    monkeypatch.setattr(audio, "AudioIO", FakeAudioIO)
+    monkeypatch.setattr(asr, "StreamingRecognizer", FakeRecognizer)
+    silk = b"#!SILK_V3 synthetic"
+    image = BytesIO()
+    Image.new("RGB", (2, 2), "green").save(image, format="PNG")
+    message = UserMessage("typed", attachments=[
+        BinaryContent(image.getvalue(), media_type="image/png", identifier="first.png"),
+        BinaryContent(silk, media_type="audio/silk", identifier="first.silk"),
+        BinaryContent(image.getvalue(), media_type="image/png", identifier="second.png"),
+        BinaryContent(silk, media_type="audio/silk", identifier="second.silk"),
+    ], voice=True)
+    await qq.transcribe_voice_message(system, message)
+    await store.prepare_message(message)
+    assert message.text == "typed\nspoken-1\nspoken-2"
+    assert recognized == 2
+    assert [ref.name for ref in message.references] == ["first.png", "second.png"]
+    assert [ref.source for ref in message.references] == ["attachment:0", "attachment:1"]
+    assert all(ref.snapshot.read_bytes() != silk for ref in message.references)
+    assert message.attachments == []
+    prompt = message.to_prompt()
+    assert [ref.name for ref in message.references] == ["first.png", "second.png"]
+    assert [sum(marker in part for part in prompt if isinstance(part, str)) for marker in ("spoken-1", "spoken-2")] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_transcription_closes_its_parser(isolated_config, tmp_path, monkeypatch):
+    from redlotus.TTS import asr, audio
+    isolated_config["storage"]["runtime_dir"] = "WorkDatabase/runtime"
+    store = ReferenceStore(WorkspaceContext.from_path(tmp_path))
+    system = SimpleNamespace(toolkit=SimpleNamespace(_references=store))
+    entered = asyncio.Event()
+    closed = []
+    class FakeAudioIO:
+        @staticmethod
+        async def parse_input(source, **kwargs):
+            try:
+                yield object()
+            finally:
+                closed.append("parser")
+    class FakeRecognizer:
+        def __init__(self, service=None):
+            pass
+        async def recognize(self, pcm):
+            async for _ in pcm:
+                entered.set()
+                await asyncio.Event().wait()
+                yield None
+    monkeypatch.setattr(audio, "AudioIO", FakeAudioIO)
+    monkeypatch.setattr(asr, "StreamingRecognizer", FakeRecognizer)
+    message = UserMessage("", attachments=[BinaryContent(b"#!SILK_V3 synthetic",
+        media_type="audio/silk", identifier="voice.silk")], voice=True)
+    task = asyncio.create_task(qq.transcribe_voice_message(system, message))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closed == ["parser"]

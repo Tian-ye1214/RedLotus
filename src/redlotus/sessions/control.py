@@ -11,7 +11,7 @@ from redlotus.api.media import (ReferenceSpan, iter_reference_spans, load_file_r
 import asyncio
 import inspect
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from uuid import uuid4
 
 from filelock import AsyncFileLock, Timeout
@@ -130,6 +130,80 @@ class SessionController:
         self.paused = None
         self.control_busy = False
         self.pending_inputs = {}
+        self.voice_enabled = False
+        self.voice_output = self.voice_stop = self.voice_error = None
+        self.voice_tasks = set()
+        self._voice_tail = None
+
+    def begin_voice(self, workspace, *, is_current):
+        if not self.voice_enabled or self.voice_output is None:
+            return None
+        from redlotus.TTS.tts import SpeechReply
+        reply = SpeechReply(self.voice_output,
+                             predecessor=self._voice_tail, is_current=is_current, on_error=self.voice_error)
+        self._voice_tail = reply.task
+        self.voice_tasks.add(reply.task)
+        reply.task.add_done_callback(self.voice_tasks.discard)
+        reply.task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return reply
+
+    def start_voice_test(self, text: str) -> asyncio.Task:
+        """Play a fixed local sample under the same cancellation as spoken replies."""
+        from redlotus.TTS import SpeechUnavailable
+        from redlotus.TTS.tts import StreamingSynthesizer
+
+        if self.voice_output is None:
+            raise SpeechUnavailable("语音输出尚未就绪")
+        self.stop_voice()
+        predecessor = self._voice_tail
+
+        async def play():
+            try:
+                if predecessor is not None:
+                    await asyncio.gather(predecessor, return_exceptions=True)
+                async with aclosing(StreamingSynthesizer().synthesize(text)) as pcm:
+                    await self.voice_output(pcm)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if self.voice_error is not None:
+                    self.voice_error(exc)
+                else:
+                    logger.error("语音试听失败: %s", exc, exc_info=True)
+
+        task = asyncio.create_task(play(), name="speech-voice-test")
+        self._voice_tail = task
+        self.voice_tasks.add(task)
+        task.add_done_callback(self.voice_tasks.discard)
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return task
+
+    def stop_voice(self, *, disable=False):
+        if disable:
+            self.voice_enabled = False
+        for task in tuple(self.voice_tasks):
+            task.cancel()
+        if self.voice_stop is not None:
+            task = asyncio.create_task(self.voice_stop())
+            self._voice_tail = task
+            self.voice_tasks.add(task)
+            task.add_done_callback(self.voice_tasks.discard)
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+
+    async def drain_voice(self):
+        self.stop_voice()
+        await asyncio.gather(*tuple(self.voice_tasks), return_exceptions=True)
+        self._voice_tail = None
+
+    def prepare_cli_references(self, system, text, captured):
+        """Resolve explicitly referenced files; speech drafts are text only."""
+
+        async def prepare():
+            refs = await load_file_refs(text, workspace=system.workspace, captured=captured)
+            captured["reference_ids"] = [ref.id for ref in refs]
+            return refs
+
+        return self.track_preparation(prepare())
 
     async def save_pause(self, system):
         paused, storage = self.paused, system._session_file
@@ -155,9 +229,11 @@ class SessionController:
             return False
         message = turn['message'] if turn else None
         request = self.queue.current_data or ({'text': message.original_text or message.text, 'id': turn['turn_id'],
-                                             'goal_mode': turn['mode'] == 'goal'} if turn else None)
+                                              'goal_mode': turn['mode'] == 'goal'} if turn else None)
         if request is None:
             return False
+        if message is not None and message.speech_body is not None:
+            request['speech_body'] = message.speech_body
         self.control_busy = True
         self.queue.ready.clear()
         generation = self._generation
@@ -200,7 +276,8 @@ class SessionController:
         saved, generation, storage = self.paused, self.generation, system._session_file
         try:
             from redlotus.sessions.context import repair_interrupted_tool_calls
-            message = UserMessage(saved['request']['text'], resume=saved if saved['turn_id'] else None)
+            message = UserMessage(saved['request']['text'], resume=saved if saved['turn_id'] else None,
+                                  speech_body=saved['request'].get('speech_body'))
             message.references = await load_file_refs(message.text, workspace=system.workspace, captured={'reference_ids': saved['reference_ids']})
             for row in saved['supplements']:
                 message.references.extend(await load_file_refs(row['text'], workspace=system.workspace, captured=row))
@@ -234,7 +311,8 @@ class SessionController:
             if not row.get('recorded'):
                 self.pending_inputs[row['id']] = row
                 await system.record_user_input(row['id'], UserMessage(row['text'], references=[
-                    ref for ref in message.references if ref.id in row.get('reference_ids', [])]))
+                    ref for ref in message.references if ref.id in row.get('reference_ids', [])],
+                    speech_body=row.get('speech_body')))
         job = system._memory.current
         job.user_inputs = list(self.user_inputs)
         await system._durable_write(lambda: system._memory.observations.save(job))
@@ -344,6 +422,9 @@ class SessionController:
         generation = self.generation
         if prepare:
             message.attachments = await self.track_preparation(prepare())
+        if message.voice:
+            from redlotus.api.media import transcribe_voice_message
+            await transcribe_voice_message(system, message)
         await system.toolkit._references.prepare_message(message)
         if generation != self.generation:
             raise asyncio.CancelledError()
@@ -402,6 +483,7 @@ class SessionController:
         self.accepting_urgent = False
 
     def reset(self, *, discard=False) -> None:
+        self.stop_voice(disable=discard)
         self._turn_generation += 1
         if discard:
             self._generation += 1

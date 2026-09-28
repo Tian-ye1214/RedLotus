@@ -64,10 +64,12 @@ class ReferenceFile(BaseModel):
     snapshot: Path
     parts: list[ReferencePart] = Field(default_factory=list)
     parser_version: int = 1
+    transcript: str | None = None
+    speech_model: str | None = None
 
     def to_prompt(self) -> list:
         """Present reference identity, coverage and complete content without extra instructions."""
-        header = self.model_dump(mode="json", exclude={"parts"})
+        header = self.model_dump(mode="json", exclude={"parts", "transcript"})
         header["content_provided"] = bool(self.parts)
         header["coverage"] = [
             {"part": index, "locator": part.locator, "kind": part.kind}
@@ -564,10 +566,21 @@ class ReferenceStore:
         self, path: Path, *, policy: ModelInputPolicy
     ) -> ReferenceFile:
         policy.check([path.stat().st_size])
-        data = await asyncio.to_thread(path.read_bytes)
-        return await self.capture_bytes(
-            data, name=path.name, source=str(path), policy=policy
-        )
+        self.root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="capture-", dir=self.root) as directory:
+            snapshot = Path(directory) / path.name
+            def copy():
+                digest, count = hashlib.sha256(), 0
+                with path.open("rb") as source, snapshot.open("wb") as target:
+                    while chunk := source.read(65536):
+                        count += len(chunk)
+                        policy.check([count])
+                        digest.update(chunk)
+                        target.write(chunk)
+                return digest.hexdigest(), count
+            digest, size = await finish_io(asyncio.to_thread(copy))
+            return await self._register_snapshot(snapshot, name=path.name, source=str(path),
+                digest=digest, size=size, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
 
     async def import_file(
         self, path: Path, *, policy: ModelInputPolicy
@@ -617,6 +630,9 @@ class ReferenceStore:
         policy.check([len(data)])
         media_type = media_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
         digest = hashlib.sha256(data).hexdigest()
+        return await self._register_snapshot(data, name=name, source=source, media_type=media_type, digest=digest, size=len(data))
+
+    async def _register_snapshot(self, data, *, name, source, media_type, digest, size):
         identity = hashlib.sha256(
             json.dumps([self.workspace.project_id, source, name, media_type, digest], ensure_ascii=False).encode()
         ).hexdigest()[:32]
@@ -626,7 +642,8 @@ class ReferenceStore:
         async with AsyncFileLock(directory / ".build.lock", run_in_executor=False):
             if not snapshot.exists():
                 await finish_io(
-                    asyncio.to_thread(atomic_write, snapshot, data)
+                    asyncio.to_thread(os.replace, data, snapshot) if isinstance(data, Path)
+                    else asyncio.to_thread(atomic_write, snapshot, data)
                 )
         reference = ReferenceFile(
             id=identity,
@@ -634,7 +651,7 @@ class ReferenceStore:
             name=name,
             source=source,
             media_type=media_type,
-            byte_size=len(data),
+            byte_size=size,
             sha256=digest,
             snapshot=snapshot,
         )
@@ -645,7 +662,20 @@ class ReferenceStore:
                 await finish_io(asyncio.to_thread(atomic_write_json, manifest, reference.manifest()))
         return reference
 
+    async def record_transcript(self, reference, text, model):
+        """Keep original audio as evidence without adding it to model input."""
+        manifest = self.root / "manifests" / f"{reference.id}.json"
+        async with AsyncFileLock(str(manifest) + ".lock", run_in_executor=False):
+            current = self.load(reference.id)
+            if current.transcript is not None:
+                return current
+            prepared = current.model_copy(update={"transcript": text, "speech_model": model, "parts": []})
+            await finish_io(asyncio.to_thread(atomic_write_json, manifest, prepared.manifest()))
+            return prepared
+
     async def parse(self, reference: ReferenceFile) -> ReferenceFile:
+        if reference.transcript is not None:
+            return reference
         try:
             manifest = self.root / "manifests" / f"{reference.id}.json"
             manifest.parent.mkdir(parents=True, exist_ok=True)

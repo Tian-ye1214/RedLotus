@@ -2,8 +2,22 @@ include README.md
 recursive-include tests *.py
 include scripts/check_structure.py
 include scripts/verify_wheel.py
+include src/redlotus/TTS/catalog.json
+include src/redlotus/static/pets/pets.json
+include src/redlotus/static/pets/ASSET-NOTICE.md
+recursive-include src/redlotus/static/pets pet.json sprites.png
 global-exclude config.json
 global-exclude .env
+global-exclude *.onnx
+global-exclude *.tar.bz2
+global-exclude *.part
+global-exclude installed.json
+prune model
+prune src/redlotus/model
+prune src/redlotus/TTS/model
+prune src/redlotus/TTS/.downloads
+prune src/redlotus/TTS/.staging
+prune src/redlotus/TTS/.locks
 recursive-include src/redlotus/prompts *.md
 prune src/redlotus/prompts/LongTermMemory
 

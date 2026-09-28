@@ -8,13 +8,16 @@ import hashlib
 import inspect
 import json
 import os
+import shutil
 import sys
+import threading
+import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
 from typing import Any, Iterator
 
@@ -218,12 +221,14 @@ def user_skills_dir(workspace=None, *, required=True) -> Path | None:
     root = runtime_dir(workspace, required=required)
     return root / "skills" if root is not None else None
 
-async def finish_io(operation):
+async def finish_io(operation, *, on_cancel=None):
     """Drain an I/O operation before cancellation releases its owner."""
     task = asyncio.create_task(operation)
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
+        if on_cancel is not None:
+            on_cancel()
         drain = asyncio.gather(task, return_exceptions=True)
         while not drain.done():
             try:
@@ -231,6 +236,63 @@ async def finish_io(operation):
             except asyncio.CancelledError:
                 pass
         raise
+
+_THREAD_CANCEL = ContextVar("resource_thread_cancel", default=None)
+
+
+def check_thread_cancel():
+    if (signal := _THREAD_CANCEL.get()) is not None and signal.is_set():
+        raise asyncio.CancelledError()
+
+
+async def thread_work(operation, *args, **kwargs):
+    """Run blocking resource work off-loop; signal cancellation and drain its thread."""
+    signal = threading.Event()
+    def run():
+        token = _THREAD_CANCEL.set(signal)
+        try:
+            check_thread_cancel()
+            return operation(*args, **kwargs)
+        finally:
+            _THREAD_CANCEL.reset(token)
+    return await finish_io(asyncio.to_thread(run), on_cancel=signal.set)
+
+
+@contextmanager
+def cancellable_lock(path: Path, *, wait=True):
+    """Acquire a worker-owned lock without hiding cancellation behind a long wait."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(str(path), thread_local=False)
+    while True:
+        check_thread_cancel()
+        try:
+            lock.acquire(timeout=0)
+            break
+        except Timeout:
+            if not wait:
+                raise
+            time.sleep(0.05)
+    try:
+        yield lock
+    finally:
+        lock.release()
+
+
+@asynccontextmanager
+async def threaded_context(factory, *args, **kwargs):
+    """Enter/leave a blocking resource context off-loop, including cancelled entry."""
+    entered = []
+    def enter():
+        manager = factory(*args, **kwargs)
+        value = manager.__enter__()
+        entered.append(manager)
+        return value
+    try:
+        yield await thread_work(enter)
+    finally:
+        if entered:
+            await finish_io(asyncio.to_thread(entered[0].__exit__, *sys.exc_info()))
+
 
 def atomic_write(path: Path, content: str | bytes, *, encoding: str = "utf-8") -> None:
     """Replace a complete file using native text encoding or unchanged bytes."""
@@ -242,7 +304,7 @@ def atomic_write(path: Path, content: str | bytes, *, encoding: str = "utf-8") -
     ) as temporary:
         temporary.write(content)
         temporary.close()
-        os.replace(temporary.name, path)
+        replace_retry(temporary.name, path)
 
 @contextmanager
 def file_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:
@@ -251,6 +313,164 @@ def file_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(str(lock_path), is_singleton=True).acquire(timeout=timeout):
         yield
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            check_thread_cancel()
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def owned_path(root: Path, value: str) -> Path:
+    path = Path(value)
+    target = root / path
+    if path.is_absolute() or ".." in path.parts or not path.parts or not target.resolve().is_relative_to(root.resolve()):
+        raise ValueError("path escapes its owner directory")
+    return target
+
+def managed_subdir(root: Path, name: str) -> Path:
+    """Reject a replaced storage subdirectory before creating or deleting children."""
+    if Path(name).parts != (name,):
+        raise ValueError("invalid managed directory name")
+    path = root / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return path
+    if not ordinary_owned_directory(root, path):
+        raise ValueError("managed directory is a link or escapes its root")
+    return path
+
+def ordinary_owned_directory(root: Path, path: Path) -> bool:
+    return (_ordinary_storage_path(path) and path.is_dir() and
+            path.resolve().is_relative_to(root.resolve()))
+
+def verified_partial(part: Path, metadata: Path, identity: dict, limit: int) -> tuple[dict, int]:
+    """A resumable partial belongs to its recorded source or is a conflict."""
+    try:
+        metadata.lstat()
+    except FileNotFoundError:
+        if part.exists() or part.is_symlink():
+            raise ValueError("partial archive has no owner metadata")
+        return {}, 0
+    if not _ordinary_storage_path(metadata) or not metadata.is_file():
+        raise ValueError("partial metadata is not a plain file")
+    try:
+        prior = json.loads(metadata.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError("partial metadata is unreadable") from exc
+    if not isinstance(prior, dict) or any(prior.get(key) != value for key, value in identity.items()):
+        raise ValueError("partial archive identity differs")
+    try:
+        part.lstat()
+    except FileNotFoundError:
+        return prior, 0
+    if not _ordinary_storage_path(part) or not part.is_file() or part.stat().st_size > limit:
+        raise ValueError("partial archive is not a compatible plain file")
+    return prior, part.stat().st_size
+
+def discard_verified_partial(part: Path, metadata: Path, identity: dict, limit: int) -> bool:
+    try:
+        prior, _ = verified_partial(part, metadata, identity, limit)
+    except ValueError:
+        return False
+    if not prior:
+        return False
+    part.unlink(missing_ok=True)
+    metadata.unlink()
+    return True
+
+def discard_completed_partial(part: Path, metadata: Path, identity: dict, limit: int) -> bool:
+    """Remove an owned archive only when its complete content matches the expected hash."""
+    try:
+        _, size = verified_partial(part, metadata, identity, limit)
+    except ValueError:
+        return False
+    if not size:
+        return False
+    with part.open("rb") as source:
+        if hashlib.file_digest(source, "sha256").hexdigest() != identity["sha256"]:
+            return False
+    return discard_verified_partial(part, metadata, identity, limit)
+
+def replace_retry(source: Path, destination: Path) -> None:
+    """Retry transient Windows sharing failures without moving the original first."""
+    for attempt in range(5):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) not in (5, 32) or attempt == 4:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+def safe_tar_name(name: str, root: str) -> bool:
+    path = PurePosixPath(name)
+    return (bool(path.parts) and name in (path.as_posix(), path.as_posix() + "/") and not name.startswith("/") and
+            "\\" not in name and ":" not in name and ".." not in path.parts and path.parts[0] == root)
+
+def checked_tar_members(tar, root: str, size_limit: int, *, reserved=()) -> list[str]:
+    members = tar.getmembers()
+    if len(members) > 100000:
+        raise ValueError("归档成员数量超过上限")
+    names, unpacked = set(), 0
+    for member in members:
+        check_thread_cancel()
+        name = PurePosixPath(member.name).as_posix()
+        if not safe_tar_name(member.name, root) or not (member.isfile() or member.isdir()) or name in names:
+            raise ValueError("归档包含越界或不受支持的成员")
+        names.add(name)
+        if member.isfile():
+            unpacked += member.size
+            if unpacked > size_limit:
+                raise ValueError("归档解压量超过上限")
+    if names.intersection(reserved):
+        raise ValueError("归档包含管理器保留文件")
+    return sorted(names.union(reserved))
+
+def remove_recorded_tree(directory: Path, marker_name: str, expected: dict,
+                         names, *, complete: bool = False) -> bool:
+    """Remove only a plain tree whose marker and entries match a recorded manifest."""
+    marker = directory / marker_name
+    try:
+        if (not _ordinary_storage_path(directory) or not directory.is_dir() or
+                not _ordinary_storage_path(marker) or json.loads(marker.read_text(encoding="utf-8")) != expected):
+            return False
+        allowed = set(names) | {marker_name}
+        allowed |= {parent.as_posix() for name in tuple(allowed) for parent in PurePosixPath(name).parents if str(parent) != "."}
+        entries = []
+        resolved_root = directory.resolve()
+        def collect(parent):
+            for path in parent.iterdir():
+                if (not _ordinary_storage_path(path) or not path.resolve().is_relative_to(resolved_root) or
+                        not (path.is_file() or path.is_dir())):
+                    return False
+                entries.append(path)
+                if path.is_dir() and not collect(path):
+                    return False
+            return True
+        if not collect(directory):
+            return False
+        actual = {path.relative_to(directory).as_posix() for path in entries}
+        if (complete and actual != allowed) or (not complete and not actual <= allowed):
+            return False
+        shutil.rmtree(directory)
+        return True
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+def locks_in_use(paths) -> bool:
+    """Under a caller's gate lock, reap stale use records and detect live leases."""
+    for path in paths:
+        try:
+            lock = FileLock(str(path))
+            lock.acquire(timeout=0)
+        except Timeout:
+            return True
+        lock.release()
+        path.unlink(missing_ok=True)
+    return False
 
 def read_locked_json(path: Path):
     """Read mutable JSON under the writer's lock, including on Windows."""
