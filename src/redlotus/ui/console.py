@@ -195,6 +195,7 @@ class AgentCliController:
             return None
 
     def new_session_state(self) -> SessionController:
+        self.system._session.reply_output = self.pets.publish_reply
         return self.system._session
 
     async def pause_current_turn(self):
@@ -265,6 +266,7 @@ class AgentCliController:
                 return False
             if self.system._memory._processing.locked():
                 raise ValueError("记忆重试仍在运行，完成后才能切换或清空会话。")
+            await self.pets.clear_reply()
             if restore is not None:
                 await restore()
             else:

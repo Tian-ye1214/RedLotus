@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Sequence
+from itertools import count
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -248,22 +249,66 @@ class GoalTextFilter:
 
 
 class CoordinatorStreamHandler:
-    """Consume the SDK stream once, independently feeding display and speech."""
+    """Consume one SDK stream, independently feeding display, speech and a reply sink."""
+
+    _reply_ids = count(1)
 
     def __init__(self, system, *, display=True):
         self.system, self.started = system, False
         self.display = display and system.presentation.supports_model_stream()
         identity = system.session_key, system._session.generation
         self._is_current = lambda: (system.session_key, system._session.generation) == identity
+        turn_id = getattr(system._session, "turn_id", None)
+        self._is_reply_current = lambda: self._is_current() and getattr(system._session, "turn_id", None) == turn_id
+        self._is_reply_bound = lambda: (system.session_key == identity[0]
+                                       and system._session.generation[0] == identity[1][0]
+                                       and getattr(system._session, "turn_id", None) == turn_id)
+        self._reply_output = getattr(system._session, "reply_output", None)
+        self._reply_id = str(next(self._reply_ids))
+        self._reply_started = self._reply_finished = False
+
+    async def _publish_reply(self, phase, text):
+        if self._reply_output is not None and self._is_reply_bound():
+            try:
+                await self._reply_output(reply_id=self._reply_id, phase=phase, text=text)
+            except Exception as exc:
+                self._reply_output = None
+                logger.warning("桌宠联动失败，文字继续: %s", exc)
+
+    async def _feed_reply(self, text):
+        if not text or self._reply_output is None or self._reply_finished or not self._is_reply_current():
+            return
+        if not self._reply_started:
+            self._reply_started = True
+            await self._publish_reply("start", "")
+        await self._publish_reply("delta", text)
+
+    async def finish_reply(self, phase, text):
+        if self._reply_finished:
+            return
+        if phase == "done":
+            if not self._is_reply_current():
+                return
+            text = GoalTextFilter().feed(text, final=True)
+            if text and not self._reply_started:
+                self._reply_started = True
+                await self._publish_reply("start", "")
+        self._reply_finished = True
+        if self._reply_started:
+            await self._publish_reply(phase, text)
 
     async def __call__(self, _run_ctx, event_stream):
+        from redlotus.TTS import SpeechBusy, SpeechTextParser
         from redlotus.ui.presentation import _text_from_stream_event
         system, response_started, reply, filtered = self.system, False, None, GoalTextFilter()
+        reply_filter = GoalTextFilter()
+        speech_text = SpeechTextParser()
         voice_failed = False
 
         def cancel_voice():
             nonlocal reply
             filtered.mute_pending()
+            speech_text.mute_pending()
             active, reply = reply, None
             if active is not None:
                 try:
@@ -306,32 +351,53 @@ class CoordinatorStreamHandler:
                         system.presentation.update_output("begin_model_response")
                         response_started = True
                     system.presentation.update_output("append_model_stream_delta", text, kind)
+                if kind == "text":
+                    await self._feed_reply(reply_filter.feed(text))
                 if kind == "text" and not voice_failed:
                     try:
                         discard_cancelled_voice()
-                        body = filtered.feed(text)
+                        speech_text.limit = max(0, getattr(reply, "text_capacity", 4096) - getattr(reply, "pending_chars", 0))
+                        body = speech_text.feed(filtered.feed(text), audible=system._session.voice_enabled)
                         if not system._session.voice_enabled:
                             cancel_voice()
                         if system._session.voice_enabled:
-                            if reply is None:
+                            if reply is None and body.strip():
                                 reply = system._session.begin_voice(
                                     system.workspace, is_current=self._is_current)
+                            speech_text.limit = getattr(reply, "text_capacity", 4096)
+                            if speech_text.pending_chars + getattr(reply, "pending_chars", 0) + len(body) > speech_text.limit:
+                                raise SpeechBusy("语音文本缓冲区已满，文字回复继续")
                             if reply is not None and body:
                                 await reply.feed(body)
                     except Exception as exc:
                         await fail_voice(exc)
+            await self._feed_reply(reply_filter.feed("", final=True))
             discard_cancelled_voice()
-            if reply is not None and not voice_failed:
+            if not voice_failed:
                 try:
-                    tail = filtered.feed("", final=True)
+                    tail = speech_text.feed(filtered.feed("", final=True), audible=system._session.voice_enabled)
+                    tail += speech_text.finish()
                     if tail and self._is_current() and system._session.voice_enabled:
-                        await reply.feed(tail)
-                    await reply.finish()
+                        if reply is None and tail.strip():
+                            reply = system._session.begin_voice(system.workspace, is_current=self._is_current)
+                        if reply is not None:
+                            await reply.feed(tail)
+                    if reply is not None:
+                        await reply.finish()
                 except Exception as exc:
                     await fail_voice(exc)
-        except BaseException:
+        except BaseException as exc:
             cancel_voice()
+            tail = reply_filter.feed("", final=True)
+            if tail and not self._reply_started:
+                self._reply_started = True
+                await self._publish_reply("start", "")
+            if tail:
+                await self._publish_reply("delta", tail)
+            await self.finish_reply("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", "")
             raise
+        finally:
+            speech_text.clear()
 
 
 def coordinator_stream_handler(system, *, display=True):

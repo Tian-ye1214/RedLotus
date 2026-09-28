@@ -730,6 +730,8 @@ class AgentSystem:
             )
         except BaseException as exc:
             self._session.close_inbox()
+            if stream_handler is not None:
+                await stream_handler.finish_reply("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", "")
             if stream_handler is not None and stream_handler._is_current():
                 self.presentation.update_output("end_model_stream", "已停止" if isinstance(exc, asyncio.CancelledError) else "执行失败")
             raise
@@ -739,6 +741,7 @@ class AgentSystem:
         parsed = parse_goal_output(raw_output) if _inside_goal else None
         output = parsed.cleaned_text if parsed else raw_output
         if stream_handler is not None:
+            await stream_handler.finish_reply("done", output)
             self.presentation.finish_model_stream(output, title="Coordinator")
         else:
             self.presentation.show_model_output(output, title="Coordinator")

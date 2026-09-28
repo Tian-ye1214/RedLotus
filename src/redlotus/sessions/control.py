@@ -131,6 +131,7 @@ class SessionController:
         self.control_busy = False
         self.pending_inputs = {}
         self.voice_enabled = False
+        self.reply_output = None
         self.voice_output = self.voice_stop = self.voice_error = None
         self.voice_tasks = set()
         self._voice_tail = None

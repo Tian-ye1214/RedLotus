@@ -331,10 +331,10 @@ def context_usage_renderable(items) -> Align:
     return Align.right(Text("  ".join(parts), style="dim"))
 
 
-def user_text_panel(content, title, *, text_style="bold white", border_style="bright_blue") -> Panel:
-    """Frame user text and streaming output with the same terminal panel layout."""
+def user_text_panel(content, title, *, text_style="bold white", border_style="bright_blue", markdown=False) -> Panel:
+    """Keep user input literal; assistant callers explicitly opt into Markdown."""
     return Panel(
-        Text(content or " ", style=text_style), title=title, title_align="left",
+        (Markdown if markdown else Text)(content or " ", style=text_style), title=title, title_align="left",
         border_style=border_style, padding=(0, 1), expand=False,
     )
 

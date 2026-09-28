@@ -1,6 +1,7 @@
 """Real subprocess lifecycle tests, without loading Qt."""
 import asyncio
 import importlib.util
+import json
 import sys
 
 import pytest
@@ -23,8 +24,8 @@ import json, sys, time
 mode, character = sys.argv[1:]
 if mode == 'slow': time.sleep(.5)
 if mode == 'timeout': time.sleep(20)
-if mode == 'error':
-    print(json.dumps({'event': 'error', 'error': 'broken atlas'}), flush=True)
+if mode in ('error', 'empty_error'):
+    print(json.dumps({'event': 'error', 'error': 'broken atlas' if mode == 'error' else ''}), flush=True)
     sys.exit(1)
 if mode == 'stderr':
     sys.stderr.write('x' * 200000)
@@ -126,7 +127,7 @@ async def test_crash_and_backpressure_do_not_break_controller():
 async def test_stop_escalates_and_commands_validate_before_mutation():
     service = ChildService("stubborn")
     try:
-        assert "运行" in await service.command([])
+        assert await service.command([]) == ""
         pid = (await service.status()).pid
         assert "用法" in await service.command(["off", "extra"])
         assert "角色" in await service.command(["on", "wrong"])
@@ -137,6 +138,36 @@ async def test_stop_escalates_and_commands_validate_before_mutation():
     finally:
         await service.stop()
     assert not service._tasks
+
+
+@pytest.mark.asyncio
+async def test_control_commands_are_silent_and_status_remains_explicit():
+    service = ChildService()
+    try:
+        for parts in ([], ["on"], ["on", "charcoal"], ["on", "ivory"], ["on", "ivory"]):
+            assert await service.command(parts) == ""
+        report = await service.command(["status"])
+        assert "运行中" in report and "ivory" in report and "100%" in report
+        for parts in (["off"], ["off"], [], []):
+            assert await service.command(parts) == ""
+        assert "已关闭" in await service.command(["status"])
+    finally:
+        await service.close()
+    assert not service._tasks and all(process.returncode is not None for process in service.launched)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parts", [[], ["on"]])
+@pytest.mark.parametrize("mode,reason", [("error", "broken atlas"), ("empty_error", "失败"), ("timeout", "超时")])
+async def test_command_start_failure_remains_visible(parts, mode, reason):
+    service = ChildService(mode)
+    service.START_TIMEOUT = .25
+    try:
+        assert reason in await service.command(parts)
+        assert (await service.status()).state == "failed"
+        assert all(process.returncode is not None for process in service.launched)
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio
@@ -323,3 +354,173 @@ asyncio.run(main())
                 api.TerminateProcess(handle, 1)
                 await asyncio.to_thread(api.WaitForSingleObject, handle, 5000)
             api.CloseHandle(handle)
+
+
+class MessageService(ProcessPetService):
+    STOP_TIMEOUT = .15
+    WRITE_TIMEOUT = .15
+
+    def __init__(self, path, mode):
+        super().__init__()
+        self.path, self.mode = path, mode
+        self.scales = []
+
+    def _command(self, character):
+        self.scales.append(self._scale)
+        code = """
+import json, pathlib, sys, time
+path, mode, character = sys.argv[1:]
+print(json.dumps({'event':'ready','character':character}), flush=True)
+if mode == 'scale':
+    print(json.dumps({'event':'scale','scale':1.75}), flush=True)
+if mode == 'blocked': time.sleep(30)
+for line in sys.stdin.buffer:
+    message = json.loads(line)
+    with pathlib.Path(path).open('a', encoding='utf-8') as out:
+        out.write(json.dumps({'at':time.monotonic(),'message':message})+'\\n')
+"""
+        return [sys.executable, "-u", "-c", code, str(self.path), self.mode, character]
+
+
+async def records(path, predicate):
+    async with asyncio.timeout(3):
+        while True:
+            rows = await asyncio.to_thread(
+                lambda: [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+                if path.exists() else [])
+            if predicate(rows):
+                return rows
+            await asyncio.sleep(.01)
+
+
+async def test_fast_stream_coalesces_unicode_and_final_snapshot_is_authoritative(tmp_path):
+    path = tmp_path / "messages.jsonl"
+    service = MessageService(path, "read")
+    try:
+        assert (await service.start()).state == "running"
+        await service.publish_reply(reply_id="1", phase="start", text="")
+        for _ in range(1000):
+            await service.publish_reply(reply_id="1", phase="delta", text="你好🪷" * 20)
+        final = "最终结果\n" + "🪷正文" * 12000
+        await service.publish_reply(reply_id="1", phase="done", text=final)
+        rows = await records(path, lambda rows: rows and rows[-1]["message"]["phase"] == "done")
+        message = rows[-1]["message"]
+        assert message["text"] == final[-32768:] and message["truncated"]
+        assert message["reply_id"] == "1" and len(rows) <= 2
+        assert len(json.dumps(message, ensure_ascii=False).encode("utf-8")) < 262144
+        await service.publish_reply(reply_id="1", phase="delta", text="late")
+        await asyncio.sleep(.08)
+        assert len((await records(path, bool))) == len(rows)
+    finally:
+        await service.close()
+    assert not service._tasks
+
+
+async def test_clear_and_next_reply_reject_late_previous_fragments(tmp_path):
+    path = tmp_path / "messages.jsonl"
+    service = MessageService(path, "read")
+    try:
+        await service.start()
+        await service.publish_reply(reply_id="1", phase="start", text="")
+        await service.publish_reply(reply_id="1", phase="delta", text="old text")
+        await records(path, lambda rows: rows and rows[-1]["message"]["text"] == "old text")
+        await service.clear_reply()
+        await service.publish_reply(reply_id="1", phase="start", text="")
+        await service.publish_reply(reply_id="1", phase="done", text="must not reappear")
+        await records(path, lambda rows: rows and rows[-1]["message"]["phase"] == "clear")
+        await service.publish_reply(reply_id="2", phase="start", text="")
+        await service.publish_reply(reply_id="2", phase="delta", text="new text")
+        await service.publish_reply(reply_id="1", phase="start", text="")
+        await service.publish_reply(reply_id="1", phase="delta", text="stale")
+        await service.publish_reply(reply_id="2", phase="cancelled", text="")
+        rows = await records(path, lambda rows: rows and rows[-1]["message"]["phase"] == "cancelled")
+        assert rows[-1]["message"]["text"] == "new text"
+        assert all(b["at"] - a["at"] >= .035 for a, b in zip(rows, rows[1:]))
+        assert [r["message"]["seq"] for r in rows] == sorted({r["message"]["seq"] for r in rows})
+    finally:
+        await service.close()
+
+
+async def test_off_does_not_collect_or_replay_replies(tmp_path):
+    path = tmp_path / "messages.jsonl"
+    service = MessageService(path, "read")
+    await service.publish_reply(reply_id="1", phase="start", text="")
+    await service.publish_reply(reply_id="1", phase="done", text="private old reply")
+    try:
+        await service.start()
+        await asyncio.sleep(.1)
+        assert not path.exists()
+        await service.publish_reply(reply_id="1", phase="start", text="")
+        await service.publish_reply(reply_id="1", phase="delta", text="late")
+        await asyncio.sleep(.06)
+        assert not path.exists()
+    finally:
+        await service.close()
+
+
+async def test_scale_receipt_survives_stop_and_character_switch(tmp_path):
+    service = MessageService(tmp_path / "messages.jsonl", "scale")
+    try:
+        await service.start()
+        async with asyncio.timeout(2):
+            while (await service.status()).scale != 1.75:
+                await asyncio.sleep(.01)
+        assert "175%" in str(await service.status())
+        await service.select("ivory")
+        await service.stop()
+        await service.start()
+        assert service.scales == [1, 1.75, 1.75]
+        assert ProcessPetService()._scale == 1
+    finally:
+        await service.close()
+
+
+async def test_blocked_reader_cannot_block_publishing_or_leave_background_tasks(tmp_path):
+    service = MessageService(tmp_path / "unused.jsonl", "blocked")
+    try:
+        await service.start()
+        await service.publish_reply(reply_id="1", phase="start", text="")
+        for _ in range(3):
+            async with asyncio.timeout(.05):
+                await service.publish_reply(reply_id="1", phase="delta", text="🪷" * 32768)
+            await asyncio.sleep(.06)
+        ticks = 0
+        async with asyncio.timeout(4):
+            while (await service.status()).state != "failed":
+                ticks += 1
+                await asyncio.sleep(.005)
+        assert ticks > 2 and (await service.status()).error
+    finally:
+        await service.close()
+    assert not service._tasks
+
+
+async def test_clear_while_encoding_discards_old_frame_and_keeps_sender_alive(tmp_path, monkeypatch):
+    import threading
+    from redlotus.pets import service as module
+
+    entered, release = threading.Event(), threading.Event()
+    native = json.dumps
+    def delayed(value, **kwargs):
+        if value.get("reply_id") == "1":
+            entered.set()
+            assert release.wait(3)
+        return native(value, **kwargs)
+    monkeypatch.setattr(module.json, "dumps", delayed)
+    path = tmp_path / "messages.jsonl"
+    service = MessageService(path, "read")
+    try:
+        await service.start()
+        await service.publish_reply(reply_id="1", phase="start", text="")
+        async with asyncio.timeout(2):
+            while not entered.is_set():
+                await asyncio.sleep(.005)
+        await service.clear_reply()
+        await service.publish_reply(reply_id="2", phase="start", text="")
+        await service.publish_reply(reply_id="2", phase="done", text="new reply")
+        release.set()
+        rows = await records(path, lambda rows: rows and rows[-1]["message"]["text"] == "new reply")
+        assert all(row["message"]["reply_id"] != "1" for row in rows)
+    finally:
+        release.set()
+        await service.close()

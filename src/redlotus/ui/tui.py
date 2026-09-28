@@ -237,7 +237,7 @@ class RedLotusTui(App[None]):
                 log.write(Text("该会话没有可显示的用户或助手文本。", style="dim"), scroll_end=True)
             for entry in entries:
                 style = {} if entry.role == "用户" else {
-                    "text_style": "white", "border_style": "cyan",
+                    "text_style": "white", "border_style": "cyan", "markdown": True,
                 }
                 self._write_user_input(entry.text, title=entry.role, **style)
             self.query_one("#session-context", Static).update(self._session_context_text())
@@ -494,7 +494,7 @@ class RedLotusTui(App[None]):
         preview.display = bool(self._model_stream_text)
         self.query_one("#stream-content", Static).update(user_text_panel(
             self._model_stream_text, self._model_stream_title,
-            text_style="white", border_style="cyan",
+            text_style="white", border_style="cyan", markdown=True,
         ))
         preview.scroll_end(animate=False)
 
@@ -536,7 +536,7 @@ class RedLotusTui(App[None]):
             return
         if status != "已完成" and self._model_stream_text:
             self.query_one("#output", RichLog).write(user_text_panel(
-                self._model_stream_text, f"Coordinator · {status}", border_style="yellow",
+                self._model_stream_text, f"Coordinator · {status}", text_style="white", border_style="yellow", markdown=True,
             ))
         self._model_stream_text = ""
         self._refresh_model_stream()

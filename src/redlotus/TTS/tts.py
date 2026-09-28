@@ -448,6 +448,14 @@ class SpeechReply:
         self.task.add_done_callback(_REPLIES.discard)
         self.task.add_done_callback(self._clean_unstarted)
 
+    @property
+    def pending_chars(self) -> int:
+        return self._pending_chars
+
+    @property
+    def text_capacity(self) -> int:
+        return self._service.config.text_chars
+
     def _clean_unstarted(self, _task) -> None:
         if self._started:
             return

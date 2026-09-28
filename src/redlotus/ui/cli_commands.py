@@ -50,6 +50,7 @@ from redlotus.ui.presentation import (
     print_error,
     print_markdown,
     print_markdown_panel,
+    print_message,
     print_panel,
     print_success,
     print_warning,
@@ -433,7 +434,8 @@ class SlashCommands:
         return await value if inspect.isawaitable(value) else value
 
     async def pets(self):
-        print_panel(await self.controller.pets.command(self.parts[1:]), title="桌宠")
+        if message := await self.controller.pets.command(self.parts[1:]):
+            print_message(message)
 
     async def voice(self):
         args = self.raw.split(maxsplit=3)[1:]
