@@ -241,7 +241,7 @@ async def extract_media(bot_api, event: BaseMessageEvent) -> list:
 async def transcribe_voice_message(system, message):
     """Replace admitted channel audio with one local transcript in memory."""
     from redlotus.TTS import NoSpeechDetected
-    from redlotus.TTS.asr import StreamingRecognizer
+    from redlotus.TTS import StreamingRecognizer
     from redlotus.TTS.audio import AudioIO
     policy = ModelInputPolicy.for_role("coordinator")
     policy.check([len(item.data) for item in message.attachments if isinstance(item, BinaryContent)])

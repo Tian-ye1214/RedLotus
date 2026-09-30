@@ -163,7 +163,8 @@ async def test_widget_status_does_not_construct_service_on_event_loop(isolated_c
 async def test_record_preflight_failure_keeps_friendly_microphone_message(
     isolated_config, tmp_path, monkeypatch
 ):
-    from redlotus.TTS import SpeechSettings, SpeechUnavailable, asr, audio, service as speech_service
+    import redlotus.TTS as asr
+    from redlotus.TTS import SpeechSettings, SpeechUnavailable, audio, service as speech_service
     from redlotus.ui import widgets
 
     rows = model_rows(asr="ready", tts="ready")
@@ -180,19 +181,19 @@ async def test_record_preflight_failure_keeps_friendly_microphone_message(
             assert kwargs == {"pcm_seconds": 2, "device": None}
 
         async def check_available(self):
-            raise SpeechUnavailable(audio._MICROPHONE_UNAVAILABLE) from OSError("native details")
+                raise SpeechUnavailable("暂时无法使用麦克风，请检查系统默认输入设备和权限。文字输入和语音回复仍可使用。") from OSError("native details")
 
         async def close(self):
             pass
 
-    monkeypatch.setattr(asr, "AudioCapture", Capture)
+    monkeypatch.setattr(audio, "AudioCapture", Capture)
     async with SpeechApp(service).run_test() as pilot:
         await pilot.pause()
         controls = pilot.app.query_one(VoiceControls)
         controls.start_recording()
         await controls.record_task
         preview = str(controls.query_one("#voice-preview", Static).render())
-        assert preview == audio._MICROPHONE_UNAVAILABLE
+        assert preview == "暂时无法使用麦克风，请检查系统默认输入设备和权限。文字输入和语音回复仍可使用。"
         assert "native details" not in preview
         assert logs and isinstance(logs[0][1].__cause__, OSError)
 
@@ -211,9 +212,14 @@ async def test_voice_test_uses_real_synthesis_without_enabling_replies_and_off_c
 
     class Native:
         sample_rate = 24000
+        profile = None
 
-        def generate(self, text, speaker, *, callback):
-            played.append(text)
+        def prepare_voice(self, profile):
+            from redlotus.TTS import SpeakerCondition
+            return SpeakerCondition("synthetic", 3, 0, True, 3)
+
+        def generate(self, request, *, callback):
+            played.append(request.text)
             samples = np.ones(2400, dtype=np.float32)
             callback(samples, 1.0)
             return SimpleNamespace(samples=samples, sample_rate=24000)
@@ -299,9 +305,10 @@ async def test_voice_test_failure_is_logged_even_without_error_callback(monkeypa
     ('/voice prepare asr "archive file"', ("asr",), "archive file"),
 ])
 async def test_voice_prepare_requests_warm_engine_without_second_acquire(
-    isolated_config, monkeypatch, raw, kinds, archive
+    isolated_config, tmp_path, monkeypatch, raw, kinds, archive
 ):
     from redlotus.TTS import service as speech_service
+    from redlotus.runtime.resources import WorkspaceContext
     from redlotus.ui import cli_commands
 
     rows = model_rows(asr="missing", tts="missing")
@@ -311,7 +318,8 @@ async def test_voice_prepare_requests_warm_engine_without_second_acquire(
         def status(self):
             return rows
 
-        async def prepare(self, kind, path, *, warm):
+        async def prepare(self, kind, path, *, warm, report_failure):
+            assert callable(report_failure) if kind is None else report_failure is None
             prepared.append((kind, path, warm))
             for chosen in (kind,) if kind else ("asr", "tts"):
                 rows[chosen].stage = ModelStage.READY
@@ -325,15 +333,17 @@ async def test_voice_prepare_requests_warm_engine_without_second_acquire(
     monkeypatch.setattr(speech_service.SpeechService, "_shared", service)
     monkeypatch.setattr(cli_commands, "print_panel", lambda body, **kwargs: panels.append(body))
     state = SessionController()
-    await cli_commands.SlashCommands(SimpleNamespace(system=object()), state, raw).voice()
+    controller = SimpleNamespace(system=SimpleNamespace(workspace=WorkspaceContext.from_path(tmp_path)))
+    await cli_commands.SlashCommands(controller, state, raw).voice()
     assert prepared == [(kinds[0] if len(kinds) == 1 else None, archive, True)]
     assert all(rows[kind].stage == ModelStage.READY for kind in kinds)
     assert panels
 
 
 @pytest.mark.asyncio
-async def test_voice_prepare_reports_failed_engine_and_still_shows_other_ready(isolated_config, monkeypatch):
+async def test_voice_prepare_reports_failed_engine_and_still_shows_other_ready(isolated_config, tmp_path, monkeypatch):
     from redlotus.TTS import service as speech_service
+    from redlotus.runtime.resources import WorkspaceContext
     from redlotus.ui import cli_commands
 
     rows = model_rows(asr="missing", tts="missing")
@@ -343,8 +353,9 @@ async def test_voice_prepare_reports_failed_engine_and_still_shows_other_ready(i
         def status(self):
             return rows
 
-        async def prepare(self, kind, path, *, warm):
+        async def prepare(self, kind, path, *, warm, report_failure):
             assert kind is None and path is None and warm
+            assert callable(report_failure)
             rows[ModelKind.ASR].stage = ModelStage.FAILED
             rows[ModelKind.ASR].error = "native details"
             rows[ModelKind.TTS].stage = ModelStage.READY
@@ -359,7 +370,8 @@ async def test_voice_prepare_reports_failed_engine_and_still_shows_other_ready(i
     monkeypatch.setattr(cli_commands, "print_warning", warnings.append)
     monkeypatch.setattr(cli_commands, "print_panel", lambda body, **kwargs: panels.append(body))
     monkeypatch.setattr(cli_commands.logger, "error", lambda *args, **kwargs: logs.append((args, kwargs)))
-    await cli_commands.SlashCommands(SimpleNamespace(system=object()), SessionController(), "/voice prepare").voice()
+    controller = SimpleNamespace(system=SimpleNamespace(workspace=WorkspaceContext.from_path(tmp_path)))
+    await cli_commands.SlashCommands(controller, SessionController(), "/voice prepare").voice()
     assert rows[ModelKind.TTS].stage == ModelStage.READY
     assert warnings and "ASR" in warnings[0] and "native details" not in warnings[0]
     assert not logs

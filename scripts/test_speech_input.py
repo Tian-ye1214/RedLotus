@@ -6,8 +6,9 @@ import argparse
 import asyncio
 
 from redlotus.TTS import ModelKind, ModelStage, NoSpeechDetected, SpeechError
-from redlotus.TTS.asr import AudioCapture, StreamingRecognizer
-from redlotus.TTS.audio import AudioDevices
+from redlotus.TTS.audio import AudioCapture
+from redlotus.TTS import StreamingRecognizer
+from redlotus.TTS import AudioDevices
 from redlotus.TTS.service import SpeechService
 
 

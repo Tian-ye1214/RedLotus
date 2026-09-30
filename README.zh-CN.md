@@ -98,15 +98,19 @@ pip install "redlotus[pets]"     # 可选桌面像素宠物
 pip install "redlotus[all]"      # 全部可选依赖
 ```
 
-安装 `speech` 后，应用启动时即在后台独立准备、加载 ASR 和 TTS，并预热 ASR 及 TTS 的中英文音色；缺失的已校验模型下载到全局 `~/.redlotus/model`，准备期间文字交互仍可用。wheel 和 EXE 均不包含权重。同一个 TTS 模型对纯英文句段使用英文音色并把数字读作英文，对中文及含中文句段使用中文音色。ASR 就绪后，TUI 按住录音按钮，松开后得到可编辑草稿，由用户手动提交。语音回复默认关闭，使用会话滑块或 `/voice on|off` 开启。`/voice test` 不调用 LLM、不更改开关，使用正式 TTS 与扬声器路径播放固定双语测试句。本地 CLI 通过 `/voice status`、`/voice prepare`、`/voice update`、`/voice rollback asr|tts`、`/voice clean` 管理模型。离线导入、版本复用和 QQ／微信行为见[语音设计](docs/design.md#本地语音输入与输出)。
+安装 `speech` 后，应用启动时在后台分别准备 X-ASR 和选定的 TTS，文字交互不等待。Windows x64 默认使用受管理的曼波音源，显式设置 `speech.tts_backend=sherpa-onnx` 可选择 Kokoro。`speech.tts_package` 留空或为 `null` 时，从固定清单自动下载到全局 `~/.redlotus/model`；非空路径优先选择对应只读外部模型包。旧 Kokoro 的活动记录不能覆盖曼波选择，更新和回滚限于选定模型族。校验、加载和中英文预热均在线程内完成；不支持的平台在下载前明确提示，不自动换声音。Windows x64 wheel 和 EXE 携带推理组件及许可证通知，不携带权重或训练依赖。ASR 就绪后按住 TUI 录音按钮，松开后生成可编辑草稿，由用户手动提交。语音回复默认关闭，使用会话滑块或 `/voice on|off` 开启；`/voice test` 不调用 LLM、不更改开关，只通过正式合成与扬声器接口播放一次固定双语测试句。受管理模型使用 `/voice status`、`/voice prepare`、`/voice update`、`/voice rollback asr|tts`、`/voice clean` 管理。外部包须提供受支持的 `model.json`、完整资源大小和 SHA256，保持只读，换包修改目录并重启。详见[语音设计](docs/design.md#本地语音输入与输出)。
 
-语音回复朗读 Markdown 的文字内容：标题、强调、列表与链接去掉格式，代码块和网址跳过，行内代码保留文字；界面仍显示完整 Markdown。解析过程支持跨增量的格式与代码围栏，开关重新开启不会补读旧内容。自定义音色的独立制作端、固定 ONNX 文件组及统一 sherpa-onnx 推理约定见 [ZipVoice 接入计划](docs/zipvoice-integration.md)；ZipVoice 尚未完成接入与真实克隆验收。
+语音回复朗读 Markdown 文字：标题、强调、列表和链接去掉格式，代码块及网址跳过，行内代码保留文字；界面仍显示原始 Markdown。跨增量解析不会重复播报，重新开启开关不会补读旧内容。应用沿用统一的 `TTSModel` 接口，界面与渠道不按模型品牌分支。曼波运行只读取预先导出的四张 ONNX 图、匹配的文本前端和专用音色特征；随应用提供的 Windows x64 原生组件复用 sherpa-onnx 自带的 ONNX Runtime，正常启动无需制作目录、导出器、编译器或 PyTorch。性能和完整发行验收是独立门槛，当前源码改动不能当作已验收的应用发行版。详见[本地 TTS 模型包](docs/tts-model-package.md)。专用音色资料可持久保存，日常录音、合成 PCM 和待播正文只留在内存。
+
+曼波在句段完成前分块交付音频，并连续重采样为 24 kHz；关闭播报立即停止播放，后台等当前原生响应收尾后再复用模型。公开默认线程数为 ASR 2、TTS 8，可用 `speech.asr_threads`、`speech.tts_threads` 覆盖；已有显式配置保持有效，不回写私人配置。
 
 TUI 的麦克风下拉框默认“跟随系统默认”，同时显示当前实际输入设备；连接或拔出设备后可点“刷新”。选择框最多占 44 个终端列，在窄窗中缩短，刷新按钮和语音回复开关紧随其后。也可在下拉框中选另一支麦克风，仅本次程序运行生效、跨会话保留，重启后恢复跟随系统默认，不修改系统声音设置或私人配置。刷新后若所选设备消失或无法唯一识别，须重新选择，不会悄悄切换到另一设备；设备切换及录音收尾期间不可开始新的录音。播放仍使用操作系统默认输出设备。
 
-实际采集开始即显示“录音中，请说话…”，不用等待识别首字。麦克风 PCM 直接进入 ASR，不生成转写 WAV、原始音频证据或音频引用。非空转写即使有错字也可在草稿中编辑后手动提交，只有编辑后的文字作为正文。空识别只显示“未识别到语音，请重试。”，不改草稿、不添加附件、不创建 Agent 回合。设备和识别故障在界面简短提示，详情写入项目语音日志。QQ／微信语音在内存中转写后从消息中移除原音频字节，其他附件照常准备；语音回复也从内存编码并发送。
+实际采集开始即显示“录音中，请说话…”，不用等待识别首字。麦克风 PCM 直接进入 ASR，不生成转写 WAV、原始音频证据或音频引用。非空转写即使有错字也可在草稿中编辑后手动提交，只有编辑后的文字作为正文。空识别只显示“未识别到语音，请重试。”，不改草稿、不添加附件、不创建 Agent 回合。模型准备、设备和识别故障在界面简短提示；项目日志启用时，完整原因写入 `speech.log`，首次对话前的启动失败也会记录，单个模型失败不等待另一个模型结束。QQ／微信语音在内存中转写后从消息中移除原音频字节，其他附件照常准备；语音回复也从内存编码并发送。
 
 安装 `pets` 后，`/pets` 切换一只桌面宠物的开关；`/pets on charcoal` 与 `/pets on ivory` 选择深色外套或米色针织衫角色，`/pets off` 关闭，`/pets status` 查看状态和缩放比例。桌宠默认关闭，运行在独立 Qt 子进程中；悬停、点击和拖动触发五种内置动作，右键菜单可退出。拖动角落手柄可在 50～300 物理像素间缩放，默认 100，大小保留至本次 RedLotus 退出。气泡实时显示当前 Coordinator 正文，包含 `/goal`，与语音开关独立；可滚动回看或关闭，回复结束 15 秒后收起，悬停暂停计时。也可通过 `python -m redlotus.pets.desktop` 独立启动，无需模型配置。资源与生命周期见[桌面像素宠物设计](docs/design.md#桌面像素宠物)。
+
+角色支持两文件资源包：把 `pet.json` 和 `sprites.png` 放入 `~/.redlotus/pets/<角色ID>/`，执行 `/pets list` 发现、`/pets on <角色ID>` 开启，修改素材后用 `/pets reload` 重载。用户同名包覆盖内置角色，校验失败保留正在运行的旧桌宠；重载保留缩放，重置动作和气泡。源码、pip 和 EXE 共用用户资源。详见[资源包制作说明](docs/pet-resource-packs.md)。
 
 浏览器能力首次使用前还需要安装 Chromium：
 
@@ -281,6 +285,7 @@ $env:PLAYWRIGHT_BROWSERS_PATH="0"
 python -m playwright install chromium
 pyinstaller build.spec
 ```
+
 
 项目主要代码位于 `src/redlotus/`，分为 `runtime`、`sessions`、`core`、`tools`、`memory`、`prompts`、`ui`、`api`、`TTS`、`pets` 十个模块；命令入口为 `redlotus.api.base:main`。
 

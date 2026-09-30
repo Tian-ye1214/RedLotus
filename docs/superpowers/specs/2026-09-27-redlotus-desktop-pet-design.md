@@ -143,7 +143,7 @@ flowchart LR
 | 命令 | 行为 |
 | --- | --- |
 | /pets | 切换开启或关闭；任务执行期间也可使用。 |
-| /pets on [charcoal\|ivory] | 按需启动一个子进程或切换角色；省略角色沿用当前选择，首次为 charcoal。收到窗口就绪回执后确认启动，重复调用不重复创建。 |
+| /pets on [角色ID] | 按需启动一个子进程或切换角色；省略角色沿用当前选择，首次为 charcoal。收到窗口就绪回执后确认启动，重复调用不重复创建。 |
 | /pets off | 关闭当前控制器拥有的宠物并回收资源；重复调用安全。 |
 | /pets status | 返回本实例的未启动、启动中、运行中或失败状态；保留具体失败原因。 |
 
@@ -191,13 +191,12 @@ src/redlotus/pets/
     service.py     PetService、ProcessPetService；异步控制单个子进程
     factory.py     PetFactory；创建服务与异步加载角色模型
 src/redlotus/static/pets/
-    pets.json
     ASSET-NOTICE.md
     charcoal/pet.json、sprites.png
     ivory/pet.json、sprites.png
 ~~~
 
-运行时资源经 `runtime.resources.resource_root()` 定位，源码、wheel 和冻结程序共用同一目录结构。直接维护上述六个运行时文件，JSON 不包含 `frames[*].file`、`provenance.reference`、`provenance.generation`，保留指向运行时 `ASSET-NOTICE.md` 的说明路径。
+运行时资源经 `runtime.resources.resource_root()` 定位，源码、wheel 和冻结程序共用同一目录结构。直接维护上述五个内置运行时文件，JSON 使用简明动作格式，来源说明保留在根目录。自定义角色遵循下文资源包约定。
 
 setuptools 和 `MANIFEST.in` 只收集上述运行时文件。PyInstaller onedir 与 onefile 共用 `build.spec`，显式包含四个桌宠模块及 QtCore、QtGui、QtWidgets，依赖官方 hooks 收集所需 DLL 和平台插件，并保留 PySide6、PySide6_Essentials、shiboken6 的发行元数据及许可文件。语音运行库和权重排除规则保持原有边界。
 
@@ -269,3 +268,18 @@ setuptools 和 `MANIFEST.in` 只收集上述运行时文件。PyInstaller onedir
 2026-09-28 显示精简验证：桌宠相关测试 132 项通过，最终源码完整回归 674 项通过，结构及差异检查通过。`pets` 保持四文件：`desktop.py` 497、`service.py` 312、`model.py` 190、`factory.py` 9 有效行；命令接入 `cli_commands.py` 为 496 有效行，所有应用文件均不超过 500。Qt 绘制、布局和事件检查使用离屏平台；本次未进行 Windows 真实鼠标、跨屏 DPI 或终端焦点实测，仍须在原生桌面核验。运行中的 RedLotus 需重启以加载命令和桌宠显示修改。
 
 2026-09-28 Markdown 验证：Markdown 与既有桌宠窗口回归 78 项通过，完整源码测试 701 项通过，结构及差异检查通过。Qt 测试检查实际粗体、列表、代码、表格结构，分段标记重解析、宽内容滚动、图片占位、HTTP/HTTPS 点击及测量文档回收；Textual 使用真实控件核验流式、完成、中断、恢复会话、输入响应和纯文本边界。四档 DPI 的气泡预览与 TUI 组件预览已检查；TUI SVG 导出时按终端双宽字符校准中文长度，预览不代表 Windows 实机截图。独立只读复核未发现需修复问题。`desktop.py` 与 `presentation.py` 各 500、`tui.py` 496 有效行；pets 仍为四文件。Windows 原生浏览器跳转、终端焦点和真实鼠标仍待实机核验，自动化未打开真实链接。
+
+
+## 10. 角色资源包与手动重载
+
+每个角色目录只需 `pet.json` 和 `sprites.png`，目录名作为角色 ID。图集固定 100×100 网格，按行从 0 编号；JSON 只有非空 `name`、五种动作的 `actions` 与可选 `enter`，序列元素为 `[帧编号, 正整数毫秒]`。程序统一管理动作模式、优先级及 30 秒睡眠。两套内置角色保留原始帧顺序和时长。完整例子见[资源包制作说明](../../pet-resource-packs.md)。
+
+`PetCatalog` 发现内置 `static/pets` 和用户 `~/.redlotus/pets` 的子目录；用户同名目录覆盖内置，损坏覆盖包报告错误，不悄悄替换角色。移除用户覆盖目录后重新发现内置版本。新增目录无需改 Python 或总目录清单。单个坏包不妨碍其他角色发现；名称、目录、来源及错误通过 `PetInfo` 传递，终端补全只读取发现缓存。
+
+服务新增异步 `list_pets()`、`reload()`，命令为 `/pets list`、`/pets reload`；原开关和状态命令保持兼容。终端准备时刷新发现结果，list 与新角色启动、reload 再读取资源。reload 先校验，再重启当前子进程；比例保留，窗口位置按启动规则放置，动作与气泡重置。关闭时只校验所选角色，不自动启动。校验错误保留旧宠物；后续启动失败沿用现有错误和回收逻辑。查询和错误是纯文本，控制成功静默。
+
+目录扫描、JSON 解析、校验与解码通过 `to_thread` 并复用取消收尾；父服务将选定的绝对目录传给子进程，避免重复选择不同来源。重复重载、关闭和退出共用请求代次与串行启停，关闭必须先失效正在启动或重载的请求，再等待其他目录扫描，迟到工作不得创建新宠物。保持四文件、各文件 500 有效行，不新增依赖。
+
+验收覆盖第三角色、同名覆盖、删除与损坏资源、非法帧与时长、素材和时序更新、关闭状态重载、连续重载及取消。源码、wheel、onedir、onefile 使用隔离外部包验证启动、比例恢复、回复和回收；焦点与窗口重建另行在 Windows 原生桌面核验。
+
+2026-09-28 资源包验证：资源包专项 25 项、打包专项 18 项通过；源码完整回归 742 项通过，随后补充的两项归档发现用例包含在最终安装 wheel 的 744 项完整回归中，全部通过。wheel、sdist 和两种 EXE 构建通过；onedir、onefile 的真实子进程入口使用隔离外部角色及 Qt 离屏平台验证启动、重载、缩放恢复、回复通道、损坏资源保留旧进程和关闭回收。onefile 首次由源码测试父进程启动时触发 15 秒就绪超时，重试完整流程通过，生产超时限制未放宽。两套内置角色的帧顺序与时长对照旧版本一致，独立复核发现的两项生命周期问题已用回归测试修复。pets 保持四文件，结构及差异检查通过；Windows 原生焦点、透明窗口及重建交互未进行实机验证。

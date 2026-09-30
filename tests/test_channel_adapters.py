@@ -489,7 +489,8 @@ async def test_qq_record_uses_napcat_wav_conversion_when_direct_silk_unavailable
 async def test_transcribed_audio_keeps_images_but_no_audio_snapshots(isolated_config, tmp_path, monkeypatch):
     from io import BytesIO
     from PIL import Image
-    from redlotus.TTS import Transcript, asr, audio
+    import redlotus.TTS as asr
+    from redlotus.TTS import Transcript, audio
     isolated_config["storage"]["runtime_dir"] = "WorkDatabase/runtime"
     store = ReferenceStore(WorkspaceContext.from_path(tmp_path))
     system = SimpleNamespace(toolkit=SimpleNamespace(_references=store))
@@ -533,7 +534,8 @@ async def test_transcribed_audio_keeps_images_but_no_audio_snapshots(isolated_co
 
 @pytest.mark.asyncio
 async def test_cancelled_transcription_closes_its_parser(isolated_config, tmp_path, monkeypatch):
-    from redlotus.TTS import asr, audio
+    import redlotus.TTS as asr
+    from redlotus.TTS import audio
     isolated_config["storage"]["runtime_dir"] = "WorkDatabase/runtime"
     store = ReferenceStore(WorkspaceContext.from_path(tmp_path))
     system = SimpleNamespace(toolkit=SimpleNamespace(_references=store))

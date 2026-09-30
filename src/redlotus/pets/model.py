@@ -4,10 +4,74 @@ from __future__ import annotations
 import asyncio
 import json
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
 
 from redlotus.runtime.resources import finish_io, owned_path, resource_root
 
-CHARACTERS = ("charcoal", "ivory")
+@dataclass(frozen=True)
+class PetInfo:
+    id: str
+    name: str
+    directory: Path
+    source: str
+    error: str = ""
+
+
+class PetCatalog:
+    """Discover two-file packs; the terminal only consumes the in-memory cache."""
+
+    cached: tuple[PetInfo, ...] = ()
+
+    def __init__(self):
+        self._serial = asyncio.Lock()
+
+    @staticmethod
+    def roots():
+        return resource_root() / "static/pets", Path.home() / ".redlotus/pets"
+
+    @staticmethod
+    def check_id(character):
+        if (not isinstance(character, str) or not character or character.startswith(".")
+                or any(c.isspace() or c in '/\\:' for c in character)):
+            raise ValueError("Invalid pet character ID")
+
+    @classmethod
+    def _scan(cls):
+        from PIL import Image
+        entries = {}
+        for root, source in zip(cls.roots(), ("内置", "用户")):
+            if not root.exists():
+                continue
+            for path in sorted(root.iterdir()):
+                if not path.is_dir() or path.name.startswith("."):
+                    continue
+                name, error = path.name, ""
+                try:
+                    cls.check_id(path.name)
+                    directory = owned_path(root, path.name).resolve()
+                    pet = SpritePet._load(directory)
+                    name = pet.name
+                except (OSError, ValueError, TypeError, KeyError, RecursionError, Image.DecompressionBombError) as exc:
+                    error = str(exc)
+                entries[path.name] = PetInfo(path.name, name, path.absolute(), source, error)
+        return tuple(entries[key] for key in sorted(entries))
+
+    async def refresh(self) -> tuple[PetInfo, ...]:
+        async with self._serial:
+            entries = await finish_io(asyncio.to_thread(self._scan))
+            type(self).cached = entries
+            return entries
+
+    async def resolve(self, character: str) -> PetInfo:
+        self.check_id(character)
+        entries = await self.refresh()
+        for entry in entries:
+            if entry.id == character:
+                if entry.error:
+                    raise ValueError(f"桌宠角色 {character} 无效：{entry.error}")
+                return entry
+        raise ValueError(f"未知桌宠角色：{character}；使用 /pets list 查看可用角色")
 
 
 class PetModel(ABC):
@@ -100,48 +164,62 @@ class SpritePet(PetModel):
         self._last_interaction = None
 
     @classmethod
-    async def load(cls, character: str) -> SpritePet:
+    async def load(cls, character: str | Path) -> SpritePet:
         """Load all package resources off-loop and drain the worker on cancellation."""
-        return await finish_io(asyncio.to_thread(cls._load, character))
+        directory = character if isinstance(character, Path) else (await PetCatalog().resolve(character)).directory
+        return await finish_io(asyncio.to_thread(cls._load, directory))
 
     @classmethod
-    def _load(cls, character: str) -> SpritePet:
-        if character not in CHARACTERS:
-            raise ValueError(f"Unknown pet character: {character}")
+    def _load(cls, directory: Path) -> SpritePet:
         from PIL import Image
-
-        root = owned_path(resource_root(), "static/pets")
-        catalog = json.loads(owned_path(root, "pets.json").read_text(encoding="utf-8"))
-        try:
-            if (catalog["format"] != "redlotus.pet-catalog"
-                    or type(catalog["format_version"]) is not int or catalog["format_version"] != 1
-                    or not isinstance(catalog["pets"], list) or len(catalog["pets"]) != len(CHARACTERS)):
-                raise ValueError("Invalid pet catalog")
-            entries = {}
-            for entry in catalog["pets"]:
-                name = entry["id"]
-                if name not in CHARACTERS or name in entries or entry["manifest"] != f"{name}/pet.json":
-                    raise ValueError("Invalid pet catalog character or manifest path")
-                entries[name] = entry["manifest"]
-        except (KeyError, TypeError) as exc:
-            raise ValueError("Invalid pet catalog structure") from exc
-        path = owned_path(root, entries[character])
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-        cls._validate_manifest(manifest)
-        if manifest["id"] != character:
-            raise ValueError("Pet manifest does not match the catalog character")
-        spec = manifest["atlas"]
-        atlas_path = owned_path(path.parent, spec["file"])
+        spec = json.loads(owned_path(directory, "pet.json").read_text(encoding="utf-8"))
         frames = {}
-        with Image.open(atlas_path) as source:
-            if source.format != "PNG" or source.size != (spec["width"], spec["height"]):
-                raise ValueError("Pet atlas image does not match the manifest")
+        with Image.open(owned_path(directory, "sprites.png")) as source:
+            if source.format != "PNG" or any(size % 100 for size in source.size):
+                raise ValueError("sprites.png must be a PNG on a 100×100 grid")
+            manifest = cls._expand(spec, directory.name, source.size)
+            cls._validate_manifest(manifest)
             with source.convert("RGBA") as atlas:
                 for name, record in manifest["frames"].items():
                     x, y, width, height = record["rect"]
                     with atlas.crop((x, y, x + width, y + height)) as frame:
                         frames[name] = frame.tobytes()
-        return cls(manifest, frames)
+        pet = cls(manifest, frames)
+        pet.name = spec["name"]
+        return pet
+
+    @staticmethod
+    def _expand(spec, character, size):
+        """Translate the compact public pack into the existing animation contract."""
+        modes = {"idle": "loop", "look": "hold", "happy": "once", "drag": "loop", "sleep": "loop"}
+        if (not isinstance(spec, dict) or set(spec) - {"name", "actions", "enter"}
+                or not isinstance(spec.get("name"), str) or not spec["name"].strip()
+                or not isinstance(spec.get("actions"), dict) or spec["actions"].keys() != modes.keys()
+                or not isinstance(spec.get("enter", {}), dict) or set(spec.get("enter", {})) - modes.keys()):
+            raise ValueError("pet.json requires name and five actions; only enter is optional")
+        columns, rows = size[0] // 100, size[1] // 100
+        actions, frames = {}, {}
+        for index, (action, mode) in enumerate(modes.items()):
+            record = {"mode": mode, "priority": index * 10 if action != "sleep" else 0}
+            for phase, steps in (("enter", spec.get("enter", {}).get(action, [])), ("sequence", spec["actions"][action])):
+                if not isinstance(steps, list) or (phase == "sequence" and not steps):
+                    raise ValueError(f"Invalid {action} {phase}: expected frame/duration pairs")
+                record[phase] = []
+                for step in steps:
+                    if (not isinstance(step, list) or len(step) != 2 or any(type(n) is not int for n in step)
+                            or not 0 <= step[0] < columns * rows or step[1] <= 0):
+                        raise ValueError(f"Invalid {action} frame index or duration: {step}")
+                    frame, duration = step
+                    frames[str(frame)] = {"rect": [frame % columns * 100, frame // columns * 100, 100, 100]}
+                    record[phase].append({"frame": str(frame), "duration_ms": duration})
+            actions[action] = record
+        actions["happy"]["on_complete"] = "resolve_pointer"
+        return {"format": "redlotus.pet-actions", "format_version": 1, "id": character, "initial_action": "idle",
+                "canvas": {"width": 100, "height": 100, "sampling": "nearest"},
+                "atlas": {"file": "sprites.png", "width": size[0], "height": size[1], "columns": columns, "rows": rows},
+                "frames": frames, "actions": actions, "interaction": {"idle_after_ms": 30000,
+                "coalesce_repeated_action": "happy", "events": {"pointer_enter": "look", "pointer_leave": "idle",
+                "primary_click": "happy", "drag_start": "drag", "drag_end": "resolve_pointer", "idle_timeout": "sleep"}}}
 
     @property
     def action(self) -> str:
@@ -199,7 +277,7 @@ class SpritePet(PetModel):
         try:
             if (manifest["format"] != "redlotus.pet-actions"
                     or type(manifest["format_version"]) is not int or manifest["format_version"] != 1
-                    or manifest["id"] not in CHARACTERS or manifest["initial_action"] != "idle"):
+                    or not isinstance(manifest["id"], str) or not manifest["id"] or manifest["initial_action"] != "idle"):
                 raise ValueError("Invalid pet manifest identity or initial action")
             canvas, atlas, frames = manifest["canvas"], manifest["atlas"], manifest["frames"]
             size = (canvas["width"], canvas["height"])

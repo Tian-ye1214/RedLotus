@@ -10,6 +10,7 @@ import sys
 import threading
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from functools import partial
 from urllib.parse import urlsplit
 
 from redlotus.runtime import config as app_config
@@ -469,15 +470,16 @@ def install_stop_handlers(stop_event: asyncio.Event) -> None:
 async def start_speech():
     def initialize():
         speech = importlib.import_module("redlotus.TTS.service")
-        return speech.SpeechService.shared() if speech.ModelFactory.available() else None
+        instance = speech.SpeechService.shared() if speech.ModelFactory.available() else None
+        return instance, WorkspaceContext.from_path(current_workspace())
 
     try:
-        service = await finish_io(asyncio.to_thread(initialize))
+        service, workspace = await finish_io(asyncio.to_thread(initialize))
         if service is not None:
-            service.bootstrap()
+            service.bootstrap(report_failure=partial(logger.speech_log, workspace, "语音模型准备失败"))
         return service
     except Exception as exc:
-        logger.warning("语音准备失败，文字功能仍可使用: %s", exc, exc_info=True)
+        await logger.speech_log(None, "语音启动失败，文字功能仍可使用", exc)
 
 
 async def run_cli(system=None):

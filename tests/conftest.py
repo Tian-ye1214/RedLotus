@@ -6,7 +6,7 @@ def no_live_models(monkeypatch):
     from pydantic_ai import models
     monkeypatch.setattr(models, "ALLOW_MODEL_REQUESTS", False)
     from redlotus.TTS.service import SpeechService
-    monkeypatch.setattr(SpeechService, "bootstrap", lambda self: None)
+    monkeypatch.setattr(SpeechService, "bootstrap", lambda self, **kwargs: None)
 
 
 def pytest_sessionstart(session):

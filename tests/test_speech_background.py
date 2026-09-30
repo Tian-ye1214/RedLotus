@@ -3,12 +3,109 @@ from test_speech_service import CatalogFixture, NativeFixture
 import asyncio
 import threading
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from redlotus.TTS import SpeechSettings, service
 from test_speech_service import REAL_BOOTSTRAP, tiny_archive
+
+
+@pytest.fixture
+def preparation_diagnostics(tmp_path, isolated_config, monkeypatch):
+    from redlotus.runtime import logging as logger, resources
+
+    isolated_config["storage"].update(runtime_dir="runtime", project_logs_dir="logs")
+    workspace = resources.WorkspaceContext.from_path(tmp_path)
+    console, writers = [], []
+    written = threading.Event()
+    original_sink = logger._session_sink
+
+    def record(message):
+        writers.append(threading.get_ident())
+        original_sink(message)
+        written.set()
+
+    monkeypatch.setattr(logger, "_configured", False)
+    monkeypatch.setattr(logger, "_configured_dir", None)
+    monkeypatch.setattr(logger, "_task_log_paths", {})
+    monkeypatch.setattr(logger, "console_sink", console.append)
+    monkeypatch.setattr(logger, "_session_sink", record)
+    speech = service.SpeechService(SpeechSettings(model_dir=tmp_path / "model"))
+    monkeypatch.setattr(service.SpeechService, "_shared", speech)
+    return SimpleNamespace(workspace=workspace, speech=speech, written=written,
+                           console=console, writers=writers, log=tmp_path / "logs/speech.log")
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_is_logged_before_the_other_model_finishes(preparation_diagnostics, monkeypatch):
+    from redlotus.api import base
+    from redlotus.runtime import resources
+
+    probe = preparation_diagnostics
+    release = threading.Event()
+    monkeypatch.setattr(service.SpeechService, "bootstrap", REAL_BOOTSTRAP)
+    monkeypatch.setattr(service.ModelFactory, "available", lambda: True)
+
+    def prepare(kind, archive):
+        if kind == "tts":
+            try:
+                raise OSError("synthetic installation failure")
+            except OSError as exc:
+                raise service.SpeechUnavailable("model preparation failed") from exc
+        assert release.wait(5)
+
+    async def load(engine, verified):
+        engine.native = NativeFixture()
+
+    monkeypatch.setattr(probe.speech, "_prepare_one", prepare)
+    monkeypatch.setattr(probe.speech, "_ensure_loaded", load)
+    try:
+        with resources.workspace_context(probe.workspace):
+            assert await base.start_speech() is probe.speech
+        assert await asyncio.to_thread(probe.written.wait, 1)
+        assert not probe.speech._bootstrap_task.done()
+        assert probe.speech.status()["tts"].error == "model preparation failed"
+        log = probe.log.read_text(encoding="utf-8")
+        assert "synthetic installation failure" in log and "Traceback" in log
+        assert log.count("ERROR") == 1
+        assert not probe.console
+        assert probe.writers and all(identity != threading.get_ident() for identity in probe.writers)
+    finally:
+        release.set()
+        await probe.speech.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["/voice prepare", "/voice prepare tts"])
+async def test_prepare_command_logs_the_original_failure_once(preparation_diagnostics, monkeypatch, command):
+    from redlotus.sessions.control import SessionController
+    from redlotus.ui import cli_commands
+
+    probe = preparation_diagnostics
+    warnings = []
+
+    def prepare(kind, archive):
+        if kind == "tts":
+            raise OSError("synthetic preparation error")
+
+    async def load(engine, verified):
+        engine.native = NativeFixture()
+
+    monkeypatch.setattr(probe.speech, "_prepare_one", prepare)
+    monkeypatch.setattr(probe.speech, "_ensure_loaded", load)
+    monkeypatch.setattr(cli_commands, "print_warning", warnings.append)
+    monkeypatch.setattr(cli_commands, "print_panel", lambda *args, **kwargs: None)
+    controller = SimpleNamespace(system=SimpleNamespace(workspace=probe.workspace))
+    try:
+        await cli_commands.SlashCommands(controller, SessionController(), command).voice()
+        log = probe.log.read_text(encoding="utf-8")
+        assert "synthetic preparation error" in log and "Traceback" in log
+        assert log.count("ERROR") == 1
+        assert warnings and not probe.console
+    finally:
+        await probe.speech.close()
 
 
 @pytest.mark.asyncio

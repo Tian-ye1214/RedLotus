@@ -9,7 +9,8 @@ from textual.app import App, ComposeResult
 from textual.widgets import Input, Select, Static
 
 from redlotus.TTS import InputDevice, ModelKind, ModelStage, PCMChunk, PreparationStatus, SpeechUnavailable, Transcript
-from redlotus.TTS import asr, audio, service as speech_service
+import redlotus.TTS as asr
+from redlotus.TTS import audio, service as speech_service
 from redlotus.runtime import logging as logger, resources
 from redlotus.sessions.control import SessionController
 from redlotus.ui.widgets import RecordButton, VoiceControls
@@ -96,7 +97,7 @@ async def test_successful_recording_edits_draft_without_writing_wav(microphone_u
                 on_started()
             on_result(Transcript("识别正文", False))
             return Transcript("识别正文", True, "asr-version")
-    monkeypatch.setattr(asr, "AudioCapture", Capture)
+    monkeypatch.setattr(audio, "AudioCapture", Capture)
     monkeypatch.setattr(asr, "StreamingRecognizer", lambda service: Recognizer())
 
     async with microphone_ui.app.run_test() as pilot:
@@ -111,7 +112,7 @@ async def test_successful_recording_edits_draft_without_writing_wav(microphone_u
 
 @pytest.mark.asyncio
 async def test_empty_recording_is_a_notice_not_a_console_error(microphone_ui, monkeypatch):
-    monkeypatch.setattr(asr, "AudioCapture", SilentCapture)
+    monkeypatch.setattr(audio, "AudioCapture", SilentCapture)
 
     async def empty(self, pcm):
         async for _ in pcm:
@@ -142,9 +143,9 @@ async def test_empty_recording_is_a_notice_not_a_console_error(microphone_ui, mo
 async def test_native_failure_is_logged_once_without_console_traceback(microphone_ui, monkeypatch):
     class Unavailable(SilentCapture):
         async def check_available(self):
-            raise SpeechUnavailable(audio._MICROPHONE_UNAVAILABLE) from OSError("native endpoint lost")
+            raise SpeechUnavailable("暂时无法使用麦克风，请检查系统默认输入设备和权限。文字输入和语音回复仍可使用。") from OSError("native endpoint lost")
 
-    monkeypatch.setattr(asr, "AudioCapture", Unavailable)
+    monkeypatch.setattr(audio, "AudioCapture", Unavailable)
     writes = []
     original_sink = logger._session_sink
 
@@ -158,7 +159,7 @@ async def test_native_failure_is_logged_once_without_console_traceback(microphon
         controls = pilot.app.query_one(VoiceControls)
         controls.start_recording()
         await controls.record_task
-        assert str(controls.query_one("#voice-preview", Static).render()) == audio._MICROPHONE_UNAVAILABLE
+        assert str(controls.query_one("#voice-preview", Static).render()) == "暂时无法使用麦克风，请检查系统默认输入设备和权限。文字输入和语音回复仍可使用。"
         assert pilot.app.query_one(Input).value == "已有草稿"
         assert not microphone_ui.console
     log = (microphone_ui.root / "logs/speech.log").read_text(encoding="utf-8")
@@ -175,7 +176,7 @@ async def test_selected_microphone_survives_session_and_matches_after_refresh(mi
         captured.append(capture.kwargs["device"])
         raise SpeechUnavailable("测试设备暂不可用")
 
-    monkeypatch.setattr(asr, "AudioCapture", SilentCapture)
+    monkeypatch.setattr(audio, "AudioCapture", SilentCapture)
     monkeypatch.setattr(asr.StreamingRecognizer, "record", record)
     async with microphone_ui.app.run_test() as pilot:
         await pilot.pause()
@@ -229,7 +230,7 @@ async def test_device_switch_locked_until_recording_finishes(microphone_ui, monk
         raise SpeechUnavailable("测试设备暂不可用")
 
     monkeypatch.setattr(asr.StreamingRecognizer, "record", record)
-    monkeypatch.setattr(asr, "AudioCapture", SilentCapture)
+    monkeypatch.setattr(audio, "AudioCapture", SilentCapture)
     async with microphone_ui.app.run_test() as pilot:
         await pilot.pause()
         controls = pilot.app.query_one(VoiceControls)
@@ -245,7 +246,7 @@ async def test_device_switch_locked_until_recording_finishes(microphone_ui, monk
 
 @pytest.mark.asyncio
 async def test_model_exception_keeps_cause_in_file_and_draft_in_ui(microphone_ui, monkeypatch):
-    monkeypatch.setattr(asr, "AudioCapture", SilentCapture)
+    monkeypatch.setattr(audio, "AudioCapture", SilentCapture)
     async def broken(self, pcm):
         async for _ in pcm:
             raise RuntimeError("native recognizer decode failed")
@@ -279,7 +280,7 @@ async def test_cancel_and_stale_recording_never_overwrite_current_ui(microphone_
         except asyncio.CancelledError:
             await finish.wait()
         raise SpeechUnavailable("old session device lost")
-    monkeypatch.setattr(asr, "AudioCapture", SilentCapture)
+    monkeypatch.setattr(audio, "AudioCapture", SilentCapture)
     monkeypatch.setattr(asr.StreamingRecognizer, "record", delayed)
     async with microphone_ui.app.run_test() as pilot:
         await pilot.pause()
@@ -377,7 +378,7 @@ async def test_each_recording_shows_started_before_any_recognized_text(microphon
         async for _ in pcm:
             pass
         yield Transcript("", True)
-    monkeypatch.setattr(asr, "AudioCapture", Capture)
+    monkeypatch.setattr(audio, "AudioCapture", Capture)
     monkeypatch.setattr(asr.StreamingRecognizer, "recognize", empty)
     async with microphone_ui.app.run_test() as pilot:
         await pilot.pause()

@@ -2,15 +2,18 @@
 # PyInstaller onedir：与 main.py 同目录执行
 #   pyinstaller build.spec
 
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import sysconfig
 
 from PyInstaller.utils.hooks import collect_dynamic_libs, copy_metadata
 from playwright.sync_api import sync_playwright
 
 project = os.path.dirname(os.path.abspath(SPEC))
 source_root = Path(project, "src", "redlotus")
+worker_sha256 = "ce05b53e991313a7122b075035b94b33e8c2b2a31a25dad0b67f887c1b805f39"
 bundle_mode = os.environ.get("REDLOTUS_PYINSTALLER_MODE", "onedir")
 # Match Windows' loader order: Qt uses the OS ICU, while unrelated tools on PATH
 # can supply an incompatible ICU DLL with the same unversioned filename.
@@ -43,7 +46,7 @@ def resource_files(source: Path, destination: str):
         and ".log." not in path.name
         and not any(part in {"model", ".downloads", ".staging", ".locks"} for part in path.relative_to(source).parts)
         and path.suffix not in {".onnx", ".part"}
-        and not path.name.endswith(".tar.bz2")
+        and not path.name.endswith((".tar.bz2", ".tar.gz"))
     ]
 
 
@@ -53,7 +56,7 @@ datas = [
     (str(source_root / "TTS" / "catalog.json"), "redlotus/TTS"),
     *[
         (str(path), str(Path("redlotus/static/pets", path.relative_to(source_root / "static" / "pets").parent)))
-        for pattern in ("pets.json", "ASSET-NOTICE.md", "*/pet.json", "*/sprites.png")
+        for pattern in ("ASSET-NOTICE.md", "*/pet.json", "*/sprites.png")
         for path in (source_root / "static" / "pets").glob(pattern)
     ],
     *resource_files(source_root / "tools" / "skills", "redlotus/tools/skills"),
@@ -62,6 +65,30 @@ datas = [
         for path in (source_root / "prompts").glob("*.md")
     ],
 ]
+
+# Copy the trusted worker as data: its delayed ORT dependency is deliberately
+# resolved from sherpa_onnx/lib at runtime, never from PATH during collection.
+native_speech = source_root / "TTS" / "native"
+if os.name == "nt":
+    if sysconfig.get_platform() != "win-amd64":
+        raise SystemExit("The Mambo worker currently supports Windows x64 only")
+    missing = [name for name in ("redlotus_mambo.exe", "UPSTREAM-LICENSE.txt", "NOTICE.md",
+                              "THIRD-PARTY-NOTICES.md")
+               if not (native_speech / name).is_file()]
+    if missing:
+        raise SystemExit(f"Windows x64 build requires the Mambo worker and notices: {missing}")
+    licenses = [path for path in (native_speech / "licenses").rglob("*")
+                if path.is_file() and path.suffix.lower() in {".txt", ".md"}]
+    if not licenses:
+        raise SystemExit("Windows x64 build requires the Mambo third-party license files")
+    with (native_speech / "redlotus_mambo.exe").open("rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != worker_sha256:
+            raise SystemExit("Mambo worker does not match the trusted release SHA-256")
+    datas.extend((str(native_speech / name), "redlotus/TTS/native") for name in
+                 ("redlotus_mambo.exe", "UPSTREAM-LICENSE.txt", "NOTICE.md",
+                  "THIRD-PARTY-NOTICES.md"))
+    datas.extend((str(path), str(Path("redlotus/TTS/native/licenses", path.relative_to(native_speech / "licenses").parent)))
+                 for path in licenses)
 
 a = Analysis(
     [os.path.join(project, "main.py")],
@@ -88,7 +115,7 @@ a = Analysis(
     hiddenimports=[
         "redlotus.pets.desktop", "redlotus.pets.model", "redlotus.pets.factory", "redlotus.pets.service",
         "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets",
-        "redlotus.TTS.audio", "redlotus.TTS.asr", "redlotus.TTS.tts", "redlotus.TTS.service",
+        "redlotus.TTS.audio", "redlotus.TTS.inference", "redlotus.TTS.tts", "redlotus.TTS.service",
         "sherpa_onnx", "sounddevice", "_sounddevice_data", "pysilk",
         "pysilk.backends.cython._silk", "pysilk.backends.cffi._silk", "soxr",
     ],

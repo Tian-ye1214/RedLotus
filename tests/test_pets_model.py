@@ -46,8 +46,7 @@ def make_pet(manifest):
 
 
 def test_model_contract_is_abstract():
-    from redlotus.pets.model import CHARACTERS, PetModel, SpritePet
-    assert CHARACTERS == ("charcoal", "ivory")
+    from redlotus.pets.model import PetModel, SpritePet
     assert {"action", "frame_id", "size", "frames", "advance", "interact"} <= PetModel.__abstractmethods__
     assert issubclass(SpritePet, PetModel)
     with pytest.raises(TypeError):
@@ -165,7 +164,7 @@ def test_animation_reports_completion_for_once_and_holds_last_frame(manifest):
 @pytest.mark.parametrize(("path", "value"), [
     (("format",), "foreign.pet"),
     (("format_version",), True),
-    (("id",), "unknown"),
+    (("id",), ""),
     (("initial_action",), "missing"),
     (("canvas", "width"), 101),
     (("canvas", "height"), 0),
@@ -228,21 +227,23 @@ def resources(tmp_path, monkeypatch, manifest):
     from redlotus.pets import model
     package = tmp_path / "package"
     root = package / "static" / "pets"
-    for character in model.CHARACTERS:
+    names = list(manifest["frames"])
+    for character in ("charcoal", "ivory"):
         directory = root / character
         directory.mkdir(parents=True)
-        spec = copy.deepcopy(manifest)
-        spec["id"] = character
+        spec = {"name": character, "actions": {
+            name: [[names.index(step["frame"]), step["duration_ms"]] for step in action["sequence"]]
+            for name, action in manifest["actions"].items()}, "enter": {
+            "sleep": [[names.index(step["frame"]), step["duration_ms"]]
+                      for step in manifest["actions"]["sleep"]["enter"]]}}
         (directory / "pet.json").write_text(json.dumps(spec), encoding="utf-8")
-        with Image.new("RGBA", (8, 6)) as atlas:
-            for index, frame in enumerate(spec["frames"].values()):
-                x, y, width, height = frame["rect"]
-                atlas.paste((index, 40, 80, 128), (x, y, x + width, y + height))
+        with Image.new("RGBA", (400, 300)) as atlas:
+            for index in range(len(names)):
+                x, y = index % 4 * 100, index // 4 * 100
+                atlas.paste((index, 40, 80, 128), (x, y, x + 100, y + 100))
             atlas.save(directory / "sprites.png")
-    catalog = {"format": "redlotus.pet-catalog", "format_version": 1,
-               "pets": [{"id": name, "manifest": f"{name}/pet.json"} for name in model.CHARACTERS]}
-    (root / "pets.json").write_text(json.dumps(catalog), encoding="utf-8")
     monkeypatch.setattr(model, "resource_root", lambda: package, raising=False)
+    monkeypatch.setattr(model.PetCatalog, "roots", staticmethod(lambda: (model.resource_root() / "static/pets", tmp_path / "user")))
     return root
 
 
@@ -264,14 +265,14 @@ async def test_load_predecodes_each_frame_off_loop_and_playback_never_reads_disk
     monkeypatch.setattr(Image.Image, "convert", convert_image)
     pet = await model.SpritePet.load("charcoal")
     assert threads and all(thread != threading.get_ident() for thread in threads)
-    assert pet.frames["idle_0"] == bytes([0, 40, 80, 128]) * 4
-    assert pet.frames["happy_1"] == bytes([5, 40, 80, 128]) * 4
+    assert pet.frames["0"] == bytes([0, 40, 80, 128]) * 10000
+    assert pet.frames["5"] == bytes([5, 40, 80, 128]) * 10000
     def forbidden(*args, **kwargs):
         pytest.fail("Playback must use predecoded frames")
     monkeypatch.setattr(Path, "read_text", forbidden)
     monkeypatch.setattr(Image, "open", forbidden)
     pet.interact("primary_click", 1)
-    assert pet.advance(1.125) == "happy_1"
+    assert pet.advance(1.125) == "5"
 
 
 async def test_delayed_read_keeps_loop_responsive_and_cancel_waits_for_worker(resources, monkeypatch):
@@ -309,37 +310,22 @@ async def test_delayed_read_keeps_loop_responsive_and_cancel_waits_for_worker(re
         await asyncio.gather(task, return_exceptions=True)
 
 
-@pytest.mark.parametrize("problem", ["format", "version", "duplicate", "missing", "traversal", "not_object"])
-async def test_load_rejects_invalid_catalog(resources, problem):
+@pytest.mark.parametrize("character", ["", ".", "..", "../charcoal", "charcoal/sub", "a b"])
+async def test_load_rejects_invalid_character_id(resources, character):
     from redlotus.pets.model import SpritePet
-    path = resources / "pets.json"
-    catalog = json.loads(path.read_text(encoding="utf-8"))
-    if problem == "format":
-        catalog["format"] = "other"
-    elif problem == "version":
-        catalog["format_version"] = True
-    elif problem == "duplicate":
-        catalog["pets"][1] = catalog["pets"][0]
-    elif problem == "missing":
-        catalog["pets"].pop()
-    elif problem == "traversal":
-        catalog["pets"][0]["manifest"] = "../pet.json"
-    else:
-        catalog = []
-    path.write_text(json.dumps(catalog), encoding="utf-8")
-    with pytest.raises(ValueError, match="catalog"):
-        await SpritePet.load("charcoal")
+    with pytest.raises(ValueError, match="character"):
+        await SpritePet.load(character)
 
 
-@pytest.mark.parametrize("problem", ["identity", "json", "atlas_path", "atlas_size", "atlas_corrupt"])
+@pytest.mark.parametrize("problem", ["name", "json", "atlas_path", "atlas_size", "atlas_corrupt"])
 async def test_load_rejects_invalid_manifest_or_atlas(resources, problem):
     from redlotus.pets.model import SpritePet
     path = resources / "charcoal" / "pet.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if problem == "identity":
-        manifest["id"] = "ivory"
+    if problem == "name":
+        manifest["name"] = []
     elif problem == "atlas_path":
-        manifest["atlas"]["file"] = "../../outside.png"
+        manifest["atlas"] = {"file": "../../outside.png"}
     elif problem == "atlas_size":
         with Image.new("RGBA", (7, 6)) as atlas:
             atlas.save(path.parent / "sprites.png")

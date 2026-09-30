@@ -295,6 +295,10 @@ class AgentCliController:
     async def prepare_session(self) -> tuple[str, ...]:
         print_startup_logo()
         print_repl_welcome()
+        try:
+            await self.pets.list_pets()
+        except (OSError, ValueError) as exc:
+            print_warning(f"桌宠资源发现失败：{exc}")
         missing = app_config.missing_main_api_keys()
         if missing:
             print_warning(

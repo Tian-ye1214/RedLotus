@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from redlotus.TTS.tts import StreamingSynthesizer
+from redlotus.TTS import StreamingSynthesizer
 from test_speech_inference import FakeService, FakeTts
 
 

@@ -9,6 +9,7 @@ import shutil
 import struct
 import threading
 import wave
+from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
@@ -17,7 +18,8 @@ import numpy as np
 
 from redlotus.runtime.resources import finish_io
 from . import AudioFormat, AudioSegment, InputDevice, PCMChunk, SpeechBusy, SpeechError, SpeechUnavailable
-from .asr import PCMDecoder
+from .inference import PCMDecoder
+from . import AudioDevices, _SPEAKER_UNAVAILABLE
 
 _READ_SIZE = 65536
 _INPUT_RATE = 16000
@@ -27,126 +29,6 @@ _FORMAT_ALIASES = {"wave": "wav", "mpeg": "mp3", "pcm": "pcm_s16le", "s16le": "p
                    "f32le": "pcm_f32le", "mp4": "m4a", "opus+ogg": "opus"}
 _MAGIC_FORMATS = {b"fLaC": "flac", b"OggS": "ogg", b"ID3": "mp3"}
 _FFMPEG_FORMATS = {"mp3", "ogg", "flac", "m4a", "aac", "opus"}
-_MICROPHONE_UNAVAILABLE = "暂时无法使用麦克风，请检查系统默认输入设备和权限。文字输入和语音回复仍可使用。"
-_SELECTED_MICROPHONE_UNAVAILABLE = "所选麦克风不可用，请重新选择。"
-_SPEAKER_UNAVAILABLE = "暂时无法使用扬声器，请检查系统默认输出设备和权限。文字输入和语音输入仍可使用。"
-_REFRESH_BUSY = "请先结束录音或播报，再刷新设备。"
-class AudioDevices:
-    """Serialize native device lifetime, selection, and snapshot refresh."""
-
-    _lock = threading.RLock()
-    _active: set[object] = set()
-    _needs_initialize = False
-    _generation = 0
-
-    @classmethod
-    def input_error(cls, selected: bool, exc: Exception) -> None:
-        raise SpeechUnavailable(_SELECTED_MICROPHONE_UNAVAILABLE if selected else _MICROPHONE_UNAVAILABLE) from exc
-
-    @classmethod
-    def _enumerate(cls, sd) -> list[InputDevice]:
-        hostapis, entries = sd.query_hostapis(), sd.query_devices()
-        try:
-            default = sd.query_devices(kind="input")["index"]
-        except Exception:
-            default = None
-        return [InputDevice(index, entry["name"], hostapis[entry["hostapi"]]["name"],
-                            index == default, cls._generation)
-                for index, entry in enumerate(entries) if entry["max_input_channels"] > 0]
-
-    @classmethod
-    def _resolve(cls, sd, selected: InputDevice | None, generation: int | None = None) -> InputDevice:
-        if selected is None:
-            current = sd.query_devices(kind="input")
-            hostapi = sd.query_hostapis(current["hostapi"])
-            return InputDevice(current["index"], current["name"], hostapi["name"], True, cls._generation)
-        if generation == cls._generation or selected._generation == cls._generation:
-            entries = sd.query_devices()
-            if 0 <= selected.index < len(entries):
-                entry = entries[selected.index]
-                api = sd.query_hostapis(entry["hostapi"])["name"]
-                if entry["max_input_channels"] > 0 and (entry["name"], api) == (selected.name, selected.hostapi):
-                    return selected
-        matches = [device for device in cls._enumerate(sd)
-                   if (device.name, device.hostapi) == (selected.name, selected.hostapi)]
-        if len(matches) != 1:
-            raise SpeechUnavailable(_SELECTED_MICROPHONE_UNAVAILABLE)
-        return matches[0]
-
-    @classmethod
-    async def inputs(cls, refresh: bool = False) -> list[InputDevice]:
-        def enumerate_devices():
-            import sounddevice as sd
-            with cls._lock:
-                if refresh:
-                    if cls._active:
-                        raise SpeechBusy(_REFRESH_BUSY)
-                    if not cls._needs_initialize:
-                        sd._terminate()
-                        cls._needs_initialize = True
-                    sd._initialize()
-                    cls._needs_initialize = False
-                    cls._generation += 1
-                return cls._enumerate(sd)
-
-        try:
-            return await finish_io(asyncio.to_thread(enumerate_devices))
-        except ImportError as exc:
-            raise SpeechUnavailable("sounddevice is required for microphone capture") from exc
-
-    @classmethod
-    async def check_input(cls, selected: InputDevice | None, sample_rate: int) -> tuple[InputDevice, int]:
-        def probe():
-            import sounddevice as sd
-            with cls._lock:
-                device = cls._resolve(sd, selected)
-                sd.check_input_settings(device=device.index, channels=1, dtype="float32", samplerate=sample_rate)
-                return device, cls._generation
-
-        try:
-            return await finish_io(asyncio.to_thread(probe))
-        except SpeechUnavailable:
-            raise
-        except Exception as exc:
-            cls.input_error(selected is not None, exc)
-
-    @classmethod
-    def reserve(cls, owner) -> None:
-        with cls._lock:
-            cls._active.add(owner)
-
-    @classmethod
-    async def start(cls, owner, factory, *, selected: InputDevice | None = None,
-                    generation: int | None = None, **kwargs) -> InputDevice | None:
-        def open_stream():
-            with cls._lock:
-                device = None
-                if selected is not None:
-                    device = cls._resolve(__import__("sounddevice"), selected, generation)
-                    kwargs["device"] = device.index
-                owner._stream = factory(**kwargs)
-                cls._active.add(owner)
-                owner._stream.start()
-                return device
-
-        return await finish_io(asyncio.to_thread(open_stream))
-
-    @classmethod
-    async def close(cls, owner, method: str) -> None:
-        def close_stream():
-            with cls._lock:
-                stream = owner._stream
-                if stream is None:
-                    cls._active.discard(owner)
-                    return
-                try:
-                    getattr(stream, method)()
-                finally:
-                    stream.close()
-                    owner._stream = None
-                    cls._active.discard(owner)
-
-        await finish_io(asyncio.to_thread(close_stream))
 
 
 class _SilkSink:
@@ -570,3 +452,122 @@ class AudioPlayer:
 
     async def close(self) -> None:
         await self.stop()
+
+
+class AudioCapture:
+    """One microphone session with a two-second callback-to-async queue."""
+
+    def __init__(self, sample_rate: int = 16000, blocksize: int = 1600,
+                 pcm_seconds: float = 2, device: InputDevice | None = None):
+        if sample_rate <= 0 or blocksize <= 0 or not 0 < pcm_seconds <= 2:
+            raise SpeechError("capture requires positive sample_rate, blocksize, and pcm_seconds at most two")
+        self.sample_rate = sample_rate
+        self.blocksize = blocksize
+        self.device = device
+        self.input_device: InputDevice | None = None
+        self._checked_generation: int | None = None
+        self._max_frames = max(1, int(sample_rate * pcm_seconds))
+        self._lock = threading.Lock()
+        self._queue: deque[np.ndarray] = deque()
+        self._queued_frames = 0
+        self._event = asyncio.Event()
+        self._io_lock = asyncio.Lock()
+        self._loop = None
+        self._stream = None
+        self._opening = False
+        self._stopped = True
+        self._error: Exception | None = None
+        self._callback_abort = None
+
+    async def check_available(self) -> None:
+        """Resolve and validate the selected microphone without opening it."""
+        self.input_device = None
+        self.input_device, self._checked_generation = await AudioDevices.check_input(self.device, self.sample_rate)
+
+    def _callback(self, samples, frames, time_info, status):
+        error = SpeechError(f"microphone error: {status}") if status else None
+        block = np.asarray(samples[:, 0], dtype=np.float32).copy()
+        with self._lock:
+            if self._stopped:
+                return
+            if self._queued_frames + frames > self._max_frames:
+                error = SpeechBusy("microphone PCM buffer exceeded its configured limit")
+            if error is None:
+                self._queue.append(block)
+                self._queued_frames += frames
+            else:
+                self._error = error
+                self._stopped = True
+        self._loop.call_soon_threadsafe(self._event.set)
+        if error is not None and self._callback_abort is not None:
+            raise self._callback_abort
+
+    async def start(self) -> None:
+        if self._stream is not None or self._opening:
+            raise SpeechBusy("microphone capture is already active")
+        self._opening = True
+        try:
+            await finish_io(asyncio.to_thread(AudioDevices.reserve, self))
+            async with self._io_lock:
+                if self.input_device is None:
+                    await self.check_available()
+                sd = await finish_io(asyncio.to_thread(__import__, "sounddevice"))
+                self._callback_abort = getattr(sd, "CallbackAbort", None)
+                self._loop = asyncio.get_running_loop()
+                self._event.clear()
+                self._error = None
+                with self._lock:
+                    self._queue.clear()
+                    self._queued_frames = 0
+                    self._stopped = False
+                current = await finish_io(AudioDevices.start(
+                    self, sd.InputStream, selected=self.input_device,
+                    generation=self._checked_generation, samplerate=self.sample_rate,
+                    channels=1, dtype="float32", blocksize=self.blocksize, callback=self._callback,
+                ))
+                self.input_device = current
+        except BaseException as exc:
+            await finish_io(self.close())
+            if isinstance(exc, (asyncio.CancelledError, SpeechUnavailable)):
+                raise
+            AudioDevices.input_error(self.device is not None, exc)
+        finally:
+            self._opening = False
+
+    async def __aiter__(self) -> AsyncIterator[PCMChunk]:
+        while True:
+            with self._lock:
+                if self._queue:
+                    block = self._queue.popleft()
+                    self._queued_frames -= block.size
+                elif self._error is not None:
+                    raise self._error
+                elif self._stopped:
+                    return
+                else:
+                    block = None
+                    self._event.clear()
+            if block is None:
+                await self._event.wait()
+            else:
+                yield PCMChunk(block, self.sample_rate)
+
+    async def _halt(self, *, close: bool) -> None:
+        with self._lock:
+            self._stopped = True
+        self._event.set()
+
+        async def halt_stream() -> None:
+            async with self._io_lock:
+                if close:
+                    await AudioDevices.close(self, "abort")
+                elif self._stream is not None:
+                    await asyncio.to_thread(self._stream.abort)
+
+        await finish_io(halt_stream())
+
+    async def stop(self) -> None:
+        await self._halt(close=False)
+
+    async def close(self) -> None:
+        await self._halt(close=True)

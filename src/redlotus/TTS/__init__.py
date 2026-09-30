@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import atexit
+import asyncio
+from contextlib import aclosing
+from typing import AsyncIterable, AsyncIterator
+from redlotus.runtime.resources import FileFingerprint, finish_io
 import threading
 
 from abc import ABC, abstractmethod
@@ -9,11 +13,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 import math
+import os
 import re
 import importlib
 import importlib.util
 from pathlib import Path
-from typing import Self, TypedDict
+from typing import Literal, Self, TypedDict
 
 import numpy as np
 from numpy.typing import NDArray
@@ -24,6 +29,11 @@ FloatSamples = NDArray[np.float32]
 class ModelKind(StrEnum):
     ASR = "asr"
     TTS = "tts"
+
+
+class TTSBackend(StrEnum):
+    SHERPA = "sherpa-onnx"
+    MAMBO = "mambo-onnx"
 
 
 class ModelStage(StrEnum):
@@ -71,232 +81,6 @@ class NoSpeechDetected(SpeechError):
     """The capture completed without a usable spoken transcript."""
 
 
-class SpeechTextParser:
-    """A bounded Markdown-to-speech cursor; each committed span is emitted once."""
-
-    def __init__(self, limit: int = 4096):
-        from markdown_it import MarkdownIt
-        self._markdown = MarkdownIt("commonmark").enable("strikethrough")
-        self.limit = limit
-        self.clear()
-
-    @property
-    def pending_chars(self) -> int:
-        return len(self._pending)
-
-    def clear(self) -> None:
-        self._pending = ""
-        self._muted = 0
-        self._start = True
-        self._fence = ""
-        self._skip_line = False
-        self._comment = False
-        self._previous = ""
-        self._heading = False
-        self._checkbox = False
-
-    def mute_pending(self) -> None:
-        self._muted = len(self._pending)
-
-    def _take(self, count: int) -> tuple[str, bool]:
-        text = self._pending[:count]
-        audible = self._muted == 0
-        self._pending = self._pending[count:]
-        self._muted = max(0, self._muted - count)
-        return text, audible
-
-    @staticmethod
-    def _closing(text: str, start: int, opening: str, closing: str) -> int:
-        depth, escaped = 0, False
-        for index in range(start, len(text)):
-            char = text[index]
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == opening:
-                depth += 1
-            elif char == closing:
-                depth -= 1
-                if depth == 0:
-                    return index + 1
-        return 0
-
-    def _unit(self, final: bool) -> int:
-        text, size = self._pending, len(self._pending)
-        first = text[0]
-        if first == "\\":
-            return min(2, size) if size > 1 or final else 0
-        if first in "![]" and (first == "[" or text.startswith("![")):
-            end = self._closing(text, int(first == "!"), "[", "]")
-            if not end or end == size and not final:
-                return size if final else 0
-            if end < size and text[end] in "([":
-                closing = ")" if text[end] == "(" else "]"
-                return self._closing(text, end, text[end], closing) or (size if final else 0)
-            return end
-        if first in "!*_~`" and size == 1 and not final:
-            return 0
-        if first in "*_~`":
-            run = len(text) - len(text.lstrip(first))
-            if run == size and not final:
-                return 0
-            if first == "_" and self._previous.isalnum() or first != "`" and (run == size or text[run].isspace()):
-                return run
-            marker = first * run
-            end = re.search(r"(?<![\\" + re.escape(first) + "])" + re.escape(marker) + "(?!" + re.escape(first) + ")", text[run:])
-            count = run + end.end() if end else 0
-            return count if count and (count < size or final) else (size if final else 0)
-        if first == "<":
-            end = text.find(">")
-            return end + 1 if end >= 0 else (size if final else 0)
-        if first == "&":
-            match = re.match(r"&(?:#x?[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);", text)
-            if match:
-                return match.end()
-            return 1 if final or re.search(r"[\s&<>]", text[1:]) else 0
-        url = re.match(r"(?:https?://|www\.)[^\s<>]+", text, re.I)
-        if url:
-            return url.end() if url.end() < size or final else 0
-        special = re.search(r"[!\[<\\*_~`&\n|#]|https?://|www\.", text[1:], re.I)
-        end = special.start() + 1 if special else size
-        tail = re.search(r"[A-Za-z:/\.]+$", text[:end])
-        if not final and end == size and tail and any(prefix.startswith(tail[0].lower()) for prefix in ("https://", "http://", "www.")):
-            end = tail.start()
-        return end
-
-    def _render(self, source: str) -> str:
-        if re.fullmatch(r"<(?:https?://|www\.)[^<>]+>", source, re.I) or re.match(r"</?[a-z][^>]*$", source, re.I):
-            return ""
-        if source.startswith(("[", "![")):
-            start = int(source[0] == "!")
-            end = self._closing(source, start, "[", "]")
-            source = source[start + 1:end - 1 if end else None]
-        tokens = list(self._markdown.parseInline(source)[0].children or [])
-        result = []
-        while tokens:
-            token = tokens.pop(0)
-            if token.type == "image":
-                tokens[0:0] = token.children or []
-            elif token.type in {"text", "code_inline"}:
-                result.append(token.content)
-            elif token.type in {"softbreak", "hardbreak"}:
-                result.append(" ")
-        return "".join(result)
-
-    def _drain(self, final: bool) -> str:
-        output = []
-        while self._pending:
-            text = self._pending
-            newline = text.find("\n")
-            if self._comment:
-                end = text.find("-->")
-                self._take(end + 3 if end >= 0 else max(0, len(text) - 2))
-                self._comment = end < 0
-                if self._comment:
-                    break
-                continue
-            if self._skip_line:
-                self._take(newline + 1 if newline >= 0 else len(text))
-                if newline < 0:
-                    break
-                self._skip_line, self._start = False, True
-                continue
-            if self._fence and self._start:
-                row = text[:newline] if newline >= 0 else text
-                stripped = re.sub(r"^(?: {0,3}> ?)* {0,3}", "", row)
-                if stripped and (stripped[0] != self._fence[0] or re.search(r"[^" + re.escape(self._fence[0]) + r"\s]", stripped)):
-                    self._skip_line = True
-                    continue
-                if newline < 0 and not final:
-                    break
-                if re.fullmatch(re.escape(self._fence[0]) + "{" + str(len(self._fence)) + r",}\s*", stripped):
-                    self._fence = ""
-                self._take(newline + 1 if newline >= 0 else len(text))
-                continue
-            if self._start:
-                row = text[:newline] if newline >= 0 else text
-                if not final and newline < 0 and re.fullmatch(r"[\s>#*+\-~`_\d.)|:]*", row):
-                    break
-                prefix = re.match(r"(?: {0,3}> ?)*", text)[0]
-                plain = text[len(prefix):]
-                if not final and newline < 0 and re.fullmatch(r" {0,3}\[[^\]]*\]?", plain):
-                    break
-                if re.match(r" {0,3}\[[^\]]+\]:", plain):
-                    self._skip_line = True
-                    continue
-                fence = re.match(r" {0,3}(`{3,}|~{3,})", plain)
-                if fence or plain.startswith(("    ", "\t")):
-                    self._fence = fence[1] if fence else ""
-                    self._skip_line = True
-                    continue
-                if row.strip() and re.fullmatch(r"[\s*_:|\-]+", row) and sum(c in "*_-" for c in row) >= 3:
-                    self._skip_line = True
-                    continue
-                marker = re.match(r" {0,3}(?:#{1,6}\s+|[-+*]\s+|\d+[.)]\s+)", plain)
-                self._heading = bool(marker and marker[0].lstrip().startswith("#"))
-                self._checkbox = bool(marker and not self._heading)
-                self._take(len(prefix) + (marker.end() if marker else 0))
-                self._start = False
-                continue
-            if text.startswith("<!--"):
-                self._take(4)
-                self._comment = True
-                continue
-            if text[0] == "\n":
-                _, audible = self._take(1)
-                self._start, self._previous = True, ""
-                if audible:
-                    output.append("\n")
-                continue
-            if text[0] == "|":
-                _, audible = self._take(1)
-                if audible and self._previous:
-                    output.append(", ")
-                continue
-            if self._heading and text[0] == "#" and self._previous.isspace():
-                if newline < 0 and not final:
-                    break
-                if re.fullmatch(r"#+\s*", text[:newline] if newline >= 0 else text):
-                    self._take(newline if newline >= 0 else len(text))
-                    continue
-            count = self._unit(final)
-            if not count:
-                break
-            raw, audible = self._take(count)
-            self._previous = raw[-1]
-            if self._checkbox and raw in {"[ ]", "[x]", "[X]"}:
-                raw = ""
-            self._checkbox = self._checkbox and bool(raw) and raw.isspace()
-            if re.match(r"(?:https?://|www\.)", raw, re.I):
-                raw = ""
-            elif final and raw[:1] in "*_~`[" and self._render(raw) == raw:
-                raw = raw.lstrip("*_~`[").rstrip("]")
-            if audible:
-                output.append(self._render(raw))
-        return "".join(output)
-
-    def feed(self, delta: str, *, audible: bool = True) -> str:
-        output = []
-        produced = 0
-        for offset in range(0, len(delta), 64):
-            self._pending += delta[offset:offset + 64].replace("\r", "")
-            if not audible:
-                self.mute_pending()
-            value = self._drain(False)
-            if audible:
-                output.append(value)
-                produced += len(value)
-            if self.pending_chars + produced > self.limit:
-                self.clear()
-                raise SpeechBusy("语音文本缓冲区已满，文字回复继续")
-        return "".join(output)
-
-    def finish(self) -> str:
-        try:
-            return self._drain(True)
-        finally:
-            self.clear()
 
 
 @dataclass(frozen=True)
@@ -313,6 +97,50 @@ class PCMChunk:
     samples: FloatSamples
     sample_rate: int
     end_of_segment: bool = False
+
+    @classmethod
+    def from_bytes(cls, data: bytes, sample_rate: int) -> Self:
+        """Decode one owned little-endian float32 mono block."""
+        if len(data) % 4:
+            raise SpeechError("音频分块包含不完整的 float32 样本")
+        samples = np.frombuffer(data, dtype="<f4")
+        if not np.isfinite(samples).all():
+            raise SpeechError("音频分块包含非有限样本")
+        return cls(samples, sample_rate)
+
+
+@dataclass(frozen=True)
+class VoiceProfile:
+    model_id: str
+    voice_id: str
+    mode: Literal["speaker", "features"]
+    default_sid: int | None = None
+    latin_sid: int | None = None
+    english_number_words: bool = False
+
+
+@dataclass
+class SpeakerCondition:
+    model_id: str
+    default_sid: int
+    latin_sid: int
+    english_number_words: bool
+    previous_sid: int
+
+
+@dataclass(frozen=True)
+class FeatureCondition:
+    model_id: str
+    voice_id: str
+
+
+VoiceCondition = SpeakerCondition | FeatureCondition
+
+
+@dataclass(frozen=True)
+class SynthesisRequest:
+    text: str
+    voice: VoiceCondition
 
 
 @dataclass(frozen=True)
@@ -349,6 +177,7 @@ class ModelSpec:
     required: tuple[str, ...]
     archive_limit: int
     unpack_limit: int
+    backend: TTSBackend | None = None
 
     @property
     def version(self) -> str:
@@ -361,14 +190,16 @@ class ModelSpec:
     @classmethod
     def from_dict(cls, kind: ModelKind, row: Mapping[str, object]) -> Self:
         names = ("archive", "url", "sha256", "root")
-        if not all(isinstance(row.get(name), str) and row[name] for name in names):
-            raise ValueError("invalid model catalog strings")
-        required = row.get("required")
-        if not isinstance(required, list) or not required or not all(isinstance(name, str) for name in required):
-            raise ValueError("invalid required model resources")
-        if any(type(row.get(name)) is not int or row[name] <= 0 for name in ("archive_limit", "unpack_limit")):
-            raise ValueError("invalid model resource limits")
-        return cls(ModelKind(kind), *(row[name] for name in names), tuple(required), row["archive_limit"], row["unpack_limit"])
+        if (not all(isinstance(row.get(name), str) and row[name] for name in names)
+                or not isinstance(row.get("required"), list) or not row["required"]
+                or not all(isinstance(name, str) for name in row["required"])
+                or any(type(row.get(name)) is not int or row[name] <= 0 for name in ("archive_limit", "unpack_limit"))):
+            raise ValueError("invalid model catalog entry")
+        try:
+            backend = TTSBackend(row["runtime"]["runtime"]) if kind == ModelKind.TTS else None
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid TTS catalog runtime") from exc
+        return cls(ModelKind(kind), *(row[name] for name in names), tuple(row["required"]), row["archive_limit"], row["unpack_limit"], backend)
 
 
     def resources_present(self, files: Mapping[str, FileFingerprint]) -> bool:
@@ -376,14 +207,8 @@ class ModelSpec:
                    if name.endswith("/") else name in files and files[name].size > 0 for name in self.required)
 
 
-@dataclass(frozen=True)
-class FileFingerprint:
-    size: int
-    sha256: str
 
-    def __post_init__(self):
-        if type(self.size) is not int or self.size < 0 or not isinstance(self.sha256, str):
-            raise ValueError("invalid model file fingerprint")
+
 
 
 @dataclass(frozen=True)
@@ -506,8 +331,12 @@ class TTSModel(SpeechModel):
         """Return the synthesis model output rate."""
 
     @abstractmethod
-    def generate(self, text: str, speaker: int, callback: Callable[[FloatSamples, float], int] | None = None) -> PCMChunk:
-        """Generate one bounded segment, optionally publishing native chunks."""
+    def prepare_voice(self, profile: VoiceProfile) -> VoiceCondition:
+        """Prepare a voice for one synthesis response on the model worker."""
+
+    @abstractmethod
+    def generate(self, request: SynthesisRequest, callback: Callable[[FloatSamples, float], int] | None = None) -> PCMChunk | None:
+        """Return segment PCM, or None after delivering PCM through the callback."""
 
 
 @dataclass(frozen=True)
@@ -515,8 +344,10 @@ class SpeechSettings:
     """Published speech defaults, overridden through existing config sources."""
 
     model_dir: Path | None = None
+    tts_package: Path | None = None
+    tts_backend: TTSBackend = TTSBackend.MAMBO
     asr_threads: int = 2
-    tts_threads: int = 4
+    tts_threads: int = 8
     queue_size: int = 8
     pcm_seconds: float = 2
     flush_ms: int = 600
@@ -526,20 +357,23 @@ class SpeechSettings:
 
     def __post_init__(self):
         from redlotus.runtime.config import user_config_dir
-        root = self.model_dir if self.model_dir is not None else user_config_dir() / "model"
-        object.__setattr__(self, "model_dir", Path(root).expanduser().resolve())
+        object.__setattr__(self, "model_dir", Path(self.model_dir if self.model_dir is not None else
+                                                    user_config_dir() / "model").expanduser().resolve())
+        if self.tts_package is not None:
+            if not isinstance(self.tts_package, (str, Path)) or not str(self.tts_package).strip():
+                raise ValueError("speech.tts_package 必须是模型包目录")
+            object.__setattr__(self, "tts_package", Path(self.tts_package).expanduser().absolute())
+        object.__setattr__(self, "tts_backend", TTSBackend(self.tts_backend))
         for item in fields(self):
-            if item.name != "model_dir":
+            if item.name not in {"model_dir", "tts_package", "tts_backend"}:
                 value = getattr(self, item.name)
                 kind = (float, int) if item.name in {"pcm_seconds", "clip_seconds"} else int
                 if isinstance(value, bool) or not isinstance(value, kind) or not math.isfinite(value) or value <= 0:
                     raise ValueError(f"speech.{item.name} 必须为有限正数")
-        if self.pcm_seconds > 2 or self.clip_seconds > 55:
-            raise ValueError("speech.pcm_seconds 不得超过 2，speech.clip_seconds 不得超过 55")
-        if self.queue_size > 8 or self.segment_chars > 120:
-            raise ValueError("speech.queue_size 不得超过 8，speech.segment_chars 不得超过 120")
-        if self.text_chars > 4096:
-            raise ValueError("speech.text_chars 不得超过 4096")
+        for name, limit in (("pcm_seconds", 2), ("clip_seconds", 55), ("queue_size", 8),
+                            ("segment_chars", 120), ("text_chars", 4096)):
+            if getattr(self, name) > limit:
+                raise ValueError(f"speech.{name} 不得超过 {limit}")
 
     @classmethod
     def read(cls, values=None):
@@ -548,7 +382,8 @@ class SpeechSettings:
         defaults = cls()
         selected = {}
         for item in fields(cls):
-            kind = str if item.name == "model_dir" else (int, float) if item.name in {"pcm_seconds", "clip_seconds"} else int
+            kind = ((str, type(None)) if item.name == "tts_package" else str if item.name in {"model_dir", "tts_backend"}
+                    else (int, float) if item.name in {"pcm_seconds", "clip_seconds"} else int)
             default = str(defaults.model_dir) if item.name == "model_dir" else getattr(defaults, item.name)
             selected[item.name] = config_value(values, ("speech", item.name), default, kind=kind)
         return cls(**selected)
@@ -556,8 +391,12 @@ class SpeechSettings:
 
 class ModelFactory:
     @classmethod
-    def available(cls) -> bool:
-        return importlib.util.find_spec("sherpa_onnx") is not None
+    def available(cls, backend: TTSBackend | None = None) -> bool:
+        runtime = importlib.util.find_spec("sherpa_onnx")
+        return runtime is not None and (backend != TTSBackend.MAMBO or bool(
+            os.name == "nt" and runtime.origin
+            and (Path(__file__).with_name("native") / "redlotus_mambo.exe").is_file()
+            and (Path(runtime.origin).parent / "lib" / "onnxruntime.dll").is_file()))
 
     @classmethod
     def require_runtime(cls) -> None:
@@ -567,18 +406,15 @@ class ModelFactory:
             raise SpeechUnavailable(f"本地语音运行库不可用；安装 RedLotus[speech]: {exc}") from exc
 
     @classmethod
-    def implementation(cls, kind: ModelKind) -> type[SpeechModel]:
-        if kind == ModelKind.ASR:
-            from .asr import XASRModel
-            return XASRModel
-        if kind == ModelKind.TTS:
-            from .tts import KokoroModel
-            return KokoroModel
-        raise ValueError("unknown speech model kind")
+    def implementation(cls, kind: ModelKind, backend: TTSBackend = TTSBackend.SHERPA) -> type[SpeechModel]:
+        from .inference import XASRModel, KokoroModel, MamboTTSModel
+        return (XASRModel if ModelKind(kind) == ModelKind.ASR else
+                {TTSBackend.SHERPA: KokoroModel, TTSBackend.MAMBO: MamboTTSModel}[TTSBackend(backend)])
 
     @classmethod
     def create(cls, kind: ModelKind, root: Path, threads: int) -> SpeechModel:
-        return cls.implementation(kind).load(root, threads)
+        backend = TTSBundle.read(root).backend if ModelKind(kind) == ModelKind.TTS else TTSBackend.SHERPA
+        return cls.implementation(kind, backend).load(root, threads)
 
 
 class ModelLease:
@@ -612,8 +448,227 @@ class ModelLease:
         for lease in retained:
             lease.close()
 
+_INPUT_RATE = 16000
+_SELECTED_MICROPHONE_UNAVAILABLE = "所选麦克风不可用，请重新选择。"
+_SPEAKER_UNAVAILABLE = "暂时无法使用扬声器，请检查系统默认输出设备和权限。文字输入和语音输入仍可使用。"
 
+class AudioDevices:
+    """Serialize native device lifetime, selection, and snapshot refresh."""
+
+    _lock = threading.RLock()
+    _active: set[object] = set()
+    _needs_initialize = False
+    _generation = 0
+
+    @classmethod
+    def input_error(cls, selected: bool, exc: Exception) -> None:
+        raise SpeechUnavailable(_SELECTED_MICROPHONE_UNAVAILABLE if selected else
+                                "暂时无法使用麦克风，请检查系统默认输入设备和权限。文字输入和语音回复仍可使用。") from exc
+
+    @classmethod
+    def _enumerate(cls, sd) -> list[InputDevice]:
+        hostapis, entries = sd.query_hostapis(), sd.query_devices()
+        try:
+            default = sd.query_devices(kind="input")["index"]
+        except Exception:
+            default = None
+        return [InputDevice(index, entry["name"], hostapis[entry["hostapi"]]["name"],
+                            index == default, cls._generation)
+                for index, entry in enumerate(entries) if entry["max_input_channels"] > 0]
+
+    @classmethod
+    def _resolve(cls, sd, selected: InputDevice | None, generation: int | None = None) -> InputDevice:
+        if selected is None:
+            current = sd.query_devices(kind="input")
+            hostapi = sd.query_hostapis(current["hostapi"])
+            return InputDevice(current["index"], current["name"], hostapi["name"], True, cls._generation)
+        if generation == cls._generation or selected._generation == cls._generation:
+            entries = sd.query_devices()
+            if 0 <= selected.index < len(entries):
+                entry = entries[selected.index]
+                api = sd.query_hostapis(entry["hostapi"])["name"]
+                if entry["max_input_channels"] > 0 and (entry["name"], api) == (selected.name, selected.hostapi):
+                    return selected
+        matches = [device for device in cls._enumerate(sd)
+                   if (device.name, device.hostapi) == (selected.name, selected.hostapi)]
+        if len(matches) != 1:
+            raise SpeechUnavailable(_SELECTED_MICROPHONE_UNAVAILABLE)
+        return matches[0]
+
+    @classmethod
+    async def inputs(cls, refresh: bool = False) -> list[InputDevice]:
+        def enumerate_devices():
+            import sounddevice as sd
+            with cls._lock:
+                if refresh:
+                    if cls._active:
+                        raise SpeechBusy("请先结束录音或播报，再刷新设备。")
+                    if not cls._needs_initialize:
+                        sd._terminate()
+                        cls._needs_initialize = True
+                    sd._initialize()
+                    cls._needs_initialize = False
+                    cls._generation += 1
+                return cls._enumerate(sd)
+
+        try:
+            return await finish_io(asyncio.to_thread(enumerate_devices))
+        except ImportError as exc:
+            raise SpeechUnavailable("sounddevice is required for microphone capture") from exc
+
+    @classmethod
+    async def check_input(cls, selected: InputDevice | None, sample_rate: int) -> tuple[InputDevice, int]:
+        def probe():
+            import sounddevice as sd
+            with cls._lock:
+                device = cls._resolve(sd, selected)
+                sd.check_input_settings(device=device.index, channels=1, dtype="float32", samplerate=sample_rate)
+                return device, cls._generation
+
+        try:
+            return await finish_io(asyncio.to_thread(probe))
+        except SpeechUnavailable:
+            raise
+        except Exception as exc:
+            cls.input_error(selected is not None, exc)
+
+    @classmethod
+    def reserve(cls, owner) -> None:
+        with cls._lock:
+            cls._active.add(owner)
+
+    @classmethod
+    async def start(cls, owner, factory, *, selected: InputDevice | None = None,
+                    generation: int | None = None, **kwargs) -> InputDevice | None:
+        def open_stream():
+            with cls._lock:
+                device = None
+                if selected is not None:
+                    device = cls._resolve(__import__("sounddevice"), selected, generation)
+                    kwargs["device"] = device.index
+                owner._stream = factory(**kwargs)
+                cls._active.add(owner)
+                owner._stream.start()
+                return device
+
+        return await finish_io(asyncio.to_thread(open_stream))
+
+    @classmethod
+    async def close(cls, owner, method: str) -> None:
+        def close_stream():
+            with cls._lock:
+                stream = owner._stream
+                if stream is None:
+                    cls._active.discard(owner)
+                    return
+                try:
+                    getattr(stream, method)()
+                finally:
+                    stream.close()
+                    owner._stream = None
+                    cls._active.discard(owner)
+
+        await finish_io(asyncio.to_thread(close_stream))
+
+class _SpeechStream:
+    """Bind a public streaming operation to an injected or process-shared service."""
+
+    def __init__(self, service=None):
+        if service is None:
+            from .service import SpeechService
+            service = SpeechService.shared()
+        self._service = service
+
+
+class StreamingRecognizer(_SpeechStream):
+    @staticmethod
+    def _check_chunk(chunk: PCMChunk) -> FloatSamples:
+        samples = chunk.samples
+        if (chunk.sample_rate != _INPUT_RATE or not isinstance(samples, np.ndarray)
+                or samples.ndim != 1 or samples.dtype != np.float32 or not np.all(np.isfinite(samples))):
+            raise ValueError("ASR 仅接收 16 kHz 单声道 float32 PCM")
+        return np.ascontiguousarray(samples)
+
+    async def recognize(self, pcm: AsyncIterable[PCMChunk]) -> AsyncIterator[Transcript]:
+        """Yield full replacement previews and exactly one final transcript at EOF."""
+        service = self._service
+        async with service.acquire(ModelKind.ASR) as model:
+            model_id = service.engines[ModelKind.ASR].version
+            session = await service.run(ModelKind.ASR, model.create_session)
+            try:
+                async for chunk in pcm:
+                    samples = self._check_chunk(chunk)
+                    max_samples = max(1, int(service.config.pcm_seconds * _INPUT_RATE))
+                    for start in range(0, len(samples), max_samples):
+                        preview = await service.run(ModelKind.ASR, session.accept, samples[start:start + max_samples])
+                        if preview is not None:
+                            yield Transcript(preview, False, model_id)
+                final = await service.run(ModelKind.ASR, session.finish)
+            finally:
+                await service.run(ModelKind.ASR, session.close)
+        yield Transcript(final, True, model_id)
+
+    async def record(self, capture, on_result, *, on_started=None) -> Transcript:
+        """Stream microphone PCM to recognition and collect recording statistics."""
+        capture.recording_stats = {"frames": 0, "seconds": 0.0, "peak": 0.0, "rms": 0.0}
+        energy = 0.0
+
+        async def chunks():
+            nonlocal energy
+            await capture.start()
+            device = getattr(capture, "input_device", None)
+            capture.recording_stats["device"] = (
+                f"{device.name} · {device.hostapi} [{device.index}]" if device else None
+            )
+            if on_started:
+                on_started()
+            async for chunk in capture:
+                samples = self._check_chunk(chunk)
+                stats = capture.recording_stats
+                stats["frames"] += len(samples)
+                energy += float(np.dot(samples.astype(np.float64), samples))
+                stats["seconds"] = round(stats["frames"] / _INPUT_RATE, 3)
+                stats["peak"] = max(stats["peak"], float(np.max(np.abs(samples), initial=0)))
+                stats["rms"] = round((energy / max(stats["frames"], 1)) ** .5, 6)
+                yield chunk
+
+        final = None
+        try:
+            await capture.check_available()
+            async with aclosing(chunks()) as pcm, aclosing(self.recognize(pcm)) as results:
+                async for result in results:
+                    on_result(result)
+                    if result.is_final:
+                        final = result
+            if final is None or not final.text.strip():
+                raise NoSpeechDetected("未识别到语音，请重试。")
+            return final
+        finally:
+            await capture.close()
+
+class StreamingSynthesizer(_SpeechStream):
+    async def synthesize(self, text: str | AsyncIterable[str]) -> AsyncIterator[PCMChunk]:
+        """Synthesize each new segment once and emit bounded PCM windows."""
+        async with aclosing(self._synthesize(text)) as stream:
+            async for chunk in stream:
+                yield chunk
+
+    async def _synthesize(self, text, on_consumed=None):
+        from .inference import _SegmentStream
+        from .tts import TextSegmenter
+        config = self._service.config
+        segments = TextSegmenter(config.flush_ms, config.segment_chars).segments(text, on_consumed)
+        try:
+            async with aclosing(_SegmentStream(self._service).stream(segments)) as stream:
+                async for chunk in stream:
+                    yield chunk
+        finally:
+            await segments.aclose()
+
+from .inference import TTSBundle
+from .tts import SpeechTextParser
 
 __all__ = ["InputDevice", "PCMChunk", "Transcript", "AudioSegment", "SpeechSettings", "SpeechError", "SpeechUnavailable",
            "SpeechBusy", "NoSpeechDetected", "ModelFactory", "ModelKind", "ModelStage", "AudioFormat", "ModelSpec", "InstalledModel",
-           "InstalledState", "PreparationStatus", "SpeechModel", "ASRModel", "TTSModel", "RecognitionSession", "SpeechTextParser"]
+           "InstalledState", "PreparationStatus", "SpeechModel", "ASRModel", "TTSModel", "RecognitionSession", "SpeechTextParser",
+           "AudioDevices", "StreamingRecognizer", "StreamingSynthesizer", "TTSBundle", "TTSBackend", "VoiceProfile", "VoiceCondition", "SpeakerCondition", "FeatureCondition", "SynthesisRequest"]

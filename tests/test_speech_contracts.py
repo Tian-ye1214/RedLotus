@@ -92,7 +92,7 @@ def test_speech_defaults_are_public_and_do_not_write_configuration(tmp_path, mon
     values = {}
     options = speech.SpeechSettings.read(values)
     assert options.model_dir == (tmp_path / "global" / "model").resolve()
-    assert (options.asr_threads, options.tts_threads, options.queue_size) == (2, 4, 8)
+    assert (options.asr_threads, options.tts_threads, options.queue_size) == (2, 8, 8)
     assert (options.pcm_seconds, options.flush_ms, options.segment_chars, options.clip_seconds) == (2, 600, 120, 55)
     assert values == {}
     assert not options.model_dir.exists()

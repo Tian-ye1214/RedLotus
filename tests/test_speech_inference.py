@@ -2,28 +2,34 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import gc
+import hashlib
+import json
 from pathlib import Path
 import shutil
 import sys
 import threading
 import time
 from types import SimpleNamespace
+import wave
 
 import numpy as np
 import pytest
 
-from redlotus.TTS import PCMChunk
-from redlotus.TTS import asr, tts
-from redlotus.TTS.asr import StreamingRecognizer, XASRModel
-from redlotus.TTS.tts import KokoroModel, SpeechReply, StreamingSynthesizer
+from redlotus.TTS import (PCMChunk, StreamingRecognizer, StreamingSynthesizer,
+                          SynthesisRequest, VoiceProfile, inference, tts)
+from redlotus.TTS.inference import KokoroModel
+from redlotus.TTS.tts import SpeechReply
 from redlotus.core.gateway import GoalTextFilter, coordinator_stream_handler
 from redlotus.core.tasks import GOAL_MARKER_RE
 
 
 class FakeService:
     def __init__(self, *, asr=None, tts=None, flush_ms=600, segment_chars=120, pcm_seconds=2):
-        self.models = {"asr": XASRModel(asr) if asr is not None else None,
-                       "tts": KokoroModel(tts) if tts is not None else None}
+        self.models = {"asr": inference.XASRModel(asr) if asr is not None else None,
+                       "tts": KokoroModel(tts, SimpleNamespace(
+                           profile=VoiceProfile("fake", "bilingual", "speaker", 3, 0, True),
+                           base_model_id="fake", num_steps=0, root=None,
+                       )) if tts is not None else None}
         self.engines = {"asr": SimpleNamespace(version="test-asr"), "tts": SimpleNamespace(version="test-tts")}
         self.config = SimpleNamespace(
             flush_ms=flush_ms, segment_chars=segment_chars, pcm_seconds=pcm_seconds,
@@ -127,7 +133,7 @@ async def test_record_returns_final_transcript_without_writing_audio(tmp_path, m
 
     capture = Capture()
     observed = []
-    recognizer = asr.StreamingRecognizer(FakeService(asr=FakeRecognizer()))
+    recognizer = StreamingRecognizer(FakeService(asr=FakeRecognizer()))
     final = await recognizer.record(capture, observed.append)
     assert final.is_final and final.text == "你好"
     assert capture.closed
@@ -136,7 +142,7 @@ async def test_record_returns_final_transcript_without_writing_audio(tmp_path, m
 
 
 def test_asr_model_exposes_typed_recognition_session():
-    model = asr.XASRModel(FakeRecognizer())
+    model = inference.XASRModel(FakeRecognizer())
     session = model.create_session()
     assert session.accept(np.full(160, .1, dtype=np.float32)) == "你"
     assert session.finish() == "你"
@@ -204,12 +210,19 @@ class FakeTts:
         self.calls = []
         self.samples = samples
 
-    def generate(self, text, *, sid, speed, callback=None):
-        self.calls.append((text, sid, speed))
+    def generate(self, text, config, callback=None):
+        self.calls.append((text, config.sid, config.speed))
         samples = np.ones(self.samples, dtype=np.float32)
         if callback is not None:
             callback(samples, 1.0)
         return SimpleNamespace(samples=samples, sample_rate=24000)
+
+
+def test_kokoro_rejects_retired_reference_condition():
+    bundle = SimpleNamespace(base_model_id="demo", profile=VoiceProfile("demo", "voice", "speaker"))
+    model = KokoroModel(FakeTts(), bundle)
+    with pytest.raises(tts.SpeechUnavailable, match="不兼容"):
+        model.prepare_voice(VoiceProfile("demo", "voice", "reference"))
 
 
 @pytest.mark.asyncio
@@ -314,7 +327,7 @@ def test_asr_loader_uses_zipformer2_int8_and_prewarms(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "sherpa_onnx", SimpleNamespace(
         OnlineRecognizer=SimpleNamespace(from_transducer=factory)
     ))
-    model = asr.XASRModel.load(tmp_path, 2)
+    model = inference.XASRModel.load(tmp_path, 2)
     model.warmup()
     assert captured["model_type"] == "zipformer2"
     assert captured["enable_endpoint_detection"] is True
@@ -325,14 +338,35 @@ def test_asr_loader_uses_zipformer2_int8_and_prewarms(tmp_path, monkeypatch):
 
 
 def _fake_tts_loader(tmp_path, monkeypatch, *, keep_fp32=True, fail_first=False):
-    monkeypatch.setattr(tts.KokoroModel, "_phonemizer_source", None)
-    monkeypatch.setattr(tts.KokoroModel, "_ascii_absolute", staticmethod(lambda path: str(path.resolve())))
+    monkeypatch.setattr(inference.KokoroModel, "_phonemizer_source", None)
+    monkeypatch.setattr(inference.KokoroModel, "_ascii_absolute", staticmethod(lambda path: str(path.resolve())))
     files = ("model.int8.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt",
              "lexicon-zh.txt", "phone-zh.fst", "date-zh.fst", "number-zh.fst")
-    for name in (*files, *(("model.onnx",) if keep_fp32 else ())):
-        (tmp_path / name).write_bytes(b"test")
-    (tmp_path / "espeak-ng-data").mkdir()
+    selected_model = "model.onnx" if keep_fp32 else "model.int8.onnx"
+    for name in (*files, selected_model, "espeak-ng-data/phondata"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"test")
+    manifest = {
+        "schema": 1, "kind": "tts", "runtime": "sherpa-onnx", "native_family": "kokoro",
+        "base_model_id": "fixture", "sample_rate": 24000,
+        "native_model_files": {
+            "model": selected_model, "voices": "voices.bin", "tokens": "tokens.txt",
+            "lexicon": ["lexicon-us-en.txt", "lexicon-zh.txt"], "data_dir": "espeak-ng-data",
+        },
+        "rule_fsts": ["phone-zh.fst", "date-zh.fst", "number-zh.fst"],
+        "generation": {"mode": "speaker"},
+        "voice": {"id": "bilingual", "default_sid": 3, "latin_sid": 0, "english_number_words": True},
+        "resources": {path.relative_to(tmp_path).as_posix(): {
+            "size": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            for path in tmp_path.rglob("*") if path.is_file()},
+    }
+    (tmp_path / "model.json").write_text(json.dumps(manifest), encoding="utf-8")
     captured = {"attempts": []}
+
+    class ModelConfig:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
 
     class Config:
         def __init__(self, **kwargs):
@@ -340,6 +374,11 @@ def _fake_tts_loader(tmp_path, monkeypatch, *, keep_fp32=True, fail_first=False)
 
         def validate(self):
             return True
+
+    class GenerationConfig:
+        def __init__(self):
+            self.sid = 0
+            self.speed = 1.0
 
     class Native:
         sample_rate = 24000
@@ -350,13 +389,14 @@ def _fake_tts_loader(tmp_path, monkeypatch, *, keep_fp32=True, fail_first=False)
             if fail_first and len(captured["attempts"]) == 1:
                 raise RuntimeError("native setup failed after phonemizer init")
 
-        def generate(self, text, *, sid, speed, callback=None):
-            captured.setdefault("warm", []).append((text, sid, speed))
+        def generate(self, text, config, callback=None):
+            captured.setdefault("warm", []).append((text, config.sid, config.speed))
             return SimpleNamespace(samples=np.ones(1, dtype=np.float32), sample_rate=24000)
 
     monkeypatch.setitem(sys.modules, "sherpa_onnx", SimpleNamespace(
-        OfflineTtsKokoroModelConfig=Config, OfflineTtsModelConfig=Config,
-        OfflineTtsConfig=Config, OfflineTts=Native,
+        OfflineTtsModelConfig=ModelConfig, OfflineTtsConfig=Config,
+        OfflineTtsKokoroModelConfig=lambda **values: SimpleNamespace(**values),
+        OfflineTts=Native, GenerationConfig=GenerationConfig,
     ))
     return captured
 
@@ -364,38 +404,55 @@ def _fake_tts_loader(tmp_path, monkeypatch, *, keep_fp32=True, fail_first=False)
 @pytest.mark.parametrize("keep_fp32", [False, True])
 def test_tts_loader_uses_bilingual_assets_and_chinese_speaker(tmp_path, monkeypatch, keep_fp32):
     captured = _fake_tts_loader(tmp_path, monkeypatch, keep_fp32=keep_fp32)
-    model = tts.KokoroModel.load(tmp_path, 2)
+    model = inference.KokoroModel.load(tmp_path, 2)
     model.warmup()
     options = captured["config"].options
-    assert options["model"].options["num_threads"] == 2
-    kokoro_options = options["model"].options["kokoro"].options
+    assert options["model"].num_threads == 2
+    native_section = options["model"].kokoro
     expected_model = "model.onnx" if keep_fp32 else "model.int8.onnx"
-    assert kokoro_options["model"].endswith(expected_model)
-    assert Path(kokoro_options["data_dir"]).is_absolute()
-    assert Path(kokoro_options["data_dir"]).is_dir()
+    assert native_section.model.endswith(expected_model)
+    assert Path(native_section.data_dir).is_absolute()
+    assert Path(native_section.data_dir).is_dir()
     assert all(Path(name).is_absolute() for name in options["rule_fsts"].split(","))
-    assert "lexicon-us-en.txt" in options["model"].options["kokoro"].options["lexicon"]
-    assert "lexicon-zh.txt" in options["model"].options["kokoro"].options["lexicon"]
+    assert "lexicon-us-en.txt" in native_section.lexicon
+    assert "lexicon-zh.txt" in native_section.lexicon
     assert "number-zh.fst" in options["rule_fsts"]
     assert captured["warm"] == [("你好。", 3, 1.0), ("Hello, version three point one four is ready.", 0, 1.0)]
-    data_path = Path(kokoro_options["data_dir"])
+    data_path = Path(native_section.data_dir)
     del model
     gc.collect()
     assert data_path.resolve() == (tmp_path / "espeak-ng-data").resolve()
-    assert tts.KokoroModel._phonemizer_source[1] == tmp_path.resolve()
+    assert inference.KokoroModel._phonemizer_source[1] == tmp_path.resolve()
     (tmp_path / "lexicon-zh.txt").write_bytes(b"changed")
     with pytest.raises(tts.SpeechUnavailable, match="重启"):
-        tts.KokoroModel.load(tmp_path, 2)
+        inference.KokoroModel.load(tmp_path, 2)
 
 
 def test_tts_loader_pins_espeak_after_native_constructor_failure(tmp_path, monkeypatch):
     captured = _fake_tts_loader(tmp_path, monkeypatch, fail_first=True)
     with pytest.raises(RuntimeError, match="native setup failed"):
-        tts.KokoroModel.load(tmp_path, 2)
-    assert tts.KokoroModel._phonemizer_source[1] == tmp_path.resolve()
-    tts.KokoroModel.load(tmp_path, 2)
+        inference.KokoroModel.load(tmp_path, 2)
+    assert inference.KokoroModel._phonemizer_source[1] == tmp_path.resolve()
+    inference.KokoroModel.load(tmp_path, 2)
     assert len(captured["attempts"]) == 2
     assert (tmp_path / "espeak-ng-data").is_dir()
+
+
+def test_tts_loader_anchors_ascii_relative_native_paths(tmp_path, monkeypatch):
+    captured = _fake_tts_loader(tmp_path, monkeypatch)
+    monkeypatch.setattr(inference.KokoroModel, "_ascii_absolute", staticmethod(lambda path: None))
+    monkeypatch.chdir(tmp_path.parent)
+    anchor = Path.cwd().resolve()
+    model = inference.KokoroModel.load(tmp_path, 2)
+    section = captured["config"].options["model"].kokoro
+    assert not Path(section.data_dir).is_absolute()
+    assert section.data_dir.isascii()
+    assert (anchor / section.data_dir).resolve() == (tmp_path / "espeak-ng-data").resolve()
+    assert all(not Path(name).is_absolute() for name in captured["config"].options["rule_fsts"].split(","))
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(tts.SpeechUnavailable, match="工作目录"):
+        model.generate(SynthesisRequest("你好。", model.prepare_voice(model.profile)))
 
 
 def test_tts_loader_serializes_first_dictionary_selection(tmp_path, monkeypatch):
@@ -409,7 +466,7 @@ def test_tts_loader_serializes_first_dictionary_selection(tmp_path, monkeypatch)
 
     class WaitingConfig(config_class):
         def validate(self):
-            data_dir = self.options["model"].options["kokoro"].options["data_dir"]
+            data_dir = self.options["model"].kokoro.data_dir
             if first_root.name in data_dir:
                 entered.set()
                 assert release.wait(2)
@@ -417,12 +474,12 @@ def test_tts_loader_serializes_first_dictionary_selection(tmp_path, monkeypatch)
 
     monkeypatch.setattr(native_module, "OfflineTtsConfig", WaitingConfig)
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(tts.KokoroModel.load, first_root, 2)
+        first = executor.submit(inference.KokoroModel.load, first_root, 2)
         assert entered.wait(2)
-        second = executor.submit(tts.KokoroModel.load, second_root, 2)
+        second = executor.submit(inference.KokoroModel.load, second_root, 2)
         time.sleep(.05)
         release.set()
-        assert isinstance(first.result(timeout=2), tts.KokoroModel)
+        assert isinstance(first.result(timeout=2), inference.KokoroModel)
         with pytest.raises(tts.SpeechUnavailable, match="重启"):
             second.result(timeout=2)
 
@@ -467,8 +524,7 @@ def test_goal_filter_bounds_unclosed_marker_buffer():
     for offset in range(0, len(body), 37):
         output.append(filtered.feed(body[offset:offset + 37]))
         assert len(filtered.pending) <= 512
-    output.append(filtered.feed("", final=True))
-    assert "".join(output) == "beforeafter"
+    assert "".join(output) + filtered.feed("", final=True) == "beforeafter"
 
 
 def _speech_stream_delta(text, kind="text"):

@@ -11,8 +11,9 @@ import pytest
 
 from redlotus.TTS import PCMChunk, SpeechBusy, SpeechUnavailable
 from redlotus.TTS import audio
-from redlotus.TTS.asr import AudioCapture
-from redlotus.TTS.audio import AudioDevices, AudioPlayer
+from redlotus.TTS.audio import AudioCapture
+from redlotus.TTS import AudioDevices
+from redlotus.TTS.audio import AudioPlayer
 
 
 @pytest.fixture

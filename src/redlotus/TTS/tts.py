@@ -1,160 +1,257 @@
-"""Incremental sentence buffering and bounded Kokoro synthesis."""
+"""Incremental Markdown parsing, sentence boundaries, and response speech control."""
 from __future__ import annotations
 
 import asyncio
+import inspect
+import re
 from collections import deque
 from contextlib import aclosing
-import inspect
-import hashlib
-import os
-import queue
-import re
-from pathlib import Path
-import threading
 from typing import AsyncIterable, Awaitable, Callable
 
-import numpy as np
+from . import PCMChunk, SpeakerCondition, SpeechBusy, SpeechError, SpeechUnavailable, StreamingSynthesizer
+from redlotus.runtime.resources import finish_io
 
-from . import FloatSamples, ModelKind, PCMChunk, SpeechBusy, SpeechError, SpeechUnavailable, TTSModel
-from ..runtime.resources import finish_io
-
-
-_SAMPLE_RATE = 24000
-_CHINESE_SPEAKER = 3  # zf_001 in the official Kokoro v1.1 speaker list.
-_ENGLISH_SPEAKER = 0  # af_maple; shares the same Kokoro model and voices.bin.
 _REPLIES: set[asyncio.Task] = set()
 
+class SpeechTextParser:
+    """A bounded Markdown-to-speech cursor; each committed span is emitted once."""
 
-class KokoroModel(TTSModel):
-    """The installed bilingual Kokoro 82M v1.1 model."""
-
-    _phonemizer_source: tuple[str, Path] | None = None
-    _phonemizer_lock = threading.Lock()
-
-    def __init__(self, native):
-        self._native = native
-
-    @classmethod
-    def retained_root(cls) -> Path | None:
-        return cls._phonemizer_source[1] if cls._phonemizer_source is not None else None
+    def __init__(self, limit: int = 4096):
+        from markdown_it import MarkdownIt
+        self._markdown = MarkdownIt("commonmark").enable("strikethrough")
+        self.limit = limit
+        self.clear()
 
     @property
-    def sample_rate(self) -> int:
-        return self._native.sample_rate
+    def pending_chars(self) -> int:
+        return len(self._pending)
+
+    def clear(self) -> None:
+        self._pending = ""
+        self._muted = 0
+        self._start = True
+        self._fence = ""
+        self._skip_line = False
+        self._comment = False
+        self._previous = ""
+        self._heading = False
+        self._checkbox = False
+
+    def mute_pending(self) -> None:
+        self._muted = len(self._pending)
+
+    def _take(self, count: int) -> tuple[str, bool]:
+        text = self._pending[:count]
+        audible = self._muted == 0
+        self._pending = self._pending[count:]
+        self._muted = max(0, self._muted - count)
+        return text, audible
 
     @staticmethod
-    def _ascii_absolute(path: Path) -> str | None:
-        spelling = str(path.resolve())
-        if spelling.isascii():
-            return spelling
-        if os.name != "nt":
-            return None
-        import ctypes
+    def _closing(text: str, start: int, opening: str, closing: str) -> int:
+        depth, escaped = 0, False
+        for index in range(start, len(text)):
+            char = text[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == opening:
+                depth += 1
+            elif char == closing:
+                depth -= 1
+                if depth == 0:
+                    return index + 1
+        return 0
 
-        get_short = ctypes.windll.kernel32.GetShortPathNameW
-        get_short.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint)
-        get_short.restype = ctypes.c_uint
-        size = get_short(spelling, None, 0)
-        if size:
-            buffer = ctypes.create_unicode_buffer(size)
-            used = get_short(spelling, buffer, size)
-            if 0 < used < size and buffer.value.isascii():
-                return buffer.value
-        return None
+    def _unit(self, final: bool) -> int:
+        text, size = self._pending, len(self._pending)
+        first = text[0]
+        if first == "\\":
+            return min(2, size) if size > 1 or final else 0
+        if first in "![]" and (first == "[" or text.startswith("![")):
+            end = self._closing(text, int(first == "!"), "[", "]")
+            if not end or end == size and not final:
+                return size if final else 0
+            if end < size and text[end] in "([":
+                closing = ")" if text[end] == "(" else "]"
+                return self._closing(text, end, text[end], closing) or (size if final else 0)
+            return end
+        if first in "!*_~`" and size == 1 and not final:
+            return 0
+        if first in "*_~`":
+            run = len(text) - len(text.lstrip(first))
+            if run == size and not final:
+                return 0
+            if first == "_" and self._previous.isalnum() or first != "`" and (run == size or text[run].isspace()):
+                return run
+            marker = first * run
+            end = re.search(r"(?<![\\" + re.escape(first) + "])" + re.escape(marker) + "(?!" + re.escape(first) + ")", text[run:])
+            count = run + end.end() if end else 0
+            return count if count and (count < size or final) else (size if final else 0)
+        if first == "<":
+            end = text.find(">")
+            return end + 1 if end >= 0 else (size if final else 0)
+        if first == "&":
+            match = re.match(r"&(?:#x?[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);", text)
+            if match:
+                return match.end()
+            return 1 if final or re.search(r"[\s&<>]", text[1:]) else 0
+        url = re.match(r"(?:https?://|www\.)[^\s<>]+", text, re.I)
+        if url:
+            return url.end() if url.end() < size or final else 0
+        special = re.search(r"[!\[<\\*_~`&\n|#]|https?://|www\.", text[1:], re.I)
+        end = special.start() + 1 if special else size
+        tail = re.search(r"[A-Za-z:/\.]+$", text[:end])
+        if not final and end == size and tail and any(prefix.startswith(tail[0].lower()) for prefix in ("https://", "http://", "www.")):
+            end = tail.start()
+        return end
 
-    @classmethod
-    def load(cls, root: Path, threads: int) -> KokoroModel:
-        with cls._phonemizer_lock:
-            return cls._load_locked(root, threads)
+    def _render(self, source: str) -> str:
+        if re.fullmatch(r"<(?:https?://|www\.)[^<>]+>", source, re.I) or re.match(r"</?[a-z][^>]*$", source, re.I):
+            return ""
+        if source.startswith(("[", "![")):
+            start = int(source[0] == "!")
+            end = self._closing(source, start, "[", "]")
+            source = source[start + 1:end - 1 if end else None]
+        tokens = list(self._markdown.parseInline(source)[0].children or [])
+        result = []
+        while tokens:
+            token = tokens.pop(0)
+            if token.type == "image":
+                tokens[0:0] = token.children or []
+            elif token.type in {"text", "code_inline"}:
+                result.append(token.content)
+            elif token.type in {"softbreak", "hardbreak"}:
+                result.append(" ")
+        return "".join(result)
 
-    @classmethod
-    def _load_locked(cls, root: Path, threads: int) -> KokoroModel:
-        model_name = "model.onnx" if (root / "model.onnx").is_file() else "model.int8.onnx"
-        files = (
-            model_name, "voices.bin", "tokens.txt", "lexicon-us-en.txt", "lexicon-zh.txt",
-            "phone-zh.fst", "date-zh.fst", "number-zh.fst",
-        )
-        missing = [name for name in files if not (root / name).is_file()]
-        if not (root / "espeak-ng-data").is_dir():
-            missing.append("espeak-ng-data")
-        if missing:
-            raise SpeechUnavailable(f"Kokoro 资源缺失: {', '.join(missing)}")
-        try:
-            import sherpa_onnx
-            import num2words  # Validate the English normalizer before model construction.
-        except ImportError as exc:
-            raise SpeechUnavailable("请安装 RedLotus[speech] 以使用本地语音合成") from exc
-
-        native = {name: cls._ascii_absolute(root / name) for name in (*files, "espeak-ng-data")}
-        if any(value is None for value in native.values()):
-            raise SpeechUnavailable("Kokoro 资源需要英文绝对路径；请将 model_dir 设为英文路径并重启应用")
-
-        # espeak-ng retains its first dictionary path in process-global state.
-        # Installed resources therefore remain pinned until process exit.
-        dictionary = ("lexicon-us-en.txt", "lexicon-zh.txt", "tokens.txt",
-                      "phone-zh.fst", "date-zh.fst", "number-zh.fst")
-        digest = hashlib.sha256()
-        sources = [*(root / name for name in dictionary), *(root / "espeak-ng-data").rglob("*")]
-        for source in sorted(sources, key=lambda path: path.relative_to(root).as_posix()):
-            if not source.is_file():
+    def _drain(self, final: bool) -> str:
+        output = []
+        while self._pending:
+            text = self._pending
+            newline = text.find("\n")
+            if self._comment:
+                end = text.find("-->")
+                self._take(end + 3 if end >= 0 else max(0, len(text) - 2))
+                self._comment = end < 0
+                if self._comment:
+                    break
                 continue
-            digest.update(source.relative_to(root).as_posix().encode("utf-8"))
-            digest.update(b"\0")
-            with source.open("rb") as stream:
-                for block in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(block)
-        fingerprint = digest.hexdigest()
-        pinned = cls._phonemizer_source
-        if pinned is not None and (fingerprint, root.resolve()) != pinned:
-            raise SpeechUnavailable("Kokoro 词典已变更；请重启应用后更新模型")
+            if self._skip_line:
+                self._take(newline + 1 if newline >= 0 else len(text))
+                if newline < 0:
+                    break
+                self._skip_line, self._start = False, True
+                continue
+            if self._fence and self._start:
+                row = text[:newline] if newline >= 0 else text
+                stripped = re.sub(r"^(?: {0,3}> ?)* {0,3}", "", row)
+                if stripped and (stripped[0] != self._fence[0] or re.search(r"[^" + re.escape(self._fence[0]) + r"\s]", stripped)):
+                    self._skip_line = True
+                    continue
+                if newline < 0 and not final:
+                    break
+                if re.fullmatch(re.escape(self._fence[0]) + "{" + str(len(self._fence)) + r",}\s*", stripped):
+                    self._fence = ""
+                self._take(newline + 1 if newline >= 0 else len(text))
+                continue
+            if self._start:
+                row = text[:newline] if newline >= 0 else text
+                if not final and newline < 0 and re.fullmatch(r"[\s>#*+\-~`_\d.)|:]*", row):
+                    break
+                prefix = re.match(r"(?: {0,3}> ?)*", text)[0]
+                plain = text[len(prefix):]
+                if not final and newline < 0 and re.fullmatch(r" {0,3}\[[^\]]*\]?", plain):
+                    break
+                if re.match(r" {0,3}\[[^\]]+\]:", plain):
+                    self._skip_line = True
+                    continue
+                fence = re.match(r" {0,3}(`{3,}|~{3,})", plain)
+                if fence or plain.startswith(("    ", "\t")):
+                    self._fence = fence[1] if fence else ""
+                    self._skip_line = True
+                    continue
+                if row.strip() and re.fullmatch(r"[\s*_:|\-]+", row) and sum(c in "*_-" for c in row) >= 3:
+                    self._skip_line = True
+                    continue
+                marker = re.match(r" {0,3}(?:#{1,6}\s+|[-+*]\s+|\d+[.)]\s+)", plain)
+                self._heading = bool(marker and marker[0].lstrip().startswith("#"))
+                self._checkbox = bool(marker and not self._heading)
+                self._take(len(prefix) + (marker.end() if marker else 0))
+                self._start = False
+                continue
+            if text.startswith("<!--"):
+                self._take(4)
+                self._comment = True
+                continue
+            if text[0] == "\n":
+                _, audible = self._take(1)
+                self._start, self._previous = True, ""
+                if audible:
+                    output.append("\n")
+                continue
+            if text[0] == "|":
+                _, audible = self._take(1)
+                if audible and self._previous:
+                    output.append(", ")
+                continue
+            if self._heading and text[0] == "#" and self._previous.isspace():
+                if newline < 0 and not final:
+                    break
+                if re.fullmatch(r"#+\s*", text[:newline] if newline >= 0 else text):
+                    self._take(newline if newline >= 0 else len(text))
+                    continue
+            count = self._unit(final)
+            if not count:
+                break
+            raw, audible = self._take(count)
+            self._previous = raw[-1]
+            if self._checkbox and raw in {"[ ]", "[x]", "[X]"}:
+                raw = ""
+            self._checkbox = self._checkbox and bool(raw) and raw.isspace()
+            if re.match(r"(?:https?://|www\.)", raw, re.I):
+                raw = ""
+            elif final and raw[:1] in "*_~`[" and self._render(raw) == raw:
+                raw = raw.lstrip("*_~`[").rstrip("]")
+            if audible:
+                output.append(self._render(raw))
+        return "".join(output)
 
-        kokoro = sherpa_onnx.OfflineTtsKokoroModelConfig(
-            model=native[model_name],
-            voices=native["voices.bin"],
-            tokens=native["tokens.txt"],
-            data_dir=native["espeak-ng-data"],
-            lexicon=",".join(native[name] for name in ("lexicon-us-en.txt", "lexicon-zh.txt")),
-        )
-        config = sherpa_onnx.OfflineTtsConfig(
-            model=sherpa_onnx.OfflineTtsModelConfig(kokoro=kokoro, num_threads=threads, provider="cpu"),
-            max_num_sentences=1,
-            rule_fsts=",".join(native[name] for name in ("phone-zh.fst", "date-zh.fst", "number-zh.fst")),
-        )
-        if not config.validate():
-            raise SpeechUnavailable("Kokoro 模型配置无效")
-        cls._phonemizer_source = (fingerprint, root.resolve())
-        return cls(sherpa_onnx.OfflineTts(config))
+    def feed(self, delta: str, *, audible: bool = True) -> str:
+        output = []
+        produced = 0
+        for offset in range(0, len(delta), 64):
+            self._pending += delta[offset:offset + 64].replace("\r", "")
+            if not audible:
+                self.mute_pending()
+            value = self._drain(False)
+            if audible:
+                output.append(value)
+                produced += len(value)
+            if self.pending_chars + produced > self.limit:
+                self.clear()
+                raise SpeechBusy("语音文本缓冲区已满，文字回复继续")
+        return "".join(output)
 
-    def warmup(self) -> None:
-        for text in ("你好。", "Hello, version 3.14 is ready."):
-            spoken, speaker = TextSegmenter.spoken_segment(text)
-            warm = self.generate(spoken, speaker)
-            if warm.sample_rate != _SAMPLE_RATE or not len(warm.samples):
-                raise SpeechUnavailable("Kokoro 预热未产生 24 kHz 音频")
-
-    def generate(self, text: str, speaker: int,
-                 callback: Callable[[FloatSamples, float], int] | None = None) -> PCMChunk:
-        audio = self._native.generate(text, sid=speaker, speed=1.0, callback=callback)
-        return PCMChunk(np.asarray(audio.samples, dtype=np.float32), audio.sample_rate)
-
-    def close(self) -> None:
-        self._native = None
+    def finish(self) -> str:
+        try:
+            return self._drain(True)
+        finally:
+            self.clear()
 
 
-class TextSegmenter:
-    def __init__(self, flush_ms: int, limit: int):
-        self.flush_ms = flush_ms
-        self.limit = limit
+class SpeakerTextFrontend:
+    """Choose the speaker and normalize English numbers for one response."""
 
     @staticmethod
-    def spoken_segment(text: str, previous_speaker: int = _CHINESE_SPEAKER) -> tuple[str, int]:
-        """Keep English numbers out of the native Chinese FST normalizers."""
+    def spoken_segment(text: str, condition: SpeakerCondition) -> tuple[str, int]:
         if re.search(r"[\u3400-\u9fff]", text):
-            return text, _CHINESE_SPEAKER
-        if not re.search(r"[A-Za-z]", text) and previous_speaker != _ENGLISH_SPEAKER:
-            return text, _CHINESE_SPEAKER
-        if not re.search(r"[0-9]", text):
-            return text, _ENGLISH_SPEAKER
+            return text, condition.default_sid
+        if not re.search(r"[A-Za-z]", text) and condition.previous_sid != condition.latin_sid:
+            return text, condition.default_sid
+        if not condition.english_number_words or not re.search(r"[0-9]", text):
+            return text, condition.latin_sid
         from num2words import num2words
 
         def number(match):
@@ -171,8 +268,13 @@ class TextSegmenter:
 
         text = re.sub(r"([+-]?)([0-9]+(?:,[0-9]{3})*)((?:\.[0-9]+)*)(st\b|nd\b|rd\b|th\b)?(%?)",
                       number, text)
-        return text, _ENGLISH_SPEAKER
+        return text, condition.latin_sid
 
+
+class TextSegmenter:
+    def __init__(self, flush_ms: int, limit: int):
+        self.flush_ms = flush_ms
+        self.limit = limit
 
     @staticmethod
     def _sentence_end(text: str, limit: int) -> int | None:
@@ -241,20 +343,25 @@ class TextSegmenter:
             if removed and on_consumed:
                 on_consumed(removed)
 
+        async def emit(force):
+            nonlocal pending
+            while segment := self._pop_segment(pending, self.limit, force=force):
+                removed = len(pending) - len(segment[1])
+                value, pending = segment
+                if value:
+                    yield value
+                if on_consumed:
+                    on_consumed(removed)
+
         try:
             while True:
                 trim_pending()
                 if not pending:
                     pending_since = None
-                while segment := self._pop_segment(pending, self.limit, force=False):
-                    removed = len(pending) - len(segment[1])
-                    value, pending = segment
-                    if value:
-                        yield value
-                    if on_consumed:
-                        on_consumed(removed)
-                    if not pending:
-                        pending_since = None
+                async for value in emit(False):
+                    yield value
+                if not pending:
+                    pending_since = None
                 if next_delta is None:
                     next_delta = asyncio.create_task(anext(source))
                 remaining = (None if pending_since is None or awaiting_boundary else
@@ -266,13 +373,8 @@ class TextSegmenter:
                     if suffix:
                         pending = pending[:suffix.start()]
                     trim_pending()
-                    while segment := self._pop_segment(pending, self.limit, force=True):
-                        removed = len(pending) - len(segment[1])
-                        value, pending = segment
-                        if value:
-                            yield value
-                        if on_consumed:
-                            on_consumed(removed)
+                    async for value in emit(True):
+                        yield value
                     pending += tail
                     awaiting_boundary = bool(tail)
                     if not tail:
@@ -282,13 +384,8 @@ class TextSegmenter:
                     delta = next_delta.result()
                 except StopAsyncIteration:
                     trim_pending()
-                    while segment := self._pop_segment(pending, self.limit, force=True):
-                        removed = len(pending) - len(segment[1])
-                        value, pending = segment
-                        if value:
-                            yield value
-                        if on_consumed:
-                            on_consumed(removed)
+                    async for value in emit(True):
+                        yield value
                     return
                 next_delta = None
                 awaiting_boundary = False
@@ -305,113 +402,6 @@ class TextSegmenter:
             close = getattr(source, "aclose", None)
             if close is not None:
                 await close()
-
-
-class _SegmentStream:
-    def __init__(self, service):
-        self.service = service
-        self.window = max(1, min(2400, int(service.config.pcm_seconds * _SAMPLE_RATE / 2)))
-        capacity = max(1, int(service.config.pcm_seconds * _SAMPLE_RATE) // self.window - 1)
-        self.pending_pcm: queue.Queue[PCMChunk] = queue.Queue(maxsize=capacity)
-        self.stopped = threading.Event()
-        self.ready = asyncio.Event()
-        self.loop = asyncio.get_running_loop()
-        self.speaker = _CHINESE_SPEAKER
-
-    def _generate(self, model: TTSModel, segment: str) -> None:
-        if model.sample_rate != _SAMPLE_RATE:
-            raise SpeechError(f"Kokoro 输出采样率错误: {model.sample_rate}")
-        received = False
-        previous = None
-
-        def put(samples, final=False):
-            while not self.stopped.is_set():
-                try:
-                    self.pending_pcm.put(PCMChunk(samples, _SAMPLE_RATE, final), timeout=.05)
-                    self.loop.call_soon_threadsafe(self.ready.set)
-                    return True
-                except queue.Full:
-                    continue
-            return False
-
-        def callback(samples, _progress):
-            nonlocal received, previous
-            samples = np.asarray(samples, dtype=np.float32)
-            if samples.ndim != 1 or not np.all(np.isfinite(samples)):
-                raise SpeechError("Kokoro 未产生有效单声道音频")
-            received |= bool(len(samples))
-            for start in range(0, len(samples), self.window):
-                if self.stopped.is_set() or previous is not None and not put(previous):
-                    return 0
-                previous = samples[start:start + self.window].copy()
-            return 1  # sherpa-onnx: 1 continues; 0 stops native generation.
-
-        if self.stopped.is_set():
-            return
-        spoken, self.speaker = TextSegmenter.spoken_segment(segment, self.speaker)
-        audio = model.generate(spoken, self.speaker, callback=callback)
-        if not self.stopped.is_set() and (not received or audio.sample_rate != _SAMPLE_RATE):
-            raise SpeechError("Kokoro 未产生有效的 24 kHz 音频")
-        if previous is not None:
-            put(previous, True)
-
-    async def _produce(self, segments):
-        async for segment in segments:
-            async with self.service.acquire(ModelKind.TTS) as model:
-                try:
-                    await self.service.run(ModelKind.TTS, self._generate, model, segment)
-                finally:
-                    del model
-
-    async def stream(self, segments) -> AsyncIterator[PCMChunk]:
-        worker = asyncio.create_task(self._produce(segments))
-        worker.add_done_callback(lambda _: self.ready.set())
-        try:
-            while True:
-                try:
-                    block = self.pending_pcm.get_nowait()
-                except queue.Empty:
-                    if worker.done():
-                        break
-                    self.ready.clear()
-                    if self.pending_pcm.empty() and not worker.done():
-                        await self.ready.wait()
-                    continue
-                yield block
-            await worker
-        finally:
-            self.stopped.set()
-            if not worker.done():
-                worker.cancel()
-            try:
-                await finish_io(asyncio.wait({worker}))
-            finally:
-                if worker.done() and not worker.cancelled():
-                    worker.exception()
-
-
-class StreamingSynthesizer:
-    def __init__(self, service=None):
-        if service is None:
-            from .service import SpeechService
-            service = SpeechService.shared()
-        self._service = service
-
-    async def synthesize(self, text: str | AsyncIterable[str]) -> AsyncIterator[PCMChunk]:
-        """Synthesize each new segment once and emit bounded PCM windows."""
-        async with aclosing(self._synthesize(text)) as stream:
-            async for chunk in stream:
-                yield chunk
-
-    async def _synthesize(self, text, on_consumed=None):
-        config = self._service.config
-        segments = TextSegmenter(config.flush_ms, config.segment_chars).segments(text, on_consumed)
-        try:
-            async with aclosing(_SegmentStream(self._service).stream(segments)) as stream:
-                async for chunk in stream:
-                    yield chunk
-        finally:
-            await segments.aclose()
 
 
 class SpeechReply:

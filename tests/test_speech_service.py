@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from filelock import FileLock
 
-from redlotus.TTS import SpeechBusy, SpeechSettings, SpeechUnavailable
+from redlotus.TTS import SpeechBusy, SpeechModel, SpeechSettings, SpeechUnavailable
 from redlotus.TTS import service
 from redlotus.runtime import resources
 
@@ -26,7 +26,11 @@ class CatalogFixture:
             if kind == "asr" else original(self, kind))
 
 
-class NativeFixture:
+class NativeFixture(SpeechModel):
+    @classmethod
+    def load(cls, root, threads):
+        return cls(root)
+
     def __init__(self, value=None, warm=None):
         self.value, self.warm = value, warm
 

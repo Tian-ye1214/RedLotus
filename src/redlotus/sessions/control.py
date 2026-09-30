@@ -151,7 +151,7 @@ class SessionController:
     def start_voice_test(self, text: str) -> asyncio.Task:
         """Play a fixed local sample under the same cancellation as spoken replies."""
         from redlotus.TTS import SpeechUnavailable
-        from redlotus.TTS.tts import StreamingSynthesizer
+        from redlotus.TTS import StreamingSynthesizer
 
         if self.voice_output is None:
             raise SpeechUnavailable("语音输出尚未就绪")

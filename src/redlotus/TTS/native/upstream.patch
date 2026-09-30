@@ -1,0 +1,2367 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2c7576e..7194128 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -66,8 +66,6 @@ include(cmake/fmt.cmake)
+ include(cmake/cpp-pinyin.cmake)
+ include(cmake/boost-cmake.cmake)
+ include(cmake/tokenizers-cpp.cmake)
+-include(cmake/libsndfile.cmake)
+-include(cmake/libsamplerate.cmake)
+ include(cmake/SRELL.cmake)
+ include(cmake/xsimd.cmake)
+ include(cmake/xtensor.cmake)
+@@ -109,7 +107,13 @@ file(GLOB_RECURSE GPT_SOVITS_CPP_SOURCE
+     "src/Utils/*.cpp"
+ )
+ 
++# PCM stays in memory; no file codec or duplicate resampler is linked.
++list(FILTER GPT_SOVITS_CPP_SOURCE EXCLUDE REGEX "audio_tools.cpp$")
++
+ # CUDA kernel files
++if(NOT USE_TENSORRT)
++  list(FILTER GPT_SOVITS_CPP_SOURCE EXCLUDE REGEX "tensorrt_backend.cpp$")
++endif()
+ set(GPT_SOVITS_CUDA_SOURCE "")
+ if (ENABLE_CUDA)
+     file(GLOB_RECURSE GPT_SOVITS_CUDA_SOURCE "src/*.cu")
+@@ -118,6 +122,29 @@ endif()
+ 
+ add_library(gsv_lib ${GPT_SOVITS_CPP_SOURCE} ${GPT_SOVITS_CUDA_SOURCE})
+ target_include_directories(gsv_lib PUBLIC include)
++target_compile_definitions(gsv_lib PUBLIC ORT_API_MANUAL_INIT)
++
++set(REDLOTUS_SOURCE_ROOT "" CACHE PATH "RedLotus source checkout")
++if(NOT EXISTS "${REDLOTUS_SOURCE_ROOT}/src/redlotus/TTS/native/mambo_worker.cpp")
++  message(FATAL_ERROR "Set REDLOTUS_SOURCE_ROOT to the RedLotus source checkout")
++endif()
++# All consumers use the same compact dictionary index; source resources stay unchanged.
++set(REDLOTUS_FRONTEND_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/redlotus_frontend")
++file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppjieba/include/"
++     DESTINATION "${REDLOTUS_FRONTEND_INCLUDE}")
++configure_file("${REDLOTUS_SOURCE_ROOT}/src/redlotus/TTS/native/CompactTrie.hpp"
++               "${REDLOTUS_FRONTEND_INCLUDE}/cppjieba/Trie.hpp" COPYONLY)
++configure_file("${REDLOTUS_SOURCE_ROOT}/src/redlotus/TTS/native/PronunciationDictionary.hpp"
++               "${REDLOTUS_FRONTEND_INCLUDE}/PronunciationDictionary.hpp" COPYONLY)
++configure_file("${REDLOTUS_SOURCE_ROOT}/src/redlotus/TTS/native/StreamingVocoder.hpp"
++               "${REDLOTUS_FRONTEND_INCLUDE}/StreamingVocoder.hpp" COPYONLY)
++target_include_directories(gsv_lib BEFORE PUBLIC "${REDLOTUS_FRONTEND_INCLUDE}")
++add_executable(redlotus_mambo "${REDLOTUS_SOURCE_ROOT}/src/redlotus/TTS/native/mambo_worker.cpp")
++target_link_libraries(redlotus_mambo PRIVATE gsv_lib)
++if(MSVC)
++  target_link_options(redlotus_mambo PRIVATE "/DELAYLOAD:onnxruntime.dll")
++  target_link_libraries(redlotus_mambo PRIVATE delayimp)
++endif()
+ 
+ 
+ # ==============================================================================
+@@ -275,14 +302,12 @@ target_link_libraries(gsv_lib PUBLIC
+     cppmodule::boost
+     cppmodule::srell
+     cppmodule::tokenizers
+-    cppmodule::sndfile
+     cppmodule::xsimd
+     cppmodule::xtensor
+     cppmodule::xtensor-blas
+     cppmodule::utfcpp
+     cppmodule::cld2_cmake
+     cppmodule::cppjieba
+-    cppmodule::samplerate
+     cppmodule::cpptrace
+     openjtalk
+     ${BACKEND_LIBS}
+@@ -372,4 +397,4 @@ endfunction()
+ 
+ if (NOT NO_TEST)
+   include(example/example_all.cmake)
+-endif ()
+\ No newline at end of file
++endif ()
+diff --git a/include/GPTSoVITS/AudioTools.h b/include/GPTSoVITS/AudioTools.h
+index 7dc37d6..9ea3de8 100644
+--- a/include/GPTSoVITS/AudioTools.h
++++ b/include/GPTSoVITS/AudioTools.h
+@@ -1,20 +1,13 @@
+-//
+-// Created by Huiyicc on 24-11-12.
+-//
+-
++// Native inference owns PCM only; device I/O and resampling belong to RedLotus.
+ #ifndef GPT_SOVITS_CPP_AUDIOTOOLS_H
+ #define GPT_SOVITS_CPP_AUDIOTOOLS_H
+-
+-#include <string>
++#include <cstdint>
+ #include <memory>
++#include <stdexcept>
++#include <utility>
+ #include <vector>
+-#include <sndfile.h>
+ 
+ namespace GPTSoVITS {
+-
+-/**
+- * @brief 音频分块
+- */
+ struct AudioChunk {
+   std::vector<float> audio_data;
+   bool is_first = false;
+@@ -25,57 +18,25 @@ struct AudioChunk {
+ };
+ 
+ class AudioTools {
+-  SF_INFO m_sfinfo = {0};
+-  SNDFILE *m_infile = nullptr;
+-  bool m_i_know_empty = false;
+-
+-  void check_init();
+-
+-  std::vector<float> m_samplesCache;
+-public:
+-
++  std::vector<float> samples_;
++  int sample_rate_;
++ public:
+   struct AudioHeader {
+     int SampleRate;
+     int Channels;
+-    sf_count_t Frames;
+-    int Format;
++    int64_t Frames;
+   };
+-
+-  ~AudioTools();
+-
+-  AudioHeader GetHeader();
+-
+-  const std::vector<float> &ReadSamples();
+-
+-  /**
+-   * @brief 从音频文件创建对象
+-   * */
+-  static std::unique_ptr<AudioTools>
+-  FromFile(const std::string &file);
+-
+-  static std::unique_ptr<AudioTools>
+-  FromByte(SF_INFO sfInfo, const std::vector<float> &samples);
+-
+-  static std::unique_ptr<AudioTools>
+-  FromByte(const std::vector<float> &samples, int samplerate, int channels = 1,
+-           int format = SF_FORMAT_WAV | SF_FORMAT_PCM_16, int sections = 1, int seekable = 1);
+-
+-  static std::unique_ptr<AudioTools>
+-  FromEmpty(int samplerate, int channels = 1,
+-            int format = SF_FORMAT_WAV | SF_FORMAT_PCM_16);
+-
+-
+-  AudioTools &AppendEmpty(uint32_t duration_ms);
+-
+-  size_t SaveToFile(const std::string &path, int format = SF_FORMAT_WAV | SF_FORMAT_PCM_16);
+-
+-  std::unique_ptr<AudioTools> ReSample(int targetSamplerate);
+-
+-  AudioTools &Append(AudioTools &other);
+-
++  AudioTools(std::vector<float> samples, int sample_rate)
++      : samples_(std::move(samples)), sample_rate_(sample_rate) {
++    if (sample_rate <= 0) throw std::invalid_argument("Invalid PCM sample rate");
++  }
++  static std::unique_ptr<AudioTools> FromByte(std::vector<float> samples, int sample_rate) {
++    return std::make_unique<AudioTools>(std::move(samples), sample_rate);
++  }
++  AudioHeader GetHeader() const noexcept {
++    return {sample_rate_, 1, static_cast<int64_t>(samples_.size())};
++  }
++  const std::vector<float>& ReadSamples() const noexcept { return samples_; }
+ };
+-
+-
+ }
+-
+-#endif //GPT_SOVITS_CPP_AUDIOTOOLS_H
++#endif
+diff --git a/include/GPTSoVITS/InferencePipeline.h b/include/GPTSoVITS/InferencePipeline.h
+index 2d63138..a7fd6a9 100644
+--- a/include/GPTSoVITS/InferencePipeline.h
++++ b/include/GPTSoVITS/InferencePipeline.h
+@@ -125,7 +125,7 @@ using AudioChunkCallback = std::function<void(const AudioChunk&)>;
+  * pipeline.ExportSpeaker("speaker1", "speaker1.gsppkg");
+  * 
+  * auto audio = pipeline.Infer("speaker1", "要生成的文本");
+- * audio->SaveToFile("output.wav");
++ * const auto& pcm = audio->ReadSamples();
+  * 
+  * // 边缘模式
+  * PipelineConfig config = PipelineConfig::Edge("/path/to/models");
+@@ -172,27 +172,6 @@ public:
+    */
+   [[nodiscard]] std::string GetModelInfo() const;
+ 
+-  /**
+-   * @brief 检查是否支持说话人创建
+-   */
+-  [[nodiscard]] bool CanCreateSpeaker() const;
+-
+-  // ============ 说话人管理 ============
+-
+-  /**
+-   * @brief 创建说话人（仅 Full 模式）
+-   * @param name 说话人名称
+-   * @param lang 语言
+-   * @param ref_audio_path 参考音频路径
+-   * @param ref_text 参考文本
+-   * @return 说话人特征指针（失败返回 nullptr）
+-   */
+-  SpeakerFeatures* CreateSpeaker(
+-      const std::string& name,
+-      const std::string& lang,
+-      const std::filesystem::path& ref_audio_path,
+-      const std::string& ref_text);
+-
+   /**
+    * @brief 导入说话人数据包
+    * @param package_path 数据包路径
+@@ -250,7 +229,8 @@ public:
+       float noise_scale = 0.5f,
+       float speed = 1.0f,
+       Model::InferStats* stats = nullptr,
+-      std::function<void()> on_first_segment = nullptr);
++      std::function<void()> on_first_segment = nullptr,
++      std::function<void(const std::vector<float>&)> on_pcm = {});
+ 
+   /**
+    * @brief 简化推理接口（使用默认参数）
+diff --git a/include/GPTSoVITS/SpeakerManager.h b/include/GPTSoVITS/SpeakerManager.h
+index 4fbdd7f..1bd4f3d 100644
+--- a/include/GPTSoVITS/SpeakerManager.h
++++ b/include/GPTSoVITS/SpeakerManager.h
+@@ -101,22 +101,6 @@ public:
+    */
+   [[nodiscard]] Core::DeviceContext* GetDeviceContext() const;
+ 
+-  // ============ 创建说话人（需要全量模型） ============
+-
+-  /**
+-   * @brief 创建说话人
+-   * @param name 说话人名称
+-   * @param lang 语言
+-   * @param ref_audio_path 参考音频路径
+-   * @param ref_text 参考文本
+-   * @return 说话人特征指针（失败返回 nullptr）
+-   */
+-  SpeakerFeatures* CreateSpeaker(
+-      const std::string& name,
+-      const std::string& lang,
+-      const std::filesystem::path& ref_audio_path,
+-      const std::string& ref_text);
+-
+   // ============ 导入/导出 ============
+ 
+   /**
+diff --git a/include/GPTSoVITS/model/gpt_encoder.h b/include/GPTSoVITS/model/gpt_encoder.h
+index c26c7c8..7c68312 100644
+--- a/include/GPTSoVITS/model/gpt_encoder.h
++++ b/include/GPTSoVITS/model/gpt_encoder.h
+@@ -118,9 +118,10 @@ public:
+   /**
+    * @brief Get the underlying model
+    */
++  [[nodiscard]] BaseModel* GetModel() { return m_model.get(); }
+   [[nodiscard]] const BaseModel* GetModel() const { return m_model.get(); }
+ };
+ 
+ }  // namespace GPTSoVITS::Model
+ 
+-#endif  // GSV_CPP_GPT_ENCODER_H
+\ No newline at end of file
++#endif  // GSV_CPP_GPT_ENCODER_H
+diff --git a/include/GPTSoVITS/model/gpt_step.h b/include/GPTSoVITS/model/gpt_step.h
+index cdec770..9405886 100644
+--- a/include/GPTSoVITS/model/gpt_step.h
++++ b/include/GPTSoVITS/model/gpt_step.h
+@@ -339,6 +339,7 @@ public:
+   /**
+    * @brief Get the underlying model
+    */
++  [[nodiscard]] BaseModel* GetModel() { return m_model.get(); }
+   [[nodiscard]] const BaseModel* GetModel() const { return m_model.get(); }
+ 
+ private:
+@@ -362,4 +363,4 @@ private:
+ 
+ }  // namespace GPTSoVITS::Model
+ 
+-#endif  // GSV_CPP_GPT_STEP_H
+\ No newline at end of file
++#endif  // GSV_CPP_GPT_STEP_H
+diff --git a/src/Core/ModelPool.cpp b/src/Core/ModelPool.cpp
+index 0fd41c9..15faae4 100644
+--- a/src/Core/ModelPool.cpp
++++ b/src/Core/ModelPool.cpp
+@@ -39,7 +39,6 @@ std::vector<ModelType> GetModelTypesInGroup(ModelGroup group) {
+       };
+     case ModelGroup::kInference:
+       return {
+-          ModelType::kBert,
+           ModelType::kGPTEncoder,
+           ModelType::kGPTStep,
+           ModelType::kSoVITS
+@@ -190,9 +189,12 @@ std::shared_ptr<void> ModelPool::CreateModel(ModelType type) {
+     default:                 backend_cfg.precision = PrecisionMode::kAuto;  break;
+   }
+ 
++  const char* backend_name = "ONNX";
++#ifdef WITH_TENSORRT
++  if (backend == BackendType::kTensorRT) backend_name = "TensorRT";
++#endif
+   PrintInfo("[ModelPool] Creating model: {} | backend: {} | device: {} | precision: {}",
+-            ModelTypeToString(type),
+-            backend == BackendType::kTensorRT ? "TensorRT" : "ONNX",
++            ModelTypeToString(type), backend_name,
+             config.device.type == DeviceType::kCUDA ? "CUDA" : "CPU",
+             PrecisionModeToString(backend_cfg.precision));
+ 
+@@ -201,65 +203,81 @@ std::shared_ptr<void> ModelPool::CreateModel(ModelType type) {
+       case ModelType::kBert: {
+         auto model = std::make_shared<CNBertModel>();
+         auto tok = (GetGlobalResourcesPath() / "bert_tokenizer.json").string();
++#ifdef WITH_TENSORRT
+         if (backend == BackendType::kTensorRT)
+           model->Init<TensorRTBackend>(config.path, tok, backend_cfg);
+         else
++#endif
+           model->Init<ONNXBackend>(config.path, tok, config.device, config.thread_num);
+         return model;
+       }
+       case ModelType::kSSL: {
+         auto model = std::make_shared<SSLModel>();
++#ifdef WITH_TENSORRT
+         if (backend == BackendType::kTensorRT)
+           model->Init<TensorRTBackend>(config.path, backend_cfg);
+         else
++#endif
+           model->Init<ONNXBackend>(config.path, config.device, config.thread_num);
+         return model;
+       }
+       case ModelType::kVQ: {
+         auto model = std::make_shared<VQModel>();
++#ifdef WITH_TENSORRT
+         if (backend == BackendType::kTensorRT)
+           model->Init<TensorRTBackend>(config.path, backend_cfg);
+         else
++#endif
+           model->Init<ONNXBackend>(config.path, config.device, config.thread_num);
+         return model;
+       }
+       case ModelType::kSpectrogram: {
+         auto model = std::make_shared<SpectrogramModel>();
++#ifdef WITH_TENSORRT
+         if (backend == BackendType::kTensorRT)
+           model->Init<TensorRTBackend>(config.path, backend_cfg);
+         else
++#endif
+           model->Init<ONNXBackend>(config.path, config.device, config.thread_num);
+         return model;
+       }
+       case ModelType::kSVEmbedding: {
+         auto model = std::make_shared<SVEmbeddingModel>();
++#ifdef WITH_TENSORRT
+         if (backend == BackendType::kTensorRT)
+           model->Init<TensorRTBackend>(config.path, backend_cfg);
+         else
++#endif
+           model->Init<ONNXBackend>(config.path, config.device, config.thread_num);
+         return model;
+       }
+       case ModelType::kGPTEncoder: {
+         auto model = std::make_shared<GPTEncoderModel>();
++#ifdef WITH_TENSORRT
+         if (backend == BackendType::kTensorRT)
+           model->Init<TensorRTBackend>(config.path, backend_cfg);
+         else
++#endif
+           model->Init<ONNXBackend>(config.path, config.device, config.thread_num);
+         return model;
+       }
+       case ModelType::kGPTStep: {
+         auto model = std::make_shared<GPTStepModel>();
++#ifdef WITH_TENSORRT
+         if (backend == BackendType::kTensorRT)
+           model->Init<TensorRTBackend>(config.path, backend_cfg);
+         else
++#endif
+           model->Init<ONNXBackend>(config.path, config.device, config.thread_num);
+         return model;
+       }
+       case ModelType::kSoVITS: {
+         auto model = std::make_shared<SoVITSModel>();
++#ifdef WITH_TENSORRT
+         if (backend == BackendType::kTensorRT)
+           model->Init<TensorRTBackend>(config.path, backend_cfg);
+         else
++#endif
+           model->Init<ONNXBackend>(config.path, config.device, config.thread_num);
+         return model;
+       }
+diff --git a/src/GPTSoVITSCpp.cpp b/src/GPTSoVITSCpp.cpp
+index 2a8c172..17d086f 100644
+--- a/src/GPTSoVITSCpp.cpp
++++ b/src/GPTSoVITSCpp.cpp
+@@ -1,763 +1,8 @@
+-//
+-// Created by Huiyicc on 2026/1/17.
+-//
++// Application runtime loads prepared speaker features; it does not make them.
+ #include "GPTSoVITS/GPTSoVITSCpp.h"
+ 
+-#include <chrono>
+-#include <numeric>
+-#include <random>
+-
+-#include "GPTSoVITS/plog.h"
+-#include "GPTSoVITS/Utils/LoudnessNormalizer.h"
+-#include "GPTSoVITS/Utils/Precision.h"
+-#include "GPTSoVITS/Utils/Sampling.h"
+-#include "GPTSoVITS/Utils/speaker_serializer.h"
+-#include "nlohmann/json.hpp"
+-
+ namespace GPTSoVITS {
+-std::filesystem::path g_globalResourcesPath =
+-    std::filesystem::current_path() / "res";
+-
+-void SetGlobalResourcesPath(const std::string& path) {
+-  g_globalResourcesPath = path;
+-}
++std::filesystem::path g_globalResourcesPath = std::filesystem::current_path() / "res";
++void SetGlobalResourcesPath(const std::string& path) { g_globalResourcesPath = path; }
+ std::filesystem::path GetGlobalResourcesPath() { return g_globalResourcesPath; }
+-
+-class _JsonImpl {
+-public:
+-  nlohmann::json data;
+-};
+-
+-GPTSoVITSPipline::GPTSoVITSPipline(
+-    const std::string& config,
+-    const std::shared_ptr<G2P::G2PPipline>& g2p_pipline,
+-    const std::shared_ptr<Model::SSLModel>& ssl_model,
+-    const std::shared_ptr<Model::VQModel>& vq_model,
+-    const std::shared_ptr<Model::SpectrogramModel>& spectrogram_model,
+-    const std::shared_ptr<Model::SVEmbeddingModel>& sv_embedding_model,
+-    const std::shared_ptr<Model::GPTEncoderModel>& gpt_encoder_model,
+-    const std::shared_ptr<Model::GPTStepModel>& gpt_step_model,
+-    const std::shared_ptr<Model::SoVITSModel>& sovits_model)
+-    : m_g2p_pipline(g2p_pipline),
+-      m_ssl_model(ssl_model),
+-      m_vq_model(vq_model),
+-      m_spectrogram_model(spectrogram_model),
+-      m_sv_embedding_model(sv_embedding_model),
+-      m_gpt_encoder_model(gpt_encoder_model),
+-      m_gpt_step_model(gpt_step_model),
+-      m_sovits_model(sovits_model) {
+-  // 接口验证：确保所有必需的模型和方法都存在
+-#ifdef GSV_ENABLE_INTERFACE_VALIDATION
+-  using namespace Utils;
+-
+-  // 注册模块依赖关系
+-  auto& dep_graph = ModuleDependencyGraph::Instance();
+-  dep_graph.RegisterModule("G2PPipline", {"BertModel"});
+-  dep_graph.RegisterModule("SSLModel", {});
+-  dep_graph.RegisterModule("VQModel", {"SSLModel"});
+-  dep_graph.RegisterModule("SpectrogramModel", {});
+-  dep_graph.RegisterModule("SVEmbeddingModel", {});
+-  dep_graph.RegisterModule("GPTEncoderModel", {"BertModel"});
+-  dep_graph.RegisterModule("GPTStepModel", {"GPTEncoderModel"});
+-  dep_graph.RegisterModule("SoVITSModel", {"VQModel", "SpectrogramModel", "SVEmbeddingModel"});
+-  dep_graph.RegisterModule("GPTSoVITSPipline",
+-                          {"G2PPipline", "SSLModel", "VQModel", "SpectrogramModel",
+-                           "SVEmbeddingModel", "GPTEncoderModel", "GPTStepModel",
+-                           "SoVITSModel"});
+-
+-  // 验证依赖关系
+-  if (!dep_graph.ValidateDependencies()) {
+-    PrintError("[GPTSoVITSPipline] Module dependency validation failed!");
+-  }
+-
+-  // 验证所有接口
+-  if (!InterfaceValidator::ValidatePipelineInterface<GPTSoVITSPipline>()) {
+-    PrintError("[GPTSoVITSPipline] Pipeline interface validation failed!");
+-  }
+-#endif
+-
+-  m_config = std::make_shared<_JsonImpl>();
+-  m_config->data = nlohmann::json::parse(config);
+-
+-  // 初始化配置参数
+-  InitializeConfig();
+-
+-  // 更新SoVITS模型的SV维度
+-  if (m_sovits_model) {
+-    m_sovits_model->SetSVDim(m_config_params.sv_dim);
+-  }
+-
+-  // 检测模型精度
+-  DetectModelPrecision();
+-
+-  PrintDebug("GPT-SoVITS Pipeline initialized:");
+-  PrintDebug("  Model version: {}", m_config_params.model_version);
+-  PrintDebug("  Sampling rate: {} Hz", m_config_params.sampling_rate);
+-  PrintDebug("  Max sequence length: {}", m_config_params.max_len);
+-  PrintDebug("  Compute precision: {}",
+-            m_compute_precision == Model::DataType::kFloat16 ? "FP16" : "FP32");
+-  PrintDebug("  SV embedding dim: {}", m_config_params.sv_dim);
+-}
+-
+-const SpeakerInfo& GPTSoVITSPipline::CreateSpeaker(
+-    const std::string& speaker_name, const std::string& ref_audio_lang,
+-    const std::filesystem::path& ref_audio_path,
+-    const std::string& ref_audio_text) {
+-  auto iter = m_speaker_map.find(speaker_name);
+-  if (iter != m_speaker_map.end()) {
+-    return iter->second;
+-  }
+-
+-  PrintDebug("Creating new speaker: {}", speaker_name);
+-
+-  SpeakerInfo info;
+-  info.m_speaker_name = speaker_name;
+-  info.m_speaker_lang = ref_audio_lang;
+-
+-  auto refAudio = AudioTools::FromFile(ref_audio_path.string());
+-
+-  auto audio16k = refAudio->ReSample(16000);
+-  auto samples16k_raw = audio16k->ReadSamples();
+-  
+-  // 给16k音频增加0.3s静音填充, 仅用于 SSL/VQ 提取, 匹配Python端行为
+-  auto samples16k_padded = samples16k_raw;
+-  size_t padding_size = static_cast<size_t>(16000 * 0.3);
+-  samples16k_padded.insert(samples16k_padded.end(), padding_size, 0.0f);
+-  
+-  info.m_speaker_16k = AudioTools::FromByte(samples16k_padded, 16000);
+-
+-  // 32k (or native sr) for SoVITS
+-  info.m_speaker_32k = refAudio->ReSample(32000);
+-
+-  // bert embeddings
+-  info.m_bert_res =
+-      m_g2p_pipline->GetPhoneAndBert(ref_audio_text, ref_audio_lang);
+-
+-  // get ssl and vq codes
+-  info.m_ssl_content =
+-      m_ssl_model->GetSSLContent(info.m_speaker_16k->ReadSamples());
+-  auto vq_raw = m_vq_model->GetVQCodes(info.m_ssl_content.get());
+-  if (!vq_raw) {
+-    THROW_ERRORN("Failed to get VQ codes for speaker {}", speaker_name);
+-  }
+-
+-  // prompt_semantic = codes[0, 0][None, :]
+-  if (vq_raw->Shape().size() == 3) {
+-    auto shape = vq_raw->Shape();
+-    int64_t B = shape[0];
+-    int64_t K = shape[1];
+-    int64_t T = shape[2];
+-    PrintInfo("  VQ raw shape: [{}, {}, {}]", B, K, T);
+-    
+-    auto sliced = Model::Tensor::Empty({1, T}, Model::DataType::kInt64, Model::DeviceType::kCPU);
+-    auto vq_cpu = vq_raw->To(Model::Device(Model::DeviceType::kCPU), Model::DataType::kInt64);
+-    std::memcpy(sliced->Data<int64_t>(), vq_cpu->Data<int64_t>(), T * sizeof(int64_t));
+-    info.m_vq_codes = std::move(sliced);
+-  } else if (vq_raw->Shape().size() == 2 && vq_raw->Shape()[0] > 1) {
+-    auto T = vq_raw->Shape()[1];
+-    auto sliced = Model::Tensor::Empty({1, T}, Model::DataType::kInt64, Model::DeviceType::kCPU);
+-    auto vq_cpu = vq_raw->To(Model::Device(Model::DeviceType::kCPU), Model::DataType::kInt64);
+-    std::memcpy(sliced->Data<int64_t>(), vq_cpu->Data<int64_t>(), T * sizeof(int64_t));
+-    info.m_vq_codes = std::move(sliced);
+-  } else {
+-    info.m_vq_codes = std::move(vq_raw);
+-    if (info.m_vq_codes->Shape().size() == 1) {
+-      info.m_vq_codes->Reshape({1, info.m_vq_codes->Shape()[0]});
+-    }
+-  }
+-
+-  PrintDebug("  Final VQ codes shape: [{}, {}]",
+-            info.m_vq_codes->Shape()[0], info.m_vq_codes->Shape()[1]);
+-
+-  auto sr = m_config->data["data"].value<int>("sampling_rate", 32000);
+-
+-  info.m_refer_spec = m_spectrogram_model->ComputeSpec(
+-      info.m_speaker_32k->ReSample(sr)->ReadSamples());
+-  if (info.m_refer_spec->Shape().size() == 3) {
+-    info.m_refer_spec->Reshape(
+-        {info.m_refer_spec->Shape()[1], info.m_refer_spec->Shape()[2]});
+-  }
+-
+-  // SV embedding
+-  info.m_sv_emb =
+-      m_sv_embedding_model->ComputeEmbedding(samples16k_raw);
+-  if (info.m_sv_emb->Shape().size() == 2) {
+-    info.m_sv_emb->Reshape({info.m_sv_emb->Shape()[1]});
+-  }
+-
+-  m_speaker_map[speaker_name] = std::move(info);
+-  return m_speaker_map[speaker_name];
+-}
+-
+-std::unique_ptr<AudioTools> GPTSoVITSPipline::InferSpeaker(
+-    const std::string& speaker_name, const std::string& text,
+-    const std::string& text_lang, float temperature, float noise_scale,
+-    float speed, Model::InferStats* stats) {
+-  auto iter = m_speaker_map.find(speaker_name);
+-  if (iter == m_speaker_map.end()) {
+-    PrintError("Speaker not found: {}", speaker_name);
+-    return nullptr;
+-  }
+-
+-  const auto& speaker_info = iter->second;
+-
+-  PrintDebug("Starting inference for speaker: {}", speaker_name);
+-
+-  // Use Text::Sentence for multi-language text splitting
+-  Text::Sentence sentence(Text::Sentence::SentenceSplitMethod::Punctuation);
+-
+-  std::vector<std::string> segments;
+-  std::vector<std::shared_ptr<Bert::BertRes>> segment_bert_res;
+-
+-  sentence.AppendCallBack([this, &segments, &segment_bert_res,
+-                           &text_lang](const std::string& seg) -> bool {
+-    PrintDebug(">>> [Segment Split] Processing: {}", seg);
+-    segments.push_back(seg);
+-    try {
+-      // Get phones and bert for target text
+-      auto target_bert_res = m_g2p_pipline->GetPhoneAndBert(seg, text_lang);
+-      segment_bert_res.push_back(target_bert_res);
+-    } catch (const std::exception& e) {
+-      PrintError("    [Inference Error] Failed to process segment: {}",
+-                 e.what());
+-    }
+-    return true;
+-  });
+-
+-  sentence.Append(text);
+-  sentence.Flush();
+-
+-  if (segments.empty()) {
+-    PrintWarn("No text segments to process");
+-    return nullptr;
+-  }
+-
+-  // 短句合并逻辑 (len(current) + len(s) < 20 则合并
+-  std::vector<std::string> merged_segments;
+-  std::string current_seg;
+-  for (const auto& s : segments) {
+-    if (current_seg.size() + s.size() < 20) {
+-      current_seg += s;
+-    } else {
+-      if (!current_seg.empty()) {
+-        merged_segments.push_back(current_seg);
+-      }
+-      current_seg = s;
+-    }
+-  }
+-  if (!current_seg.empty()) {
+-    merged_segments.push_back(current_seg);
+-  }
+-
+-  // 重新处理合并后的 G2P
+-  segments = std::move(merged_segments);
+-  segment_bert_res.clear();
+-  for (const auto& seg : segments) {
+-    try {
+-      auto target_bert_res = m_g2p_pipline->GetPhoneAndBert(seg, text_lang);
+-      segment_bert_res.push_back(target_bert_res);
+-    } catch (const std::exception& e) {
+-      PrintError("    [Inference Error] Failed to process segment: {}", e.what());
+-      segment_bert_res.push_back(nullptr);
+-    }
+-  }
+-
+-  PrintDebug("Processing {} text segments", segments.size());
+-
+-  std::vector<float> final_audio;
+-
+-  // Get reference text phones and bert features
+-  auto& ref_phones = speaker_info.m_bert_res->PhoneSeq;
+-  auto& ref_bert = speaker_info.m_bert_res->BertSeq;
+-
+-  // Process each segment
+-  for (size_t seg_idx = 0; seg_idx < segments.size(); ++seg_idx) {
+-    PrintInfo("Processing segment {}/{}: {}", seg_idx + 1, segments.size(),
+-              segments[seg_idx]);
+-
+-    auto& target_bert_res = segment_bert_res[seg_idx];
+-    auto& target_phones = target_bert_res->PhoneSeq;
+-    auto& target_bert = target_bert_res->BertSeq;
+-
+-    // Get target device and dtype
+-    auto target_device = m_gpt_encoder_model->GetModel()->GetDevice();
+-    auto phone_dtype = m_gpt_encoder_model->GetModel()->GetInputDataType("phoneme_ids");
+-    auto bert_dtype = m_gpt_encoder_model->GetModel()->GetInputDataType("bert_feature");
+-
+-    auto ref_phones_final = ref_phones->To(target_device, phone_dtype);
+-    auto target_phones_final = target_phones->To(target_device, phone_dtype);
+-    auto all_phones = ConcatTensor(ref_phones_final.get(), target_phones_final.get(), 0);
+-
+-    auto ref_bert_final = ref_bert->To(target_device, bert_dtype);
+-    auto target_bert_final = target_bert->To(target_device, bert_dtype);
+-    auto all_bert = ConcatTensor(ref_bert_final.get(), target_bert_final.get(), 1);
+-
+-    PrintDebug("  ref_bert shape: [{}, {}, {}]",
+-              ref_bert->Shape().size() > 0 ? ref_bert->Shape()[0] : 0,
+-              ref_bert->Shape().size() > 1 ? ref_bert->Shape()[1] : 0,
+-              ref_bert->Shape().size() > 2 ? ref_bert->Shape()[2] : 0);
+-    PrintDebug("  target_bert shape: [{}, {}, {}]",
+-              target_bert->Shape().size() > 0 ? target_bert->Shape()[0] : 0,
+-              target_bert->Shape().size() > 1 ? target_bert->Shape()[1] : 0,
+-              target_bert->Shape().size() > 2 ? target_bert->Shape()[2] : 0);
+-    PrintDebug("  all_bert (before reshape) shape: [{}, {}, {}]",
+-              all_bert->Shape().size() > 0 ? all_bert->Shape()[0] : 0,
+-              all_bert->Shape().size() > 1 ? all_bert->Shape()[1] : 0,
+-              all_bert->Shape().size() > 2 ? all_bert->Shape()[2] : 0);
+-
+-    if (all_bert->Shape().size() == 2) {
+-      all_bert->Reshape({1, all_bert->Shape()[0], all_bert->Shape()[1]});
+-      PrintDebug("  Reshaped all_bert to: [{}, {}, {}]",
+-                all_bert->Shape()[0], all_bert->Shape()[1], all_bert->Shape()[2]);
+-    }
+-
+-    // 准备输入时使用正确的数据类型
+-    auto compute_dtype = GetComputePrecision();
+-
+-    if (all_bert->Type() != compute_dtype) {
+-      PrintDebug("  Converting bert_feature from {} to {} for GPT Encoder",
+-                all_bert->Type() == Model::DataType::kFloat32 ? "float32" : "float16",
+-                compute_dtype == Model::DataType::kFloat32 ? "float32" : "float16");
+-      all_bert = all_bert->To(all_bert->GetDevice(), compute_dtype);
+-    }
+-
+-    // phoneme_ids (1, seq_len)
+-    auto phoneme_ids = all_phones->To(Model::Device(Model::DeviceType::kCPU), Model::DataType::kInt64);
+-    if (phoneme_ids->Shape().size() == 1) {
+-      phoneme_ids->Reshape({1, phoneme_ids->Shape()[0]});
+-    }
+-
+-    // prompts (1, prompt_len)
+-    auto prompts = speaker_info.m_vq_codes->To(Model::Device(Model::DeviceType::kCPU), Model::DataType::kInt64);
+-    if (prompts->Shape().size() == 1) {
+-      prompts->Reshape({1, prompts->Shape()[0]});
+-    }
+-
+-    PrintDebug("  GPT Encoder inputs:");
+-    PrintDebug("    phoneme_ids shape: [{}, {}], dtype: {}",
+-              phoneme_ids->Shape()[0], phoneme_ids->Shape()[1],
+-              phoneme_ids->Type() == Model::DataType::kInt64 ? "int64" : "other");
+-    if (phoneme_ids->ElementCount() > 5) {
+-      auto* p_ids = phoneme_ids->Data<int64_t>();
+-      PrintDebug("    phoneme_ids[0..4]: {}, {}, {}, {}, {}", p_ids[0], p_ids[1], p_ids[2], p_ids[3], p_ids[4]);
+-    }
+-    PrintDebug("    prompts shape: [{}, {}], dtype: {}",
+-              prompts->Shape()[0], prompts->Shape()[1],
+-              prompts->Type() == Model::DataType::kInt64 ? "int64" : "other");
+-    if (prompts->ElementCount() > 5) {
+-      auto* p_prompts = prompts->Data<int64_t>();
+-      PrintDebug("    prompts[0..4]: {}, {}, {}, {}, {}", p_prompts[0], p_prompts[1], p_prompts[2], p_prompts[3], p_prompts[4]);
+-    }
+-    PrintDebug("    bert_feature shape: [{}, {}, {}], dtype: {}",
+-              all_bert->Shape()[0], all_bert->Shape()[1], all_bert->Shape()[2],
+-              all_bert->Type() == Model::DataType::kFloat16 ? "float16" : "float32");
+-
+-    // Run GPT Encoder
+-    auto encoder_output = m_gpt_encoder_model->Encode(
+-        phoneme_ids.get(), prompts.get(), all_bert.get());
+-
+-    if (encoder_output.topk_values && encoder_output.topk_values->ElementCount() > 0) {
+-      auto topk_values_cpu = encoder_output.topk_values->To(
+-          Model::Device(Model::DeviceType::kCPU), Model::DataType::kFloat32);
+-      const float* enc_values = topk_values_cpu->Data<float>();
+-      int enc_k = topk_values_cpu->ElementCount();
+-      
+-      PrintDebug("  GPT Encoder topk_values[0..5]: {:.4f}, {:.4f}, {:.4f}, {:.4f}, {:.4f}",
+-                enc_values[0], enc_values[1], enc_values[2], enc_values[3], enc_values[4]);
+-
+-      bool enc_has_nan = false;
+-      for (int j = 0; j < enc_k; ++j) {
+-        if (!std::isfinite(enc_values[j])) {
+-          enc_has_nan = true;
+-          break;
+-        }
+-      }
+-      if (enc_has_nan) {
+-        PrintError("GPT Encoder topk_values contains NaN/Inf!");
+-      }
+-    }
+-
+-    // Sample first token
+-    int64_t first_token =
+-        SampleTopK(encoder_output.topk_values.get(),
+-                   encoder_output.topk_indices.get(), temperature);
+-
+-    PrintDebug("  First sampled token: {}", first_token);
+-
+-    // Prepare semantic list
+-    std::vector<std::unique_ptr<Model::Tensor>> decoded_semantic_list;
+-    decoded_semantic_list.push_back(speaker_info.m_vq_codes->Clone());
+-
+-    auto first_token_tensor = Model::Tensor::Empty(
+-        {1, 1}, Model::DataType::kInt64, Model::DeviceType::kCPU);
+-    first_token_tensor->At<int64_t>(0) = first_token;
+-
+-    // GPT Step loop
+-    auto current_samples = first_token_tensor->Clone();
+-
+-    decoded_semantic_list.push_back(std::move(first_token_tensor));
+-    auto k_cache = encoder_output.kv_cache->CurrentK()->Clone();
+-    auto v_cache = encoder_output.kv_cache->CurrentV()->Clone();
+-    auto x_len = Model::Tensor::Empty({1}, Model::DataType::kInt64, Model::DeviceType::kCPU);
+-    x_len->At<int64_t>(0) = encoder_output.x_len;
+-    auto y_len = Model::Tensor::Empty({1}, Model::DataType::kInt64, Model::DeviceType::kCPU);
+-    y_len->At<int64_t>(0) = encoder_output.y_len;
+-
+-    int max_steps = 1500;
+-    int64_t eos_token = 1024;
+-    int steps = 0;
+-    int consecutive_invalid_count = 0;  // 连续无效输出计数
+-    const int max_consecutive_invalid = 10;  // 允许的最大连续无效次数
+-
+-    auto gpt_gen_start = std::chrono::steady_clock::now();
+-    for (int i = 0; i < max_steps; ++i) {
+-      auto idx_tensor = Model::Tensor::Empty({1}, Model::DataType::kInt64,
+-                                             Model::DeviceType::kCPU);
+-      idx_tensor->At<int64_t>(0) = i;
+-
+-      // if (i == 0) {
+-      //   PrintDebug("  GPT Step #0: idx={}, current_samples={}",
+-      //             idx_tensor->At<int64_t>(0), current_samples->At<int64_t>(0));
+-      //   if (x_len && x_len->ElementCount() > 0) {
+-      //     PrintDebug("  x_len={}", x_len->ToCPU()->At<int64_t>(0));
+-      //   }
+-      //   if (y_len && y_len->ElementCount() > 0) {
+-      //     PrintDebug("  y_len={}", y_len->ToCPU()->At<int64_t>(0));
+-      //   }
+-      // }
+-
+-      auto step_output = m_gpt_step_model->Step(
+-          current_samples.get(), k_cache.get(), v_cache.get(), idx_tensor.get(),
+-          x_len.get(), y_len.get());
+-
+-      // 检查输出是否有效
+-      bool output_valid = true;
+-      if (!step_output.topk_values || step_output.topk_values->ElementCount() == 0) {
+-        PrintError("GPT Step {}: topk_values is empty!", i);
+-        output_valid = false;
+-      } else {
+-        // 确保数据在CPU上且为Float32，用于检查
+-        auto topk_values_cpu = step_output.topk_values->To(
+-            Model::Device(Model::DeviceType::kCPU), Model::DataType::kFloat32);
+-        const float* values = topk_values_cpu->Data<float>();
+-        int k = topk_values_cpu->ElementCount();
+-        bool has_nan = false;
+-        for (int j = 0; j < k; ++j) {
+-          if (!std::isfinite(values[j])) {
+-            has_nan = true;
+-            break;
+-          }
+-        }
+-        if (has_nan) {
+-          PrintError("GPT Step {}: topk_values contains NaN/Inf!", i);
+-          output_valid = false;
+-        }
+-      }
+-
+-      if (!output_valid) {
+-        consecutive_invalid_count++;
+-        if (consecutive_invalid_count >= max_consecutive_invalid) {
+-          PrintError("GPT Step failed {} times consecutively, terminating generation at step {}", consecutive_invalid_count, i);
+-          break;
+-        }
+-        // 使用上一次的token继续
+-        int64_t last_valid_token = current_samples->At<int64_t>(0);
+-        auto next_token_tensor = Model::Tensor::Empty(
+-            {1, 1}, Model::DataType::kInt64, Model::DeviceType::kCPU);
+-        next_token_tensor->At<int64_t>(0) = last_valid_token;
+-        current_samples = next_token_tensor->Clone();
+-        decoded_semantic_list.push_back(std::move(next_token_tensor));
+-        steps++;
+-        continue;
+-      }
+-
+-      consecutive_invalid_count = 0;  // 重置计数器
+-
+-      // Update cache
+-      k_cache = std::move(step_output.k_cache_new);
+-      v_cache = std::move(step_output.v_cache_new);
+-
+-      // Sample next token
+-      int64_t next_token =
+-          SampleTopK(step_output.topk_values.get(),
+-                     step_output.topk_indices.get(), temperature);
+-
+-      // 检查token有效性
+-      if (next_token < 0 || next_token >= 1025) {
+-        PrintWarn("GPT Step {}: Generated invalid token {}, clamping to valid range", i, next_token);
+-        next_token = std::max<int64_t>(0, std::min<int64_t>(next_token, 1024));
+-      }
+-
+-      auto next_token_tensor = Model::Tensor::Empty(
+-          {1, 1}, Model::DataType::kInt64, Model::DeviceType::kCPU);
+-      next_token_tensor->At<int64_t>(0) = next_token;
+-
+-      // 先clone用于下一次step的输入
+-      current_samples = next_token_tensor->Clone();
+-      // 然后move到语义列表
+-      decoded_semantic_list.push_back(std::move(next_token_tensor));
+-
+-      steps++;
+-
+-      // Check for EOS
+-      if (next_token == eos_token) {
+-        PrintInfo("Generated {} tokens before EOS", steps);
+-        break;
+-      }
+-
+-      // 定期打印进度
+-      if (steps % 100 == 0) {
+-        PrintDebug("  GPT generation progress: {} tokens generated", steps);
+-      }
+-    }
+-
+-    if (steps >= max_steps) {
+-      PrintWarn("GPT generation reached max_steps ({}) without EOS", max_steps);
+-    }
+-
+-    {
+-      double gpt_time_s = std::chrono::duration<double>(
+-          std::chrono::steady_clock::now() - gpt_gen_start).count();
+-      PrintInfo("[GPTSoVITSPipline] GPT generation: {} tokens in {:.3f}s ({:.2f} tokens/s)",
+-                steps, gpt_time_s, steps / gpt_time_s);
+-      if (stats) {
+-        stats->gpt_tokens += steps;
+-        stats->gpt_time_s += gpt_time_s;
+-      }
+-    }
+-
+-    // Concatenate all semantic tokens (确保全在CPU上，以便处理)
+-    std::vector<std::unique_ptr<Model::Tensor>> semantic_cpu_list;
+-    std::vector<Model::Tensor*> semantic_ptrs;
+-    for (const auto& s : decoded_semantic_list) {
+-      semantic_cpu_list.push_back(s->ToCPU());
+-      semantic_ptrs.push_back(semantic_cpu_list.back().get());
+-    }
+-    auto pred_semantic = Model::Tensor::Concat(semantic_ptrs, 1);
+-
+-    // Remove prompt part
+-    int prompt_len = speaker_info.m_vq_codes->Shape()[1];
+-    auto generated_sem =
+-        Model::Tensor::Empty({1, 1, pred_semantic->Shape()[1] - prompt_len},
+-                             Model::DataType::kInt64, Model::DeviceType::kCPU);
+-
+-    auto pred_semantic_data = pred_semantic->Data<int64_t>();
+-    auto generated_sem_data = generated_sem->Data<int64_t>();
+-    std::memcpy(generated_sem_data, pred_semantic_data + prompt_len,
+-                (pred_semantic->Shape()[1] - prompt_len) * sizeof(int64_t));
+-
+-    // Remove trailing EOS
+-    if (generated_sem->Shape()[2] > 0) {
+-      int64_t last_token =
+-          generated_sem->At<int64_t>(generated_sem->Shape()[2] - 1);
+-      if (last_token == eos_token) {
+-        auto trimmed_sem = Model::Tensor::Empty(
+-            {1, 1, generated_sem->Shape()[2] - 1}, Model::DataType::kInt64,
+-            Model::DeviceType::kCPU);
+-        std::memcpy(trimmed_sem->Data<int64_t>(),
+-                    generated_sem->Data<int64_t>(),
+-                    (generated_sem->Shape()[2] - 1) * sizeof(int64_t));
+-        generated_sem = std::move(trimmed_sem);
+-      }
+-    }
+-
+-    // SoVITS解码
+-    // (1, seq_len)
+-    auto text_seq_tensor = target_phones->To(Model::Device(Model::DeviceType::kCPU), Model::DataType::kInt64);
+-    if (text_seq_tensor->Shape().size() == 1) {
+-      text_seq_tensor->Reshape({1, text_seq_tensor->Shape()[0]});
+-    }
+-
+-    // 参考谱图
+-    auto refer_spec_reshaped = speaker_info.m_refer_spec->Clone();
+-    if (refer_spec_reshaped->Shape().size() == 2) {
+-      refer_spec_reshaped->Reshape({1, refer_spec_reshaped->Shape()[0],
+-                                    refer_spec_reshaped->Shape()[1]});
+-    }
+-
+-    // SV embedding
+-    auto sv_emb_reshaped = speaker_info.m_sv_emb->Clone();
+-    if (sv_emb_reshaped->Shape().size() == 1) {
+-      sv_emb_reshaped->Reshape({1, sv_emb_reshaped->Shape()[0]});
+-    }
+-
+-    // 生成音频
+-    PrintDebug("  SoVITS decoding...");
+-    auto t_sovits_start = std::chrono::steady_clock::now();
+-    auto audio_output = m_sovits_model->GenerateTensor(
+-        generated_sem.get(), text_seq_tensor.get(), refer_spec_reshaped.get(),
+-        sv_emb_reshaped.get(), noise_scale, speed);
+-    if (stats) {
+-      stats->sovits_time_s += std::chrono::duration<double>(
+-          std::chrono::steady_clock::now() - t_sovits_start).count();
+-    }
+-
+-    if (audio_output && audio_output->ElementCount() > 0) {
+-      auto audio_cpu = audio_output->To(Model::Device(Model::DeviceType::kCPU), Model::DataType::kFloat32);
+-      const float* audio_data = audio_cpu->Data<float>();
+-      size_t audio_len = audio_cpu->ElementCount();
+-
+-      // 去除DC偏移（每个segment单独处理，防止漂移）
+-      std::vector<float> segment_audio(audio_data, audio_data + audio_len);
+-      float mean_val =
+-          std::accumulate(segment_audio.begin(), segment_audio.end(), 0.0f) /
+-          audio_len;
+-      for (auto& sample : segment_audio) {
+-        sample -= mean_val;
+-      }
+-
+-      // 添加到最终音频
+-      final_audio.insert(final_audio.end(), segment_audio.begin(),
+-                         segment_audio.end());
+-      PrintDebug("  Generated {} audio samples for segment {}", audio_len,
+-                seg_idx + 1);
+-    } else {
+-      PrintWarn("  SoVITS generated empty audio for segment {}", seg_idx + 1);
+-    }
+-
+-    // 添加停顿
+-    if (seg_idx < segments.size() - 1) {
+-      int pause_samples = static_cast<int>(m_config_params.sampling_rate * 0.3f);
+-      final_audio.insert(final_audio.end(), pause_samples, 0.0f);
+-    }
+-  }
+-
+-  // RMS + Peak 组合归一化
+-  if (!final_audio.empty()) {
+-    LoudnessConfig loudness_config;
+-    loudness_config.target_rms = 0.18f;      // 目标 RMS (~-15dBFS)
+-    loudness_config.max_gain = 10.0f;        // 最大增益
+-    loudness_config.min_gain = 0.1f;         // 最小增益
+-    loudness_config.enable_peak_limiting = true;
+-    loudness_config.peak_threshold = 0.9f;   // 峰值限制阈值
+-    
+-    LoudnessNormalizer normalizer(loudness_config);
+-    
+-    float gain = normalizer.NormalizeCombined(final_audio);
+-    float rms = normalizer.CalculateRMS(final_audio);
+-    float peak = normalizer.CalculatePeak(final_audio);
+-    
+-    PrintDebug("Final audio: {} samples ({} seconds), gain: {:.4f}, RMS: {:.4f}, peak: {:.4f}",
+-              final_audio.size(),
+-              static_cast<float>(final_audio.size()) / m_config_params.sampling_rate,
+-              gain, rms, peak);
+-
+-    return AudioTools::FromByte(final_audio,m_config_params.sampling_rate);
+-  } else {
+-    PrintWarn("Generated empty audio");
+-    return AudioTools::FromEmpty(m_config_params.sampling_rate);
+-  }
+-}
+-
+-std::unique_ptr<AudioTools> GPTSoVITSPipline::InferSpeaker(
+-    const std::string& speaker_name, const std::string& text,
+-    const std::string& text_lang, const Model::SampleConfig& sample_config,
+-    float noise_scale, float speed, Model::InferStats* stats) {
+-  return InferSpeaker(speaker_name, text, text_lang,
+-                      sample_config.temperature, noise_scale, speed, stats);
+-}
+-
+-int64_t GPTSoVITSPipline::SampleTopK(const Model::Tensor* topk_values,
+-                                     const Model::Tensor* topk_indices,
+-                                     float temperature) {
+-  return Utils::SampleTopK(topk_values, topk_indices, temperature);
+-}
+-
+-std::unique_ptr<Model::Tensor> GPTSoVITSPipline::ConcatTensor(
+-    const Model::Tensor* a, const Model::Tensor* b, int axis) {
+-  std::vector<Model::Tensor*> tensors = {const_cast<Model::Tensor*>(a),
+-                                         const_cast<Model::Tensor*>(b)};
+-  return Model::Tensor::Concat(tensors, axis);
+-}
+-
+-void GPTSoVITSPipline::DetectModelPrecision() {
+-  // 通过检查GPT Encoder的输入数据类型来检测模型精度
+-  if (m_gpt_encoder_model && m_gpt_encoder_model->GetModel()) {
+-    auto dtype =
+-        m_gpt_encoder_model->GetModel()->GetInputDataType("bert_feature");
+-    if (dtype == Model::DataType::kFloat16) {
+-      m_compute_precision = Model::DataType::kFloat16;
+-      PrintInfo("Detected FP16 model from GPT Encoder input");
+-    } else {
+-      m_compute_precision = Model::DataType::kFloat32;
+-      PrintInfo("Detected FP32 model from GPT Encoder input");
+-    }
+-  } else {
+-    PrintWarn("Failed to detect model precision, defaulting to FP32");
+-    m_compute_precision = Model::DataType::kFloat32;
+-  }
+-}
+-
+-// ============ 说话人数据导入/导出方法 ============
+-
+-bool GPTSoVITSPipline::ExportSpeaker(const std::string& speaker_name,
+-                                     const std::string& output_path,
+-                                     bool include_audio) {
+-  auto iter = m_speaker_map.find(speaker_name);
+-  if (iter == m_speaker_map.end()) {
+-    PrintError("[GPTSoVITSPipline] Speaker '{}' not found", speaker_name);
+-    return false;
+-  }
+-
+-  PrintInfo("[GPTSoVITSPipline] Exporting speaker '{}' to: {}",
+-            speaker_name, output_path);
+-
+-  bool success = Utils::SpeakerSerializer::SerializeToFile(
+-      iter->second, output_path, include_audio);
+-
+-  if (success) {
+-    auto package_size = Utils::SpeakerSerializer::GetPackageSize(output_path);
+-    PrintInfo("[GPTSoVITSPipline] Successfully exported speaker '{}', package size: {} bytes",
+-              speaker_name, package_size);
+-  }
+-
+-  return success;
+ }
+-
+-bool GPTSoVITSPipline::ImportSpeaker(const std::string& input_path,
+-                                     const std::string& speaker_name) {
+-  PrintInfo("[GPTSoVITSPipline] Importing speaker from: {}", input_path);
+-
+-  // 验证数据包
+-  if (!Utils::SpeakerSerializer::ValidatePackage(input_path)) {
+-    PrintError("[GPTSoVITSPipline] Invalid speaker package: {}", input_path);
+-    return false;
+-  }
+-
+-  // 获取数据包信息
+-  auto package_info = Utils::SpeakerSerializer::GetPackageInfo(input_path);
+-  if (!package_info) {
+-    PrintError("[GPTSoVITSPipline] Failed to read package info: {}", input_path);
+-    return false;
+-  }
+-
+-  // 确定说话人名称
+-  std::string final_name = speaker_name.empty() ?
+-      package_info->speaker_name : speaker_name;
+-
+-  // 检查是否已存在
+-  if (m_speaker_map.find(final_name) != m_speaker_map.end()) {
+-    PrintWarn("[GPTSoVITSPipline] Speaker '{}' already exists, will be overwritten",
+-             final_name);
+-  }
+-
+-  // 反序列化
+-  auto speaker_info = Utils::SpeakerSerializer::DeserializeFromFile(input_path);
+-  if (!speaker_info) {
+-    PrintError("[GPTSoVITSPipline] Failed to deserialize speaker from: {}", input_path);
+-    return false;
+-  }
+-
+-  // 更新说话人名称
+-  speaker_info->m_speaker_name = final_name;
+-
+-  // 存储到映射表
+-  m_speaker_map[final_name] = std::move(*speaker_info);
+-
+-  PrintInfo("[GPTSoVITSPipline] Successfully imported speaker '{}', lang: {}",
+-            final_name, speaker_info->m_speaker_lang);
+-
+-  return true;
+-}
+-
+-}  // namespace GPTSoVITS
+\ No newline at end of file
+diff --git a/src/InferencePipeline.cpp b/src/InferencePipeline.cpp
+index b813bd3..0cd8a34 100644
+--- a/src/InferencePipeline.cpp
++++ b/src/InferencePipeline.cpp
+@@ -2,6 +2,7 @@
+ // Created by 19254 on 2026/2/8.
+ //
+ #include "GPTSoVITS/InferencePipeline.h"
++#include "StreamingVocoder.hpp"
+ 
+ #include <algorithm>
+ #include <chrono>
+@@ -20,6 +21,7 @@
+ #include "GPTSoVITS/Utils/LoudnessNormalizer.h"
+ #include "GPTSoVITS/Utils/Precision.h"
+ #include "GPTSoVITS/Utils/Sampling.h"
++#include "GPTSoVITS/Utils/MamboDecoder.h"
+ #include "GPTSoVITS/Utils/speaker_serializer.h"
+ #include "GPTSoVITS/model/CNBertModel.h"
+ #include "GPTSoVITS/model/backend/onnx_backend.h"
+@@ -69,7 +71,24 @@ public:
+       : config(cfg),
+         model_pool(Model::ModelPool::Instance()),
+         speaker_manager(SpeakerManager::Instance()) {
+-    Initialize();
++    try {
++      Initialize();
++    } catch (...) {
++      Shutdown();
++      throw;
++    }
++  }
++  ~Impl() { Shutdown(); }
++  void Shutdown() {
++    for (const auto& name : speaker_manager.ListSpeakers())
++      speaker_manager.RemoveSpeaker(name);
++    speaker_manager.SetG2PPipeline(nullptr);
++    speaker_manager.SetModelPool(nullptr);
++    speaker_manager.SetDeviceContext(nullptr);
++    g2p_pipeline.reset();
++    model_pool.UnloadAll();
++    model_pool.SetDeviceContext(nullptr);
++    Core::DeviceContext::SetDefault(nullptr);
+   }
+   void Initialize() {
+     // 创建设备上下文
+@@ -158,13 +177,13 @@ public:
+                                     config.model_path, device,
+                                     config.compute_precision);
+     }
+-    if (config.backend != Model::BackendType::kAuto
+-        || !config.engine_cache_dir.empty()) {
++    {
+       auto group = config.mode == PipelineMode::kFull
+                        ? Model::ModelGroup::kAll
+                        : Model::ModelGroup::kInference;
+       for (auto type : Model::GetModelTypesInGroup(group)) {
+         model_pool.UpdateConfig(type, [&](Model::ModelConfig& cfg) {
++          cfg.thread_num = config.thread_num;
+           if (config.backend != Model::BackendType::kAuto)
+             cfg.backend = config.backend;
+           if (!config.engine_cache_dir.empty())
+@@ -191,35 +210,40 @@ public:
+     auto bert_engine_path = std::filesystem::path(config.model_path) / "bert.engine";
+     auto tokenizer_path   = resources_path / "bert_tokenizer.json";
+     // TRT backend 优先找 .engine，再找 .onnx
++#ifdef WITH_TENSORRT
+     bool use_trt = config.backend == Model::BackendType::kTensorRT;
++#else
++    bool use_trt = false;
++#endif
+     auto bert_path = (use_trt && std::filesystem::exists(bert_engine_path))
+                          ? bert_engine_path
+                          : bert_onnx_path;
+     if (std::filesystem::exists(bert_path)) {
++#ifdef WITH_TENSORRT
+       if (use_trt) {
+         Model::BackendConfig bert_cfg;
+         bert_cfg.device = device_ctx->GetDevice();
+         bert_cfg.engine_cache_dir = config.engine_cache_dir;
+         bert_model->Init<Model::TensorRTBackend>(
+             bert_path.string(), tokenizer_path.string(), bert_cfg);
+-      } else {
++      } else
++#endif
++      {
+         bert_model->Init<Model::ONNXBackend>(
+-            bert_onnx_path.string(), tokenizer_path.string(), device_ctx->GetDevice());
++            bert_onnx_path.string(), tokenizer_path.string(), device_ctx->GetDevice(), config.thread_num);
+       }
+       g2p_pipeline->RegisterLangProcess("zh", std::make_unique<G2P::G2PZH>(),
+                                         std::move(bert_model), true);
+     }
+     g2p_pipeline->RegisterLangProcess("en", std::make_unique<G2P::G2PEN>(),
+                                       nullptr, true);
+-    g2p_pipeline->RegisterLangProcess("ja", std::make_unique<G2P::G2PJA>(),
+-                                      nullptr, true);
+     g2p_pipeline->SetDefaultLang(config.default_lang);
+   }
+-  bool CanCreateSpeaker() const { return config.mode == PipelineMode::kFull; }
+   std::unique_ptr<AudioTools> InferSegment(
+       SpeakerFeatures& speaker, const std::string& text,
+       const std::string& lang, const Model::SampleConfig& sample_config,
+-      float noise_scale, float speed, Model::InferStats* stats = nullptr) {
++      float noise_scale, float speed, Model::InferStats* stats = nullptr,
++      const std::function<void(const std::vector<float>&)>& on_pcm = {}) {
+     PrintDebug("[InferencePipeline] Inferring segment: {}", text);
+     auto device = device_ctx->GetDevice();
+ 
+@@ -255,7 +279,9 @@ public:
+     auto refer_spec = speaker.GetReferSpec(device, Model::DataType::kFloat32);  // refer_spec通常为FP32
+     auto sv_emb = speaker.GetSVEmbedding(device, Model::DataType::kFloat32);    // sv_emb通常为FP32
+ 
+-    if (!vq_codes || !refer_spec || !sv_emb) {
++    const auto& sovits_inputs = sovits->GetModel()->GetInputNames();
++    const bool needs_sv = std::find(sovits_inputs.begin(), sovits_inputs.end(), "sv_emb") != sovits_inputs.end();
++    if (!vq_codes || !refer_spec || (needs_sv && !sv_emb)) {
+       PrintError("[InferencePipeline] Speaker features incomplete");
+       return nullptr;
+     }
+@@ -327,252 +353,12 @@ public:
+                all_bert->Shape()[0], all_bert->Shape()[1], all_bert->Shape()[2],
+                prompts->Shape()[0], prompts->Shape()[1]);
+ 
+-    // ================================================================
+-    // GPT Encoder
+-    // ================================================================
+-    auto encoder_output =
+-        gpt_encoder->Encode(phoneme_ids.get(), prompts.get(), all_bert.get());
+-
+-    // 采样第一个 token
+-    if (encoder_output.topk_indices && encoder_output.topk_values) {
+-      auto idx_cpu = encoder_output.topk_indices->ToCPU();
+-      auto val_cpu = encoder_output.topk_values->To(
+-          Model::Device(Model::DeviceType::kCPU), Model::DataType::kFloat32);
+-      std::string idx_str, val_str;
+-      int n = std::min((int)idx_cpu->ElementCount(), 5);
+-      for (int i = 0; i < n; ++i) {
+-        idx_str += std::to_string(idx_cpu->At<int64_t>(i)) + " ";
+-        val_str += std::to_string(val_cpu->Data<float>()[i]) + " ";
+-      }
+-      PrintDebug("[InferencePipeline] Encoder topk_indices dtype={} (first {}): {}",
+-                 static_cast<int>(encoder_output.topk_indices->Type()), n, idx_str);
+-      PrintDebug("[InferencePipeline] Encoder topk_values  dtype={} (first {}): {}",
+-                 static_cast<int>(encoder_output.topk_values->Type()), n, val_str);
+-    }
+-    int64_t first_token = Utils::SampleTopK(encoder_output.topk_values.get(),
+-                                            encoder_output.topk_indices.get(),
+-                                            sample_config.temperature);
+-    PrintDebug("[InferencePipeline] First sampled token: {}", first_token);
+-
+-    // ================================================================
+-    // GPT Step 自回归生成
+-    // ================================================================
+-    const int64_t kv_max_len  = encoder_output.kv_cache->MaxSeqLen();
+-    const int64_t x_len_val   = encoder_output.x_len;
+-    const int64_t y_len_val   = encoder_output.y_len;
+-    const int64_t max_gen_len = kv_max_len - x_len_val - y_len_val - 1;
+-    const int max_steps = static_cast<int>(
+-        std::min((int64_t)1000, std::max((int64_t)1, max_gen_len)));
+-    PrintDebug("[InferencePipeline] KV cache: max={}, base={}+{}={}, max_gen_len={}, max_steps={}",
+-               kv_max_len, x_len_val, y_len_val, x_len_val + y_len_val, max_gen_len, max_steps);
+-
+-    int64_t current_token = first_token;
+-
+-    std::vector<int64_t> generated_tokens;
+-    const int64_t eos_token = 1024;
+-
+-    // 始终将第一个 token 加入（即使是 EOS）
+-    generated_tokens.push_back(first_token);
+-
+-    int consecutive_invalid_count = 0;
+-    const int max_consecutive_invalid = 10;
+-
+-    // 记录 GPT 生成开始时间（用于计算 tokens/s）
+-    auto gpt_gen_start = std::chrono::steady_clock::now();
+-
+-    // 如果第一个 token 就是 EOS，跳过循环
+-    if (first_token == eos_token) {
+-      PrintDebug("[InferencePipeline] First token is EOS, skipping generation loop");
+-    }
+-
+-    // 双缓冲上下文 — CreateContext(KVCacheBuffer) 内部处理初始 k/v 拷贝
+-    int top_k = static_cast<int>(encoder_output.topk_values->Shape().back());
+-    auto gpt_ctx = gpt_step->CreateContext(
+-        *encoder_output.kv_cache,
+-        max_steps,
+-        top_k
+-    );
+-
+-    bool use_gpu_sampling = false;
+-#ifdef WITH_CUDA
+-    if (target_device.type == Model::DeviceType::kCUDA) {
+-      use_gpu_sampling = gpt_step->EnableGPUSampling(gpt_ctx.get());
+-      if (use_gpu_sampling) {
+-        PrintInfo("[InferencePipeline] GPU sampling enabled for GPT generation");
+-      }
+-    }
+-#endif
+-
+-    // GPU 采样路径
+-    if (use_gpu_sampling) {
+-#ifdef WITH_CUDA
+-      for (int step = 0; step < max_steps && first_token != eos_token; ++step) {
+-        bool step_ok = gpt_step->StepWithGPUSampling(
+-            gpt_ctx.get(),
+-            current_token,
+-            step,
+-            x_len_val,
+-            y_len_val,
+-            sample_config.temperature
+-        );
+-
+-        if (!step_ok) {
+-          consecutive_invalid_count++;
+-          if (consecutive_invalid_count >= max_consecutive_invalid) {
+-            PrintError("[InferencePipeline] GPT Step failed {} times, stopping",
+-                       consecutive_invalid_count);
+-            break;
+-          }
+-          generated_tokens.push_back(current_token);
+-          continue;
+-        }
+-
+-        consecutive_invalid_count = 0;
+-
+-        // 从 GPU 获取采样的 token
+-        int64_t next_token = gpt_step->GetSampledTokenGPU(gpt_ctx.get());
+-
+-        // Token 有效性检查
+-        if (next_token < 0 || next_token > eos_token) {
+-          next_token = std::clamp(next_token, (int64_t)0, eos_token);
+-        }
+-
+-        current_token = next_token;
+-        generated_tokens.push_back(next_token);
+-
+-        if (next_token == eos_token) {
+-          PrintDebug("[InferencePipeline] EOS at step {}", step);
+-          break;
+-        }
+-      }
+-#endif
+-    } else {
+-      // CPU 采样路径 (原有逻辑，优化了 D2H)
+-      std::unique_ptr<Model::Tensor> topk_values_cpu, topk_indices_cpu;
+-#ifdef WITH_CUDA
+-      if (target_device.type == Model::DeviceType::kCUDA) {
+-        void* pv = nullptr; void* pi = nullptr;
+-        cudaMallocHost(&pv, top_k * sizeof(float));
+-        cudaMallocHost(&pi, top_k * sizeof(int64_t));
+-        topk_values_cpu = Model::Tensor::CreateFromHost(
+-            pv, {1, top_k}, Model::DataType::kFloat32, [](void* p){ cudaFreeHost(p); });
+-        topk_indices_cpu = Model::Tensor::CreateFromHost(
+-            pi, {1, top_k}, Model::DataType::kInt64, [](void* p){ cudaFreeHost(p); });
+-      } else
+-#endif
+-      {
+-        topk_values_cpu = Model::Tensor::Empty(
+-            {1, top_k}, Model::DataType::kFloat32, Model::DeviceType::kCPU);
+-        topk_indices_cpu = Model::Tensor::Empty(
+-            {1, top_k}, Model::DataType::kInt64, Model::DeviceType::kCPU);
+-      }
+-
+-      for (int step = 0; step < max_steps && first_token != eos_token; ++step) {
+-
+-        bool step_ok = gpt_step->StepWithContext(
+-            gpt_ctx.get(),
+-            current_token,
+-            step,
+-            x_len_val,
+-            y_len_val
+-        );
+-
+-        if (!step_ok) {
+-          consecutive_invalid_count++;
+-          if (consecutive_invalid_count >= max_consecutive_invalid) {
+-            PrintError("[InferencePipeline] GPT Step failed {} times, stopping",
+-                       consecutive_invalid_count);
+-            break;
+-          }
+-          generated_tokens.push_back(current_token);
+-          continue;
+-        }
+-
+-        consecutive_invalid_count = 0;
+-
+-        {
+-          auto tv = gpt_ctx->topk_values->To(Model::Device(Model::DeviceType::kCPU), Model::DataType::kFloat32);
+-          std::memcpy(topk_values_cpu->Data(), tv->Data(), topk_values_cpu->ByteSize());
+-        }
+-        {
+-          auto ti = gpt_ctx->topk_indices->To(Model::Device(Model::DeviceType::kCPU), Model::DataType::kInt64);
+-          std::memcpy(topk_indices_cpu->Data(), ti->Data(), topk_indices_cpu->ByteSize());
+-        }
+-
+-        // 采样下一个 token
+-        int64_t next_token = Utils::SampleTopK(topk_values_cpu.get(),
+-                                               topk_indices_cpu.get(),
+-                                               sample_config.temperature);
+-
+-        // Token 有效性检查
+-        if (next_token < 0 || next_token > eos_token) {
+-          next_token = std::clamp(next_token, (int64_t)0, eos_token);
+-        }
+-
+-        // 更新 current_token
+-        current_token = next_token;
+-        generated_tokens.push_back(next_token);
+-
+-        if (next_token == eos_token) {
+-          PrintDebug("[InferencePipeline] EOS at step {}", step);
+-          break;
+-        }
+-      }
+-    }
+-
+-    // 计算 GPT 生成性能
+-    auto gpt_gen_end = std::chrono::steady_clock::now();
+-    double gpt_gen_time_s = std::chrono::duration<double>(gpt_gen_end - gpt_gen_start).count();
+-    double tokens_per_sec = generated_tokens.size() / gpt_gen_time_s;
+-    PrintInfo("[InferencePipeline] GPT generation: {} tokens in {:.3f}s ({:.2f} tokens/s)",
+-              generated_tokens.size(), gpt_gen_time_s, tokens_per_sec);
+-    if (stats) {
+-      stats->gpt_tokens += static_cast<int>(generated_tokens.size());
+-      stats->gpt_time_s += gpt_gen_time_s;
+-    }
+-
+-    if (generated_tokens.empty()) {
+-      PrintWarn("[InferencePipeline] No tokens generated");
+-      return AudioTools::FromByte({}, sampling_rate);
+-    }
+-
+-    PrintDebug("[InferencePipeline] Generated {} tokens", generated_tokens.size());
+-
+-    // ================================================================
+-    // 构建 generated_sem
+-    // ================================================================
+-    int generated_len = static_cast<int>(generated_tokens.size());
+-
+-    // 移除末尾的 EOS token
+-    if (!generated_tokens.empty() && generated_tokens.back() == eos_token) {
+-      generated_tokens.pop_back();
+-      generated_len--;
+-    }
+-
+-    if (generated_len <= 0) {
+-      PrintWarn("[InferencePipeline] Generated semantic length is non-positive (text too short or model output EOS immediately), returning silence");
+-      std::vector<float> silence(sampling_rate / 10, 0.0f);  // 0.1秒静音
+-      return AudioTools::FromByte(silence, sampling_rate);
+-    }
+-
+-    // 创建 generated_sem tensor (1, 1, generated_len)
+-    auto generated_sem = Model::Tensor::Empty({1, 1, generated_len},
+-                                              Model::DataType::kInt64,
+-                                              Model::DeviceType::kCPU);
+-    std::memcpy(generated_sem->Data<int64_t>(), generated_tokens.data(),
+-                generated_len * sizeof(int64_t));
+-
+-    // ================================================================
+     // SoVITS 解码
+     // ================================================================
+     auto sovits_device = sovits->GetModel()->GetDevice();
+     auto pred_dtype = sovits->GetModel()->GetInputDataType("pred_semantic");
+     auto text_dtype = sovits->GetModel()->GetInputDataType("text_seq");
+     auto spec_dtype = sovits->GetModel()->GetInputDataType("refer_spec");
+-    auto sv_dtype = sovits->GetModel()->GetInputDataType("sv_emb");
+-
+-    // 直接构建正确形状的输入，避免 reshape
+-    auto pred_semantic_final = generated_sem->To(sovits_device, pred_dtype);
+ 
+     // text_seq: 直接从 PhoneSeq 构建 (1, seq_len)
+     auto text_seq = target_bert_res->PhoneSeq->To(
+@@ -595,11 +381,29 @@ public:
+     // sv_emb: 确保 2D
+     Model::Tensor* sv_emb_ptr = sv_emb;
+     std::unique_ptr<Model::Tensor> sv_emb_reshaped;
+-    if (sv_emb->Shape().size() == 1) {
++    if (needs_sv && sv_emb->Shape().size() == 1) {
+       sv_emb_reshaped = sv_emb->View({1, sv_emb->Shape()[0]});
+       sv_emb_ptr = sv_emb_reshaped.get();
+     }
+-    auto sv_emb_final = sv_emb_ptr->To(sovits_device, sv_dtype);
++    auto sv_emb_final = needs_sv
++        ? sv_emb_ptr->To(sovits_device, sovits->GetModel()->GetInputDataType("sv_emb"))
++        : nullptr;
++
++    // The growing semantic decoder can feed bounded vocoder windows immediately.
++    auto gpt_start = std::chrono::steady_clock::now();
++    Utils::MamboDecoder decoder(*gpt_encoder->GetModel(), *gpt_step->GetModel(), max_len);
++    std::unique_ptr<StreamingVocoder> windowed;
++    if (on_pcm) windowed = std::make_unique<StreamingVocoder>(*sovits,
++        text_seq_final.get(), refer_spec_final.get(), sv_emb_final.get(),
++        WindowConfiguration{16, 24, 8, 4, 1280, 640}, on_pcm);
++    auto observer = [&](const std::vector<int64_t>& tokens, bool final) {
++      if (windowed) windowed->Accept(tokens, final);
++    };
++    auto generated_sem = decoder.Generate(phoneme_ids.get(), prompts.get(), all_bert.get(),
++        sample_config, stats, observer);
++    if (stats) stats->gpt_time_s += std::chrono::duration<double>(std::chrono::steady_clock::now()-gpt_start).count();
++    if (on_pcm) return AudioTools::FromByte({}, sampling_rate);
++    auto pred_semantic_final = generated_sem->To(sovits_device, pred_dtype);
+ 
+     // SoVITS 推理
+     auto t_sovits_start = std::chrono::steady_clock::now();
+@@ -676,21 +480,6 @@ std::string InferencePipeline::GetModelInfo() const {
+   oss << "  Speakers: " << impl_->speaker_manager.SpeakerCount() << "\n";
+   return oss.str();
+ }
+-bool InferencePipeline::CanCreateSpeaker() const {
+-  return impl_->CanCreateSpeaker();
+-}
+-// ============ 说话人管理 ============
+-SpeakerFeatures* InferencePipeline::CreateSpeaker(
+-    const std::string& name, const std::string& lang,
+-    const std::filesystem::path& ref_audio_path, const std::string& ref_text) {
+-  if (!CanCreateSpeaker()) {
+-    PrintError("[InferencePipeline] Cannot create speaker in Edge mode");
+-    return nullptr;
+-  }
+-  // TODO: 完整实现需要 G2P，后面再处理
+-  return impl_->speaker_manager.CreateSpeaker(name, lang, ref_audio_path,
+-                                              ref_text);
+-}
+ bool InferencePipeline::ImportSpeaker(const std::string& package_path,
+                                       const std::string& rename) {
+   return impl_->speaker_manager.ImportFromPackage(package_path, rename) !=
+@@ -720,7 +509,8 @@ std::unique_ptr<AudioTools> InferencePipeline::Infer(
+     const std::string& speaker_name, const std::string& text,
+     const std::string& lang, const Model::SampleConfig& sample_config,
+     float noise_scale, float speed, Model::InferStats* stats,
+-    std::function<void()> on_first_segment) {
++    std::function<void()> on_first_segment,
++    std::function<void(const std::vector<float>&)> on_pcm) {
+   auto* speaker = GetSpeaker(speaker_name);
+   if (!speaker) {
+     PrintError("[InferencePipeline] Speaker not found: {}", speaker_name);
+@@ -728,41 +518,8 @@ std::unique_ptr<AudioTools> InferencePipeline::Infer(
+   }
+   std::string use_lang = lang.empty() ? impl_->config.default_lang : lang;
+ 
+-  // 文本分句
+-  Text::Sentence sentence(Text::Sentence::SentenceSplitMethod::Punctuation);
+-  std::vector<std::string> segments;
+-  sentence.AppendCallBack([&segments](const std::string& s) -> bool {
+-    segments.push_back(s);
+-    return true;
+-  });
+-
+-  sentence.Append(text);
+-  sentence.Flush();
+-
+-  if (segments.empty()) {
+-    PrintWarn("[InferencePipeline] No text segments to process");
+-    return nullptr;
+-  }
+-
+-  // len(current) + len(s) < 20 则合并
+-  std::vector<std::string> merged_segments;
+-  std::string current;
+-  for (const auto& s : segments) {
+-    if (current.size() + s.size() < 20) {
+-      current += s;
+-    } else {
+-      if (!current.empty()) {
+-        merged_segments.push_back(current);
+-      }
+-      current = s;
+-    }
+-  }
+-  if (!current.empty()) {
+-    merged_segments.push_back(current);
+-  }
+-  segments = std::move(merged_segments);
+-
+-  PrintInfo("[InferencePipeline] Processing {} segments", segments.size());
++  // Application already supplies one bounded, decimal-safe text segment.
++  const std::vector<std::string> segments{text};
+ 
+   // 预加载说话人特征到设备（使用模型检测的精度）
+   speaker->EnsureOnDevice(impl_->device_ctx->GetDevice(), impl_->compute_precision);
+@@ -774,7 +531,7 @@ std::unique_ptr<AudioTools> InferencePipeline::Infer(
+                i + 1, segments.size(), segments[i]);
+ 
+     auto audio = impl_->InferSegment(*speaker, segments[i], use_lang,
+-                                     sample_config, noise_scale, speed, stats);
++                                     sample_config, noise_scale, speed, stats, on_pcm);
+     if (i == 0 && on_first_segment) {
+       on_first_segment();
+     }
+diff --git a/src/SpeakerManager.cpp b/src/SpeakerManager.cpp
+index 9dd3036..21a8622 100644
+--- a/src/SpeakerManager.cpp
++++ b/src/SpeakerManager.cpp
+@@ -49,164 +49,6 @@ Core::DeviceContext* SpeakerManager::GetDeviceContext() const {
+   return device_ctx_;
+ }
+ 
+-// ============ 创建说话人 ============
+-
+-SpeakerFeatures* SpeakerManager::CreateSpeaker(
+-    const std::string& name,
+-    const std::string& lang,
+-    const std::filesystem::path& ref_audio_path,
+-    const std::string& ref_text) {
+-  std::lock_guard<std::mutex> lock(mutex_);
+-
+-  // 检查是否已存在
+-  if (speakers_.find(name) != speakers_.end()) {
+-    PrintWarn("[SpeakerManager] Speaker '{}' already exists, will be overwritten", name);
+-  }
+-
+-  PrintInfo("[SpeakerManager] Creating speaker: {}", name);
+-
+-  // 验证模型池
+-  if (!model_pool_) {
+-    PrintError("[SpeakerManager] ModelPool not set, cannot create speaker");
+-    return nullptr;
+-  }
+-
+-  // 验证必要模型
+-  if (!model_pool_->IsRegistered(Model::ModelType::kSSL) ||
+-      !model_pool_->IsRegistered(Model::ModelType::kVQ)) {
+-    PrintError("[SpeakerManager] Required models (SSL, VQ) not registered");
+-    return nullptr;
+-  }
+-
+-  try {
+-    // 创建说话人特征
+-    auto features = std::make_unique<SpeakerFeatures>(name, lang);
+-
+-    // 加载参考音频
+-    auto ref_audio = AudioTools::FromFile(ref_audio_path.string());
+-    if (!ref_audio) {
+-      PrintError("[SpeakerManager] Failed to load reference audio: {}", ref_audio_path.string());
+-      return nullptr;
+-    }
+-
+-    // 准备音频
+-    auto audio_16k = ref_audio->ReSample(16000);
+-    auto samples_16k = audio_16k->ReadSamples();
+-
+-    // 静音填充
+-    size_t padding_size = static_cast<size_t>(16000 * 0.3);
+-    samples_16k.insert(samples_16k.end(), padding_size, 0.0f);
+-
+-    // 获取设备
+-    Model::Device device = device_ctx_ ? device_ctx_->GetDevice() : Model::Device(Model::DeviceType::kCPU);
+-    bool is_gpu = device.type == Model::DeviceType::kCUDA;
+-
+-    // SSL 提取
+-    auto ssl_model = model_pool_->GetModel<Model::SSLModel>(Model::ModelType::kSSL);
+-    if (!ssl_model) {
+-      PrintError("[SpeakerManager] Failed to get SSL model");
+-      return nullptr;
+-    }
+-    auto ssl_content = ssl_model->GetSSLContent(samples_16k);
+-
+-    // VQ 提取
+-    auto vq_model = model_pool_->GetModel<Model::VQModel>(Model::ModelType::kVQ);
+-    if (!vq_model) {
+-      PrintError("[SpeakerManager] Failed to get VQ model");
+-      return nullptr;
+-    }
+-    auto vq_codes = vq_model->GetVQCodes(ssl_content.get());
+-
+-    // 处理 VQ codes 形状并保留 GPU 副本
+-    if (vq_codes && vq_codes->Shape().size() == 3) {
+-      auto shape = vq_codes->Shape();
+-
+-      // 创建 CPU 副本用于序列化
+-      auto sliced_cpu = Model::Tensor::Empty({1, shape[2]}, Model::DataType::kInt64, Model::DeviceType::kCPU);
+-      auto vq_cpu = vq_codes->To(Model::Device(Model::DeviceType::kCPU), Model::DataType::kInt64);
+-      std::memcpy(sliced_cpu->Data<int64_t>(), vq_cpu->Data<int64_t>(), shape[2] * sizeof(int64_t));
+-
+-      // 如果在 GPU 上，保留 GPU 副本
+-      std::unique_ptr<Model::Tensor> sliced_gpu;
+-      if (is_gpu && !vq_codes->IsCPU()) {
+-        sliced_gpu = Model::Tensor::Empty({1, shape[2]}, Model::DataType::kInt64, device);
+-        auto vq_gpu = vq_codes->To(device, Model::DataType::kInt64);
+-#ifdef WITH_CUDA
+-        // 直接在 GPU 上切片
+-        cudaMemcpy(sliced_gpu->Data(), vq_gpu->Data(), shape[2] * sizeof(int64_t), cudaMemcpyDeviceToDevice);
+-#endif
+-      }
+-
+-      features->SetVQCodesWithCache(std::move(sliced_cpu), std::move(sliced_gpu));
+-    } else {
+-      features->SetVQCodes(std::move(vq_codes));
+-    }
+-
+-    // 频谱图
+-    auto spectrogram_model = model_pool_->GetModel<Model::SpectrogramModel>(Model::ModelType::kSpectrogram);
+-    if (spectrogram_model) {
+-      auto audio_32k = ref_audio->ReSample(32000);
+-      auto refer_spec = spectrogram_model->ComputeSpec(audio_32k->ReadSamples());
+-      if (refer_spec && refer_spec->Shape().size() == 3) {
+-        refer_spec->Reshape({refer_spec->Shape()[1], refer_spec->Shape()[2]});
+-      }
+-
+-      // 保留 GPU 副本
+-      if (is_gpu && refer_spec && !refer_spec->IsCPU()) {
+-        auto spec_gpu = refer_spec->Clone();
+-        auto spec_cpu = refer_spec->ToCPU();
+-        features->SetReferSpecWithCache(std::move(spec_cpu), std::move(spec_gpu));
+-      } else {
+-        features->SetReferSpec(std::move(refer_spec));
+-      }
+-    }
+-
+-    // SV Embedding
+-    auto sv_model = model_pool_->GetModel<Model::SVEmbeddingModel>(Model::ModelType::kSVEmbedding);
+-    if (sv_model) {
+-      auto sv_emb = sv_model->ComputeEmbedding(ref_audio->ReSample(16000)->ReadSamples());
+-      if (sv_emb && sv_emb->Shape().size() == 2) {
+-        sv_emb->Reshape({sv_emb->Shape()[1]});
+-      }
+-
+-      // 保留 GPU 副本
+-      if (is_gpu && sv_emb && !sv_emb->IsCPU()) {
+-        auto emb_gpu = sv_emb->Clone();
+-        auto emb_cpu = sv_emb->ToCPU();
+-        features->SetSVEmbeddingWithCache(std::move(emb_cpu), std::move(emb_gpu));
+-      } else {
+-        features->SetSVEmbedding(std::move(sv_emb));
+-      }
+-    }
+-
+-    // BERT 特征提取（参考文本的音素和BERT特征）
+-    if (g2p_pipeline_) {
+-      auto bert_res = g2p_pipeline_->GetPhoneAndBert(ref_text, lang);
+-      if (bert_res) {
+-        features->SetFromBertRes(bert_res);
+-        PrintDebug("[SpeakerManager] BERT features extracted for reference text");
+-      } else {
+-        PrintWarn("[SpeakerManager] Failed to extract BERT features for reference text");
+-      }
+-    } else {
+-      PrintWarn("[SpeakerManager] G2P Pipeline not set, skipping BERT feature extraction");
+-    }
+-
+-    // 存储
+-    auto* ptr = features.get();
+-    speakers_[name] = std::move(features);
+-
+-    PrintInfo("[SpeakerManager] Successfully created speaker: {}", name);
+-    return ptr;
+-
+-  } catch (const std::exception& e) {
+-    PrintError("[SpeakerManager] Failed to create speaker: {}", e.what());
+-    return nullptr;
+-  }
+-}
+-
+-// ============ 导入/导出 ============
+-
+ SpeakerFeatures* SpeakerManager::ImportFromPackage(
+     const std::string& path,
+     const SpeakerImportOptions& options) {
+diff --git a/src/Utils/speaker_serializer.cpp b/src/Utils/speaker_serializer.cpp
+index d3ce2ff..762b7f2 100644
+--- a/src/Utils/speaker_serializer.cpp
++++ b/src/Utils/speaker_serializer.cpp
+@@ -131,11 +131,32 @@ std::unique_ptr<Model::Tensor> SpeakerSerializer::CreateTensorFromBuffer(
+     const std::vector<uint8_t>& buffer,
+     const TensorMetadata& metadata) {
+   // 计算数据指针
+-  if (metadata.offset + metadata.size > buffer.size()) {
++  if (metadata.offset > buffer.size() || metadata.size > buffer.size() - metadata.offset) {
+     THROW_ERRORN("Invalid tensor offset/size: offset={}, size={}, buffer_size={}",
+                  metadata.offset, metadata.size, buffer.size());
+   }
+ 
++  size_t expected = 0;
++  switch (metadata.dtype) {
++    case Model::DataType::kFloat32:
++    case Model::DataType::kInt32: expected = 4; break;
++    case Model::DataType::kFloat16: expected = 2; break;
++    case Model::DataType::kInt64:
++    case Model::DataType::kUInt64: expected = 8; break;
++    case Model::DataType::kInt8:
++    case Model::DataType::kUInt8: expected = 1; break;
++    default: THROW_ERRORN("Unsupported voice tensor data type");
++  }
++  if (metadata.shape.empty() || metadata.shape.size() > 4 || metadata.size == 0)
++    THROW_ERRORN("Invalid voice tensor dimensions");
++  for (int64_t dimension : metadata.shape) {
++    if (dimension <= 0 || static_cast<uint64_t>(dimension) > metadata.size / expected)
++      THROW_ERRORN("Voice tensor dimensions exceed declared byte size");
++    expected *= static_cast<size_t>(dimension);
++  }
++  if (expected != metadata.size)
++    THROW_ERRORN("Voice tensor byte size does not match shape and data type");
++
+   const uint8_t* data_ptr = buffer.data() + metadata.offset;
+ 
+   // 创建 CPU Tensor
+@@ -188,6 +209,8 @@ std::unique_ptr<SpeakerInfo> SpeakerSerializer::DeserializeFromFile(
+     // 读取文件内容
+     file.seekg(0, std::ios::end);
+     size_t file_size = file.tellg();
++    if (file_size < sizeof(uint32_t) || file_size > 64 * 1024 * 1024)
++      return nullptr;
+     file.seekg(0, std::ios::beg);
+ 
+     std::vector<uint8_t> buffer(file_size);
+@@ -300,16 +323,17 @@ bool SpeakerSerializer::SerializeToBuffer(
+ std::unique_ptr<SpeakerInfo> SpeakerSerializer::DeserializeFromBuffer(
+     const std::vector<uint8_t>& buffer) {
+   try {
+-    if (buffer.size() < sizeof(uint32_t)) {
++    if (buffer.size() < sizeof(uint32_t) || buffer.size() > 64 * 1024 * 1024) {
+       PrintError("[SpeakerSerializer] Buffer too small");
+       return nullptr;
+     }
+ 
+     // 读取 header 大小
+-    uint32_t header_size = *reinterpret_cast<const uint32_t*>(buffer.data());
++    uint32_t header_size = 0;
++    std::memcpy(&header_size, buffer.data(), sizeof(header_size));
+ 
+     // 检查缓冲区大小
+-    if (buffer.size() < sizeof(header_size) + header_size) {
++    if (header_size == 0 || header_size > 65536 || header_size > buffer.size() - sizeof(header_size)) {
+       PrintError("[SpeakerSerializer] Invalid buffer size");
+       return nullptr;
+     }
+@@ -328,6 +352,23 @@ std::unique_ptr<SpeakerInfo> SpeakerSerializer::DeserializeFromBuffer(
+       return nullptr;
+     }
+ 
++    // This runtime accepts only the four passive tensors of its v2 contract.
++    if (header.metadata.model_version != "v2" || header.metadata.sv_dim != 0 ||
++        header.metadata.max_seq_len != 2000 || header.tensors.size() != 4)
++      THROW_ERRORN("Incompatible voice feature contract");
++    const auto& phones = header.tensors.at("phone_seq");
++    const auto& bert = header.tensors.at("bert_seq");
++    const auto& semantic = header.tensors.at("vq_codes");
++    const auto& spectrum = header.tensors.at("refer_spec");
++    if (phones.dtype != Model::DataType::kInt64 || phones.shape.size() != 1 ||
++        phones.shape[0] <= 0 || phones.shape[0] > 1000 ||
++        bert.dtype != Model::DataType::kFloat32 || bert.shape != std::vector<int64_t>{1024, phones.shape[0]} ||
++        semantic.dtype != Model::DataType::kInt64 || semantic.shape.size() != 2 ||
++        semantic.shape[0] != 1 || semantic.shape[1] <= 0 || semantic.shape[1] > 1000 ||
++        spectrum.dtype != Model::DataType::kFloat32 || spectrum.shape.size() != 2 ||
++        spectrum.shape[0] != 1025 || spectrum.shape[1] <= 0 || spectrum.shape[1] > 2000)
++      THROW_ERRORN("Incompatible voice tensor shape or type");
++
+     // 提取二进制数据
+     const uint8_t* binary_data = buffer.data() + sizeof(header_size) + header_size;
+     size_t binary_size = buffer.size() - sizeof(header_size) - header_size;
+@@ -431,6 +472,11 @@ bool SpeakerSerializer::ValidatePackage(const std::string& file_path) {
+       return false;
+     }
+ 
++    const auto package_size = GetPackageSize(file_path);
++    if (header_size == 0 || header_size > 65536 || package_size > 64 * 1024 * 1024
++        || package_size < sizeof(header_size) + header_size)
++      return false;
++
+     // 读取 JSON header
+     std::string header_str(header_size, '\0');
+     file.read(&header_str[0], header_size);
+@@ -488,6 +534,11 @@ std::unique_ptr<SpeakerSerializer::PackageHeader> SpeakerSerializer::GetPackageI
+       return nullptr;
+     }
+ 
++    const auto package_size = GetPackageSize(file_path);
++    if (header_size == 0 || header_size > 65536 || package_size > 64 * 1024 * 1024
++        || package_size < sizeof(header_size) + header_size)
++      return nullptr;
++
+     // 读取 JSON header
+     std::string header_str(header_size, '\0');
+     file.read(&header_str[0], header_size);
+@@ -514,4 +565,4 @@ uint64_t SpeakerSerializer::GetPackageSize(const std::string& file_path) {
+   return static_cast<uint64_t>(file.tellg());
+ }
+ 
+-}  // namespace GPTSoVITS::Utils
+\ No newline at end of file
++}  // namespace GPTSoVITS::Utils
+diff --git a/src/g2p/g2p_en.cpp b/src/g2p/g2p_en.cpp
+index e364421..2d3e333 100644
+--- a/src/g2p/g2p_en.cpp
++++ b/src/g2p/g2p_en.cpp
+@@ -12,6 +12,7 @@
+ #include "GPTSoVITS/plog.h"
+ #include "GPTSoVITS/Text/LangDetect.h"
+ #include <nlohmann/json.hpp>
++#include "PronunciationDictionary.hpp"
+ #include <set>
+ 
+ namespace GPTSoVITS {
+@@ -21,14 +22,14 @@ extern std::filesystem::path g_globalResourcesPath;
+ namespace GPTSoVITS::G2P {
+ 
+ std::unordered_map<std::string, std::vector<std::string>> g_en_pos_cache;
+-std::unordered_map<std::string, std::vector<std::vector<std::string>>> g_en_cmu;
++std::optional<RedLotus::PronunciationDictionary> g_en_cmu;
+ struct HomographFeature {
+   std::vector<std::string> phoneme1;
+   std::vector<std::string> phoneme2;
+   std::string partOfSpeech;
+ };
+ std::unordered_map<std::string, HomographFeature> g_en_homograph2features;
+-std::unordered_map<std::string, std::vector<std::vector<std::string>>> g_en_namedict;
++std::optional<RedLotus::PronunciationDictionary> g_en_namedict;
+ 
+ void init_en_cmu() {
+   auto fpath = g_globalResourcesPath / "g2p" / "en" / "engdict_cache_pickle.json";
+@@ -40,10 +41,7 @@ void init_en_cmu() {
+   if (!file.is_open()) {
+     THROW_ERRORN("Cannot open file: {}", fpath.string());
+   }
+-  nlohmann::json jsonData;
+-  file >> jsonData;
+-  // nlohmann/json yyds
+-  g_en_cmu = jsonData.get<std::unordered_map<std::string, std::vector<std::vector<std::string>>>>();
++  g_en_cmu.emplace(file);
+ }
+ 
+ void init_en_namedict() {
+@@ -56,10 +54,7 @@ void init_en_namedict() {
+   if (!file.is_open()) {
+     THROW_ERRORN("Cannot open file: {}", fpath.string());
+   }
+-  nlohmann::json jsonData;
+-  file >> jsonData;
+-  // nlohmann/json yyds
+-  g_en_namedict = jsonData.get<std::unordered_map<std::string, std::vector<std::vector<std::string>>>>();
++  g_en_namedict.emplace(file);
+ }
+ 
+ void init_en_homograph2features() {
+@@ -128,9 +123,9 @@ pos_tag(const std::vector<std::string> &words) {
+ 
+ void init_g2p_en_cache() {
+   if (g_en_pos_cache.empty()
+-      || g_en_cmu.empty()
++      || !g_en_cmu || g_en_cmu->empty()
+       || g_en_homograph2features.empty()
+-      || g_en_namedict.empty()
++      || !g_en_namedict || g_en_namedict->empty()
+     ) {
+     PrintInfo("Init G2P EN");
+     init_en_pos_cache();
+@@ -168,15 +163,12 @@ std::vector<std::string> qryword(const std::string &input) {
+   auto word = boost::to_lower_copy(oword);
+   boost::trim(word);
+   // 查字典, 单字母除外
+-  if (auto iter = g_en_cmu.find(word);
+-    word.size() > 1
+-    && iter != g_en_cmu.end()) {
+-    return iter->second[0];
++  if (auto phones = g_en_cmu->Lookup(word, 0); word.size() > 1 && phones) {
++    return std::move(*phones);
+   }
+   // 单词仅首字母大写时查找姓名字典
+-  if (auto iter = g_en_namedict.find(word);
+-    isTitle(oword) && iter != g_en_namedict.end()) {
+-    return iter->second[0];
++  if (auto phones = g_en_namedict->Lookup(word, 0); isTitle(oword) && phones) {
++    return std::move(*phones);
+   }
+   std::vector<std::string> phones;
+   // oov 长度小于等于 3 直接读字母
+@@ -190,7 +182,7 @@ std::vector<std::string> qryword(const std::string &input) {
+       } else {
+         std::string sw;
+         sw += w;
+-        auto &ins = g_en_cmu[sw][0];
++        const auto ins = g_en_cmu->Lookup(sw, 0).value();
+         phones.insert(phones.end(), ins.begin(), ins.end());
+       }
+     }
+@@ -267,7 +259,7 @@ _g2p_en(const std::string &segments) {
+       if (o_word == "A") {
+         pron = {"EY1"};
+       } else {
+-        pron = g_en_cmu[word][0];
++        pron = g_en_cmu->Lookup(word, 0).value();
+       }
+ 
+     } else if (auto iter = g_en_homograph2features.find(word);iter != g_en_homograph2features.end()) {
+diff --git a/src/model/CNBertModel.cpp b/src/model/CNBertModel.cpp
+index b859535..1cb6c96 100644
+--- a/src/model/CNBertModel.cpp
++++ b/src/model/CNBertModel.cpp
+@@ -16,8 +16,8 @@ namespace GPTSoVITS::Model {
+ CNBertModel::CNBertModel() = default;
+ 
+ BertModel::EncodeResult CNBertModel::EncodeText(const std::string& text) {
+-  // no [CLS] and [SEP]
+-  auto rust_res = m_tokenzer->EncodeEx(text, false);
++  // Match the producer: BERT sees CLS/SEP; only visible token features reach GPT.
++  auto rust_res = m_tokenzer->EncodeEx(text, true);
+   EncodeResult res;
+   res.TokenIds.reserve(rust_res.TokenIds.size());
+   res.TokenTypeIds.reserve(rust_res.TokenTypeIds.size());
+@@ -74,7 +74,7 @@ std::unique_ptr<Tensor> CNBertModel::GetBertFeature(
+   int64_t hidden_size = out_shape[2];
+   const auto& word2ph = g2p_info.word2ph;
+ 
+-  if (seq_len != word2ph.size()) {
++  if (seq_len < 2 || seq_len - 2 != word2ph.size()) {
+     THROW_ERRORN("Dimension mismatch: seq_len {} vs word2ph {}", seq_len, word2ph.size());
+   }
+ 
+@@ -104,8 +104,8 @@ std::unique_ptr<Tensor> CNBertModel::GetBertFeature(
+     float* dst_row = dst_ptr + h * total_phones;
+     int64_t phone_idx = 0;
+ 
+-    for (int64_t s = 0; s < seq_len; ++s) {
+-      float val = src_ptr[s * hidden_size + h];
++    for (int64_t s = 0; s < seq_len - 2; ++s) {
++      float val = src_ptr[(s + 1) * hidden_size + h];
+ 
+       int repeat = word2ph[s];
+       if (repeat > 0) {
+@@ -118,4 +118,4 @@ std::unique_ptr<Tensor> CNBertModel::GetBertFeature(
+   return final_tensor->ToDevice(m_model->GetDevice());
+ }
+ 
+-}  // namespace GPTSoVITS::Model
+\ No newline at end of file
++}  // namespace GPTSoVITS::Model
+diff --git a/src/model/backend/onnx_backend.cpp b/src/model/backend/onnx_backend.cpp
+index 6464c8a..924485a 100644
+--- a/src/model/backend/onnx_backend.cpp
++++ b/src/model/backend/onnx_backend.cpp
+@@ -7,6 +7,7 @@
+ #include <onnxruntime_cxx_api.h>
+ 
+ #include <iostream>
++#include <mutex>
+ 
+ #include "GPTSoVITS/Text/Coding.h"
+ #include "GPTSoVITS/Utils/exception.h"
+@@ -14,8 +15,36 @@
+ 
+ namespace GPTSoVITS::Model {
+ 
++class SharedCpuArena {
++ public:
++  Ort::Env env{nullptr};
++  Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
++
++  explicit SharedCpuArena(int threads) {
++    Ort::ThreadingOptions threading;
++    threading.SetGlobalIntraOpNumThreads(threads);
++    threading.SetGlobalInterOpNumThreads(1);
++    env = Ort::Env(threading, ORT_LOGGING_LEVEL_WARNING, "redlotus_mambo");
++    const Ort::ArenaCfg config(0, 0, 64 * 1024 * 1024, 1024 * 1024);
++    env.CreateAndRegisterAllocator(memory, config);
++  }
++  ~SharedCpuArena() { env.UnregisterAllocator(memory); }
++
++  static std::shared_ptr<SharedCpuArena> Acquire(int threads) {
++    static std::mutex guard;
++    static std::weak_ptr<SharedCpuArena> current;
++    std::lock_guard<std::mutex> lock(guard);
++    auto arena = current.lock();
++    if (!arena) {
++      arena = std::make_shared<SharedCpuArena>(threads);
++      current = arena;
++    }
++    return arena;
++  }
++};
++
+ struct ONNXBackend::Impl {
+-  Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "gsv_cpp_bert"};
++  std::shared_ptr<SharedCpuArena> arena;
+   std::unique_ptr<Ort::Session> session;
+   // 缓存 IoBinding
+   std::unique_ptr<Ort::IoBinding> io_binding;
+@@ -23,6 +52,7 @@ struct ONNXBackend::Impl {
+   std::vector<std::string> output_names;
+   std::unordered_map<std::string, DataType> input_types;
+   std::unordered_map<std::string, DataType> output_types;
++  bool shrink_after_run = false;
+ };
+ 
+ ONNXBackend::ONNXBackend() : impl_(std::make_unique<Impl>()) {}
+@@ -119,9 +149,14 @@ std::vector<std::unique_ptr<Tensor>> ONNXBackend::InferCore(
+     io_binding.BindOutput(name.c_str(), output_mem_info);
+   }
+ 
+-  impl->session->Run(Ort::RunOptions{nullptr}, io_binding);
++  Ort::RunOptions run_options;
++  if (impl->shrink_after_run)
++    run_options.AddConfigEntry("memory.enable_memory_arena_shrinkage", "cpu:0");
++  impl->session->Run(run_options, io_binding);
+ 
+   auto result_values = io_binding.GetOutputValues();
++  io_binding.ClearBoundInputs();
++  io_binding.ClearBoundOutputs();
+   std::vector<std::unique_ptr<Tensor>> output_tensors;
+   output_tensors.reserve(result_values.size());
+ 
+@@ -166,14 +201,11 @@ std::vector<std::unique_ptr<Tensor>> ONNXBackend::InferCore(
+       THROW_ERROR("CUDA output provided but compiled without CUDA support.");
+ #endif
+     } else {
+-      // CPU输出必须深拷贝数据
+-      // ONNX Runtime 的 IoBinding 内部缓冲区可能在后续推理中被复用
+-      // 导致之前返回的 Tensor 数据指针变成无效（use-after-free）
+-      auto new_tensor = Tensor::Empty(shape, dtype, res_device);
+-      void* src_ptr = val.GetTensorMutableData<void>();
+-      size_t bytes = new_tensor->ByteSize();
+-      std::memcpy(new_tensor->Data(), src_ptr, bytes);
+-      output_tensors.push_back(std::move(new_tensor));
++      // Keep Ort::Value alive with the returned tensor; never retain a borrowed pointer.
++      // Session lifetime is guarded by the model's serial inference lease.
++      auto owner = std::make_shared<Ort::Value>(std::move(val));
++      output_tensors.push_back(Tensor::CreateFromHost(owner->GetTensorMutableData<void>(), shape, dtype,
++          [owner](void*) {}));
+     }
+   }
+ 
+@@ -198,9 +230,11 @@ bool ONNXBackend::Load(const std::string& model_path, const BackendConfig& confi
+ 
+   try {
+     Ort::SessionOptions options;
+-    options.SetIntraOpNumThreads(config_.work_thread_num);
+-    options.SetInterOpNumThreads(config_.work_thread_num);
++    impl_->arena = SharedCpuArena::Acquire(config_.work_thread_num);
++    impl_->shrink_after_run = model_path.find("sovits.onnx") != std::string::npos;
++    options.DisablePerSessionThreads();
+     options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
++    options.AddConfigEntry("session.use_env_allocators", "1");
+ #ifdef _ENABLE_CUDA_
+     // 开启CUDA
+     if (config_.device.type == DeviceType::kCUDA) {
+@@ -211,10 +245,10 @@ bool ONNXBackend::Load(const std::string& model_path, const BackendConfig& confi
+ #endif
+ #ifdef _WIN32
+     impl_->session = std::make_unique<Ort::Session>(
+-        impl_->env, Text::Utf8ToWstring(model_path).c_str(), options);
++        impl_->arena->env, Text::Utf8ToWstring(model_path).c_str(), options);
+ #else
+     impl_->session = std::make_unique<Ort::Session>(
+-    impl_->env, model_path.c_str(), options);
++    impl_->arena->env, model_path.c_str(), options);
+ #endif
+ 
+     // 收集输入信息
+@@ -413,4 +447,4 @@ bool ONNXBackend::ForwardWithPreallocatedOutput(
+   }
+ }
+ 
+-}  // namespace GPTSoVITS::Model
+\ No newline at end of file
++}  // namespace GPTSoVITS::Model
+diff --git a/include/GPTSoVITS/Utils/MamboDecoder.h b/include/GPTSoVITS/Utils/MamboDecoder.h
+new file mode 100644
+--- /dev/null
++++ b/include/GPTSoVITS/Utils/MamboDecoder.h
+@@ -0,0 +1,64 @@
++#pragma once
++
++#include <algorithm>
++#include <cstring>
++#include <functional>
++
++#include "GPTSoVITS/model/base.h"
++#include "GPTSoVITS/Utils/MamboSampling.h"
++
++namespace GPTSoVITS::Utils {
++
++class MamboDecoder {
++  Model::BaseModel& encoder_;
++  Model::BaseModel& step_;
++  int capacity_;
++ public:
++  MamboDecoder(Model::BaseModel& encoder, Model::BaseModel& step, int capacity)
++      : encoder_(encoder), step_(step), capacity_(capacity) {}
++
++  std::unique_ptr<Model::Tensor> Generate(Model::Tensor* phones, Model::Tensor* prompt,
++      Model::Tensor* features, const Model::SampleConfig& config, Model::InferStats* stats,
++      const std::function<void(const std::vector<int64_t>&, bool)>& observer = {}) {
++    using Outputs = std::unordered_map<std::string, std::unique_ptr<Model::Tensor>>;
++    Outputs outputs;
++    encoder_.Forward({{"phoneme_ids", phones}, {"prompts", prompt}, {"bert_feature", features}}, outputs);
++    auto keys = std::move(outputs.at("k_cache"));
++    auto values = std::move(outputs.at("v_cache"));
++    auto x_len = std::move(outputs.at("x_len"));
++    auto y_len = std::move(outputs.at("y_len"));
++    const auto context = x_len->At<int64_t>(0) + y_len->At<int64_t>(0);
++    if (keys->Shape() != values->Shape() || keys->Shape().size() != 4 || keys->Shape()[2] != context)
++      throw std::invalid_argument("Mambo CPU package requires growing KV cache graphs");
++    const auto limit = std::min<int64_t>(1000, capacity_ - context - 1);
++    if (limit < 11) throw std::invalid_argument("Mambo text exceeds decoder capacity");
++    auto sample = Model::Tensor::Empty({1, 1}, Model::DataType::kInt64, Model::DeviceType::kCPU);
++    auto index = Model::Tensor::Empty({1}, Model::DataType::kInt64, Model::DeviceType::kCPU);
++    MamboSampling sampler(prompt, config);
++    std::vector<int64_t> tokens;
++    bool ended = false;
++    for (int64_t i = 0; i < limit; ++i) {
++      const auto token = sampler.Sample(outputs.at("topk_values").get(), outputs.at("topk_indices").get());
++      if (token == 1024) { ended = true; break; }
++      tokens.push_back(token);
++      if (observer) observer(tokens, false);
++      sample->At<int64_t>(0) = token;
++      index->At<int64_t>(0) = i;
++      Outputs next;
++      step_.Forward({{"samples", sample.get()}, {"k_cache", keys.get()}, {"v_cache", values.get()},
++                     {"x_len", x_len.get()}, {"y_len", y_len.get()}, {"idx", index.get()}}, next);
++      keys = std::move(next.at("k_cache_new"));
++      values = std::move(next.at("v_cache_new"));
++      outputs = std::move(next);
++    }
++    if (!ended || tokens.empty()) throw std::runtime_error("Mambo semantic generation did not finish within its limit");
++    if (observer) observer(tokens, true);
++    if (stats) stats->gpt_tokens += static_cast<int>(tokens.size());
++    auto result = Model::Tensor::Empty({1, 1, static_cast<int64_t>(tokens.size())},
++                                      Model::DataType::kInt64, Model::DeviceType::kCPU);
++    std::memcpy(result->Data(), tokens.data(), tokens.size() * sizeof(int64_t));
++    return result;
++  }
++};
++
++}  // namespace GPTSoVITS::Utils
+diff --git a/include/GPTSoVITS/Utils/MamboSampling.h b/include/GPTSoVITS/Utils/MamboSampling.h
+new file mode 100644
+--- /dev/null
++++ b/include/GPTSoVITS/Utils/MamboSampling.h
+@@ -0,0 +1,61 @@
++#pragma once
++
++#include <array>
++#include <cmath>
++#include <limits>
++#include <stdexcept>
++#include "GPTSoVITS/Utils/Sampling.h"
++#include "GPTSoVITS/model/sample_config.h"
++
++namespace GPTSoVITS::Utils {
++
++// Matches the pinned v2 recipe: full logits, prompt repetition penalty and EOS floor.
++class MamboSampling {
++  std::array<bool, 1025> seen_{};
++  std::unique_ptr<Model::Tensor> logits_;
++  SamplingConfig config_;
++  Sampler sampler_;
++  int generated_ = 0;
++
++public:
++  MamboSampling(const Model::Tensor* prompt, const Model::SampleConfig& config)
++      : logits_(Model::Tensor::Empty({1, 1025}, Model::DataType::kFloat32, Model::DeviceType::kCPU)) {
++    config_.strategy = SamplingStrategy::kTopKTopP;
++    config_.top_k = config.top_k;
++    config_.top_p = config.top_p;
++    config_.temperature = config.temperature;
++    if (!config_.Validate()) throw std::invalid_argument("Invalid Mambo sampling configuration");
++    sampler_.SetSeed(42);
++    auto values = prompt->To(Model::DeviceType::kCPU, Model::DataType::kInt64);
++    for (int64_t i = 0; i < values->ElementCount(); ++i) {
++      const auto token = values->Data<int64_t>()[i];
++      if (token < 0 || token >= 1024) throw std::invalid_argument("Invalid reference semantic token");
++      seen_[token] = true;
++    }
++  }
++
++  int64_t Sample(const Model::Tensor* scores, const Model::Tensor* ids) {
++    if (!scores || !ids || scores->ElementCount() != 1025 || ids->ElementCount() != 1025)
++      throw std::invalid_argument("Mambo requires the complete semantic vocabulary");
++    auto values = scores->To(Model::DeviceType::kCPU, Model::DataType::kFloat32);
++    auto indices = ids->To(Model::DeviceType::kCPU, Model::DataType::kInt64);
++    if (generated_ >= 11 && indices->Data<int64_t>()[0] == 1024) return 1024;
++    std::array<bool, 1025> found{};
++    auto* logits = logits_->Data<float>();
++    for (int i = 0; i < 1025; ++i) {
++      const int64_t token = indices->Data<int64_t>()[i];
++      const float value = values->Data<float>()[i];
++      if (token < 0 || token >= 1025 || found[token] || !std::isfinite(value))
++        throw std::invalid_argument("Invalid Mambo semantic scores");
++      found[token] = true;
++      logits[token] = seen_[token] ? (value < 0 ? value * 1.35f : value / 1.35f) : value;
++    }
++    if (generated_ < 11) logits[1024] = -std::numeric_limits<float>::infinity();
++    const auto token = sampler_.Sample(logits_.get(), config_);
++    seen_[token] = true;
++    ++generated_;
++    return token;
++  }
++};
++
++}  // namespace GPTSoVITS::Utils

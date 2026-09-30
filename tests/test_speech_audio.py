@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from redlotus.TTS import PCMChunk, SpeechBusy, SpeechError, SpeechUnavailable
-from redlotus.TTS.asr import AudioCapture
+from redlotus.TTS.audio import AudioCapture
 from redlotus.TTS.audio import AudioIO, AudioPlayer
 
 

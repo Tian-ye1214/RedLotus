@@ -68,10 +68,10 @@ desktop.QCursor = SimpleNamespace(pos=lambda: pointer)
 
 def child(code, *, scale="1"):
     env = os.environ | {"PYTHONPATH": str(resource_root().parent), "QT_QPA_PLATFORM": "offscreen",
-                        "QT_SCALE_FACTOR": scale}
+                        "QT_SCALE_FACTOR": scale, "PYTHONIOENCODING": "utf-8"}
     return subprocess.Popen([sys.executable, "-u", "-c", textwrap.dedent(code)],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, env=env, cwd=ROOT)
+                            stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env, cwd=ROOT)
 
 
 def probe(code, *, scale="1"):
@@ -407,7 +407,7 @@ def test_startup_errors_are_one_json_record_and_a_nonzero_exit(failure):
 from redlotus.pets.desktop import PetApplication
 from redlotus.pets.factory import PetFactory
 async def broken(character): raise ValueError('Broken sprite atlas')
-PetFactory.model = broken
+if FAILURE == 'resources': PetFactory.model = broken
 raise SystemExit(PetApplication.run(['missing' if FAILURE == 'character' else 'charcoal']))
 """.replace("FAILURE", repr(failure)))
     try:
@@ -415,7 +415,7 @@ raise SystemExit(PetApplication.run(['missing' if FAILURE == 'character' else 'c
         assert process.returncode == 1, process.stderr.read()
         report = json.loads(process.stdout.read())
         assert report["event"] == "error"
-        assert ("charcoal or ivory" if failure == "character" else "Broken sprite atlas") in report["error"]
+        assert ("missing" if failure == "character" else "Broken sprite atlas") in report["error"]
     finally:
         if process.poll() is None:
             process.kill()

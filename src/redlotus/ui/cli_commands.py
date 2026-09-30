@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -476,7 +477,9 @@ class SlashCommands:
                 return
             kind = ModelKind(args[1]) if len(args) > 1 else None
             if action == "prepare":
-                await service.prepare(kind, _strip_quotes(args[2]) if len(args) > 2 else None, warm=True)
+                await service.prepare(kind, _strip_quotes(args[2]) if len(args) > 2 else None, warm=True,
+                    report_failure=partial(logger.speech_log, self.controller.system.workspace, "语音模型准备失败")
+                    if kind is None else None)
             elif action == "update":
                 await service.update(kind)
             elif action == "rollback" and kind:
@@ -494,8 +497,8 @@ class SlashCommands:
             print_panel("\n".join(f"{name.value}: {info.stage.value} · {info.bytes}/{info.total} bytes\n{info.target}\n"
                 + ("准备失败，请查看日志" if info.error else "")
                 for name, info in status.items()), title="本地语音模型")
-        except Exception:
-            logger.error("语音命令失败", exc_info=True)
+        except Exception as exc:
+            await logger.speech_log(self.controller.system.workspace, "语音命令失败", exc)
             print_warning("语音模型准备失败，请查看日志；文字功能仍可使用。" if action == "prepare"
                           else "语音操作失败，请查看日志；文字功能仍可使用。")
 

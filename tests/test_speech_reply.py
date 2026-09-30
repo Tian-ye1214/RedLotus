@@ -67,10 +67,10 @@ async def test_text_limit_counts_delta_held_by_native_synthesis():
     errors = []
 
     class SlowTts(FakeTts):
-        def generate(self, text, *, sid, speed, callback=None):
+        def generate(self, text, config, callback=None):
             entered.set()
             assert release.wait(2)
-            return super().generate(text, sid=sid, speed=speed, callback=callback)
+            return super().generate(text, config, callback=callback)
 
     service = FakeService(tts=SlowTts(samples=1))
     service.config.text_chars = len("Hello world.")
@@ -94,11 +94,11 @@ async def test_text_capacity_returns_after_segment_finishes():
     errors = []
 
     class SlowTts(FakeTts):
-        def generate(self, text, *, sid, speed, callback=None):
+        def generate(self, text, config, callback=None):
             if not entered.is_set():
                 entered.set()
                 assert release.wait(2)
-            return super().generate(text, sid=sid, speed=speed, callback=callback)
+            return super().generate(text, config, callback=callback)
 
     native = SlowTts(samples=1)
     service = FakeService(tts=native)

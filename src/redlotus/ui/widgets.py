@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from prompt_toolkit.completion import Completer, Completion
 from rich.text import Text
+from redlotus.pets.model import PetCatalog
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -59,7 +60,7 @@ COMMAND_HELP = {
     "/trace": "/trace <turn_id>：查看追踪记录",
     "/tasks": "查看任务状态与依赖",
     "/voice": "语音 on / off / test / status / prepare / update / rollback / clean",
-    "/pets": "桌宠开关；on [charcoal|ivory] / off / status",
+    "/pets": "桌宠开关；on [角色ID] / off / status / list / reload",
 }
 COMMANDS = tuple(COMMAND_HELP)
 
@@ -73,8 +74,8 @@ _SUBCOMMAND_CHOICES: dict[str, tuple[str, ...]] = {
     "/cancel": ("agent",),
     "/api": ("embedding",),
     "/voice": ("on", "off", "test", "status", "prepare", "update", "rollback", "clean"),
-    "/pets on": ("charcoal", "ivory"),
-    "/pets": ("on", "off", "status"),
+    "/pets on": (),
+    "/pets": ("on", "off", "status", "list", "reload"),
 }
 
 
@@ -146,7 +147,7 @@ class VoiceControls(Vertical):
         identity = self._current_identity()
         async def load():
             from redlotus.TTS import SpeechBusy
-            from redlotus.TTS.audio import AudioDevices
+            from redlotus.TTS import AudioDevices
             try:
                 self._devices = await AudioDevices.inputs(refresh=refresh)
                 default = next((item.name for item in self._devices if item.is_default), "暂无设备")
@@ -282,7 +283,8 @@ class VoiceControls(Vertical):
 
         async def run():
             from redlotus.TTS import NoSpeechDetected, SpeechUnavailable
-            from redlotus.TTS.asr import AudioCapture, StreamingRecognizer
+            from redlotus.TTS.audio import AudioCapture
+            from redlotus.TTS import StreamingRecognizer
             try:
                 await state.drain_voice()
                 self.capture = AudioCapture(pcm_seconds=service.config.pcm_seconds, device=self.device)
@@ -374,7 +376,8 @@ def completion_for_input(text: str) -> InputCompletion | None:
             prefix = text[len(cmd) + 1 :]
             if " " not in prefix:
                 return InputCompletion(
-                    kind="literal_choice", prefix=prefix, choices=choices
+                    kind="literal_choice", prefix=prefix,
+                    choices=tuple(pet.id for pet in PetCatalog.cached if not pet.error) if cmd == "/pets on" else choices
                 )
             return None
 

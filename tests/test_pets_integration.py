@@ -16,7 +16,9 @@ async def test_shared_command_is_available_during_turn_and_completes_characters(
 
     assert "/pets" in AgentCliController.BUSY_SAFE_COMMANDS
     assert "/pets" in widgets.COMMAND_HELP
-    assert widgets.completion_for_input("/pets ").choices == ("on", "off", "status")
+    from redlotus.pets.model import PetCatalog
+    await PetCatalog().refresh()
+    assert widgets.completion_for_input("/pets ").choices == ("on", "off", "status", "list", "reload")
     assert widgets.completion_for_input("/pets on i").choices == ("charcoal", "ivory")
     service = SimpleNamespace(command=AsyncMock(return_value=""))
     panels = []

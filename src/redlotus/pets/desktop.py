@@ -548,22 +548,15 @@ class PetApplication:
             if _QT_ERROR:
                 raise RuntimeError(f'Install desktop support with: pip install "RedLotus[pets]" ({_QT_ERROR})')
             from .factory import PetFactory
-            from .model import CHARACTERS
-
-            scale = 1.
-            if "--scale" in argv:
-                index = argv.index("--scale")
-                scale = float(argv[index + 1])
-                argv = argv[:index] + argv[index + 2:]
-            if len(argv) > 1 or (argv and argv[0] not in CHARACTERS):
-                raise ValueError("Desktop pet character must be charcoal or ivory")
+            options = PetFactory.options(argv)
+            scale = options.scale
             if not math.isfinite(scale) or not .5 <= scale <= 3:
                 raise ValueError("Desktop pet scale must be between 0.5 and 3")
-            character = argv[0] if argv else "charcoal"
+            character = options.character
             app = QApplication(["redlotus-pets"])
             app.setQuitOnLastWindowClosed(True)
             parent.application = app
-            model = asyncio.run(PetFactory.model(character))
+            model = asyncio.run(PetFactory.model(options.resource_dir or character))
             if parent.closed.is_set():
                 return 0
             window = PetWindow(model)

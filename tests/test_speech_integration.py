@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 
+
 def delta(text, kind="text"):
     return SimpleNamespace(event_kind="part_delta", delta=SimpleNamespace(part_delta_kind=kind, content_delta=text))
 
@@ -90,7 +91,8 @@ async def test_channel_voice_never_writes_audio_reference(phone, monkeypatch):
     from pydantic_ai import BinaryContent
     from redlotus.sessions.context import UserMessage
     from redlotus.TTS import Transcript
-    from redlotus.TTS import asr, audio
+    import redlotus.TTS as asr
+    from redlotus.TTS import audio
 
     _, state, _, _, _ = phone
     raw = b"#!SILK_V3memory-only"
@@ -196,7 +198,8 @@ def test_wechat_ignores_sdk_voice_transcription_but_keeps_actual_text():
 
 async def test_recording_returns_transcript_without_writing_audio(tmp_path, monkeypatch):
     import numpy as np
-    from redlotus.TTS import asr, PCMChunk, Transcript
+    import redlotus.TTS as asr
+    from redlotus.TTS import PCMChunk, Transcript
     events = []
     class Capture:
         async def check_available(self):
@@ -223,7 +226,7 @@ async def test_recording_returns_transcript_without_writing_audio(tmp_path, monk
 
 
 async def test_failed_recording_closes_capture_without_audio_file(tmp_path, monkeypatch):
-    from redlotus.TTS import asr
+    import redlotus.TTS as asr
     class Capture:
         closed = False
         async def check_available(self):
@@ -247,7 +250,8 @@ async def test_record_control_release_outside_and_late_result_preserves_draft(tm
     from textual.widgets import Input
     from redlotus.sessions.control import SessionController
     from redlotus.ui.widgets import VoiceControls
-    from redlotus.TTS import ModelKind, ModelStage, PreparationStatus, asr, audio, service as speech_service, Transcript
+    import redlotus.TTS as asr
+    from redlotus.TTS import ModelKind, ModelStage, PreparationStatus, audio, service as speech_service, Transcript
     started, released, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
     class Capture:
         def __init__(self, **kwargs):
@@ -264,7 +268,7 @@ async def test_record_control_release_outside_and_late_result_preserves_draft(tm
     async def input_devices(cls, **kwargs):
         return []
     monkeypatch.setattr(audio.AudioDevices, "inputs", classmethod(input_devices))
-    monkeypatch.setattr(asr, "AudioCapture", Capture)
+    monkeypatch.setattr(audio, "AudioCapture", Capture)
     monkeypatch.setattr(asr.StreamingRecognizer, "record", record)
     fake_service = SimpleNamespace(config=SimpleNamespace(pcm_seconds=2), status=lambda: {
         ModelKind.ASR: PreparationStatus(stage=ModelStage.READY),
@@ -344,105 +348,16 @@ async def test_channel_output_keeps_original_destination_without_files(phone, is
     assert not list(state.agent.workspace.root.rglob("*.wav"))
 
 
-async def test_native_tts_callback_delivers_before_completion_and_cancels_full_queue():
-    import threading
-    from contextlib import asynccontextmanager
-    import numpy as np
-    from redlotus.TTS import PCMChunk, SpeechSettings
-    from redlotus.TTS.tts import StreamingSynthesizer
-    from redlotus.runtime.resources import finish_io
-    completed = threading.Event()
-    class Native:
-        sample_rate = 24000
-        def generate(self, text, speaker, callback=None):
-            samples = np.ones(240000, dtype=np.float32)
-            if callback is not None:
-                callback(samples, 1.0)
-            completed.set()
-            return PCMChunk(samples, 24000)
-    class Service:
-        config = SpeechSettings(pcm_seconds=.2)
-        leased = False
-        @asynccontextmanager
-        async def acquire(self, _kind):
-            self.leased = True
-            try:
-                yield Native()
-            finally:
-                self.leased = False
-        async def run(self, _kind, operation, *args):
-            return await finish_io(asyncio.to_thread(operation, *args))
-    service = Service()
-    stream = StreamingSynthesizer(service).synthesize("你好。")
-    try:
-        chunk = await asyncio.wait_for(anext(stream), 2)
-        assert chunk.sample_rate == 24000
-        assert len(chunk.samples) <= 4800
-        assert not completed.is_set()
-        assert service.leased
-    finally:
-        await asyncio.wait_for(stream.aclose(), 2)
-    assert completed.is_set()
-    assert not service.leased
 
 
-async def test_native_tts_callback_continues_subsegments_without_replaying_returned_audio():
-    from contextlib import asynccontextmanager
-    import numpy as np
-    from redlotus.TTS import PCMChunk, SpeechSettings
-    from redlotus.TTS.tts import StreamingSynthesizer
-    from redlotus.runtime.resources import finish_io
-    class Native:
-        sample_rate = 24000
-        def generate(self, text, speaker, callback):
-            reusable = np.zeros(3200, dtype=np.float32)
-            for value in (.1, .2, .3):
-                reusable.fill(value)
-                assert callback(reusable, value / .3) == 1
-            reusable.fill(-1)
-            return PCMChunk(np.zeros(9600, dtype=np.float32), 24000)
-    class Service:
-        config = SpeechSettings(pcm_seconds=.2)
-        @asynccontextmanager
-        async def acquire(self, _kind):
-            yield Native()
-        async def run(self, _kind, operation, *args):
-            return await finish_io(asyncio.to_thread(operation, *args))
-    chunks = [chunk async for chunk in StreamingSynthesizer(Service()).synthesize("你好。")]
-    np.testing.assert_allclose(np.concatenate([chunk.samples for chunk in chunks]),
-                               np.repeat(np.array([.1, .2, .3], dtype=np.float32), 3200))
-    assert [chunk.end_of_segment for chunk in chunks] == [False] * (len(chunks) - 1) + [True]
 
 
-async def test_tts_prepares_next_sentence_while_previous_audio_is_consumed():
-    import threading
-    from contextlib import asynccontextmanager
-    import numpy as np
-    from redlotus.TTS import PCMChunk, SpeechSettings
-    from redlotus.TTS.tts import StreamingSynthesizer
-    from redlotus.runtime.resources import finish_io
-    next_started = threading.Event()
-    class Native:
-        sample_rate = 24000
-        def generate(self, text, speaker, callback):
-            if text == "第二句。":
-                next_started.set()
-            samples = np.ones(24000, dtype=np.float32)
-            callback(samples, 1.0)
-            return PCMChunk(samples, 24000)
-    class Service:
-        config = SpeechSettings(pcm_seconds=2)
-        @asynccontextmanager
-        async def acquire(self, _kind):
-            yield Native()
-        async def run(self, _kind, operation, *args):
-            return await finish_io(asyncio.to_thread(operation, *args))
-    stream = StreamingSynthesizer(Service()).synthesize("第一句。第二句。")
-    try:
-        await anext(stream)
-        assert await asyncio.to_thread(next_started.wait, 1)
-    finally:
-        await stream.aclose()
+
+
+
+
+
+
 
 
 @pytest.mark.asyncio
@@ -487,59 +402,3 @@ async def test_voice_off_then_on_same_response_only_speaks_new_deltas(last_delta
         assert not errors
     finally:
         await session.drain_voice()
-
-
-async def test_tts_preserves_sentence_context_decimals_and_logical_clip_boundary():
-    from contextlib import asynccontextmanager
-    import numpy as np
-    from redlotus.TTS import PCMChunk, SpeechSettings
-    from redlotus.TTS.tts import StreamingSynthesizer
-    from redlotus.runtime.resources import finish_io
-    calls = []
-    class Native:
-        sample_rate = 24000
-        def generate(self, text, speaker, callback):
-            calls.append(text)
-            samples = np.ones(2400, dtype=np.float32)
-            callback(samples, 1.0)
-            return PCMChunk(samples, 24000)
-    class Service:
-        config = SpeechSettings()
-        @asynccontextmanager
-        async def acquire(self, _kind):
-            yield Native()
-        async def run(self, _kind, operation, *args):
-            return await finish_io(asyncio.to_thread(operation, *args))
-    text = "我们正在测试本地语音输出，数字3.14和Hello world都应该完整保留。"
-    chunks = [chunk async for chunk in StreamingSynthesizer(Service()).synthesize(text)]
-    assert calls == [text]
-    assert "".join(calls).replace(" ", "") == text.replace(" ", "")
-    assert any("3.14" in part for part in calls)
-    assert any("Hello" in part for part in calls)
-    assert any("world" in part for part in calls)
-    assert [chunk.end_of_segment for chunk in chunks] == [False] * (len(chunks) - 1) + [True]
-
-
-@pytest.mark.asyncio
-async def test_tts_flushes_deferred_word_as_soon_as_boundary_arrives():
-    from redlotus.TTS.tts import TextSegmenter
-    boundary, ended = asyncio.Event(), asyncio.Event()
-
-    async def deltas():
-        yield "hel"
-        await boundary.wait()
-        yield "lo "
-        await ended.wait()
-
-    stream = TextSegmenter(20, 120).segments(deltas())
-    next_segment = asyncio.create_task(anext(stream))
-    try:
-        await asyncio.sleep(.06)
-        assert not next_segment.done()
-        boundary.set()
-        assert await asyncio.wait_for(next_segment, .5) == "hello"
-    finally:
-        ended.set()
-        next_segment.cancel()
-        await asyncio.gather(next_segment, return_exceptions=True)
-        await stream.aclose()

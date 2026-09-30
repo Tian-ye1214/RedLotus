@@ -18,7 +18,8 @@ async def test_speech_import_probe_and_construction_run_off_loop(monkeypatch):
     bootstrap_threads = []
 
     class Service:
-        def bootstrap(self):
+        def bootstrap(self, *, report_failure):
+            assert callable(report_failure)
             bootstrap_threads.append(threading.get_ident())
 
     def load(name):

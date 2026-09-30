@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from redlotus.runtime.resources import finish_io
+from .model import PetCatalog, PetInfo
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,12 @@ class PetStatus:
 
 
 class PetService(ABC):
+    @abstractmethod
+    async def list_pets(self) -> tuple[PetInfo, ...]: ...
+
+    @abstractmethod
+    async def reload(self) -> PetStatus: ...
+
     @abstractmethod
     async def publish_reply(self, *, reply_id: str, phase: str, text: str) -> None:
         """Publish a process-wide increasing decimal reply ID; done replaces its body."""
@@ -65,11 +72,16 @@ class PetService(ABC):
                 return str(await self.status())
             elif parts == ["off"]:
                 result = await self.stop()
+            elif parts == ["reload"]:
+                result = await self.reload()
+            elif parts == ["list"]:
+                return "\n".join(f"{pet.id} · {pet.name} · {pet.source}" + (f" · 无效：{pet.error}" if pet.error else "")
+                                 for pet in await self.list_pets()) or "没有可用桌宠资源包"
             elif parts[0] == "on" and len(parts) <= 2:
                 result = await self.start(parts[1] if len(parts) == 2 else None)
             else:
-                return "用法：/pets [on [charcoal|ivory] | off | status]"
-        except ValueError as exc:
+                return "用法：/pets [on [角色ID] | off | status | list | reload]"
+        except (ValueError, OSError) as exc:
             return str(exc)
         return result.error or ("桌宠操作失败" if result.state == "failed" else "")
 
@@ -83,6 +95,8 @@ class ProcessPetService(PetService):
     MAX_LINE = 262144
 
     def __init__(self):
+        self._catalog, self._directory = PetCatalog(), None
+        self._scans = set()
         self._selected = "charcoal"
         self._closed = False
         self._target = None
@@ -147,6 +161,19 @@ class ProcessPetService(PetService):
         return PetStatus(self._state, self._target or self._selected, self._error,
                          self._process.pid if self._process else None, self._scale)
 
+    async def list_pets(self):
+        if self._closed:
+            return self._catalog.cached
+        task = self._track(self._catalog.refresh(), "pets-discovery")
+        self._scans.add(task)
+        try:
+            return await task
+        finally:
+            self._scans.discard(task)
+
+    async def reload(self):
+        return await self._request("reload", None)
+
     async def start(self, character=None):
         return await self._request("on", character)
 
@@ -159,7 +186,17 @@ class ProcessPetService(PetService):
     async def close(self):
         async with self._admission:
             self._closed = True
-        return await self.stop()
+        try:
+            return await self.stop()
+        finally:
+            scans = tuple(self._scans)
+            for task in scans:
+                task.cancel()
+            if scans:
+                await finish_io(self._drain_scans(scans))
+
+    async def _drain_scans(self, scans):
+        await asyncio.gather(*scans, return_exceptions=True)
 
     def _track(self, coroutine, name):
         task = asyncio.create_task(coroutine, name=name)
@@ -173,27 +210,28 @@ class ProcessPetService(PetService):
             task.exception()
 
     async def _request(self, action, character):
-        from .model import CHARACTERS
-
-        if character is not None and character not in CHARACTERS:
-            raise ValueError("未知桌宠角色；可选角色：charcoal、ivory")
+        if character is not None:
+            PetCatalog.check_id(character)
         async with self._admission:
-            enabled = action == "on" or (action == "toggle" and self._state not in {"starting", "running"})
-            if enabled and self._closed:
+            active = self._state in {"starting", "running"}
+            enabled = action == "on" or (action == "toggle" and not active) or (action == "reload" and active)
+            if self._closed and action != "off":
                 return await self.status()
-            target = (character or self._selected) if enabled else None
+            selected = character or (self._target if action == "reload" else None) or self._selected
+            target = selected if enabled else None
             pending = self._operation is not None and not self._operation.done()
             reusable = (pending and not self._operation.cancelling()) or (not pending and self._state in {"off", "running"})
-            same = target == self._target and reusable
+            same = action != "reload" and target == self._target and reusable
             if same:
-                task = self._operation
+                task = self._operation if pending else None
             else:
                 if pending and not self._operation.cancelling():
                     self._operation.cancel()
                 self._revision += 1
                 self._target, self._error = target, ""
-                self._state = "starting" if target else "stopping"
-                task = self._track(self._change(target, self._revision), "pets-transition")
+                self._state = ("running" if self._process else "starting") if target else "stopping"
+                task = self._track(self._change(selected if action == "reload" else target,
+                                                self._revision, enabled), "pets-transition")
                 self._operation = task
         if task is not None:
             try:
@@ -212,9 +250,19 @@ class ProcessPetService(PetService):
         if self._operation is task:
             await self.stop()
 
-    async def _change(self, character, revision):
+    async def _change(self, character, revision, enabled):
         async with self._serial:
+            stopped = False
             try:
+                if character is not None:
+                    info = await self._catalog.resolve(character)
+                    if revision != self._revision or self._closed:
+                        return
+                    self._directory = info.directory
+                    if not enabled:
+                        self._state = "off"
+                        return
+                stopped = True
                 await finish_io(self._stop_owned())
                 if revision != self._revision:
                     return
@@ -229,11 +277,18 @@ class ProcessPetService(PetService):
                     self._watcher = self._track(self._watch(self._process), "pets-exit")
                     self._sender = self._track(self._send_replies(self._process), "pets-replies")
             except asyncio.CancelledError:
-                await finish_io(self._stop_owned())
+                if stopped:
+                    await finish_io(self._stop_owned())
                 if revision == self._revision:
-                    self._state, self._target = "off", None
+                    self._state = "running" if self._process else "off"
+                    self._target = self._selected if self._process else None
                 raise
             except Exception as exc:
+                if not stopped:
+                    if revision == self._revision:
+                        self._state = "running" if self._process else "off"
+                        self._target = self._selected if self._process else None
+                    raise
                 await finish_io(self._stop_owned())
                 if revision == self._revision:
                     self._state = "failed"
@@ -241,7 +296,8 @@ class ProcessPetService(PetService):
 
     def _command(self, character):
         entry = ["--pets-child"] if getattr(sys, "frozen", False) else ["-m", "redlotus.pets.desktop"]
-        return [sys.executable, *entry, character, *(["--scale", str(self._scale)] if self._scale != 1 else [])]
+        return [sys.executable, *entry, character, "--resource-dir", str(self._directory),
+                *(["--scale", str(self._scale)] if self._scale != 1 else [])]
 
     async def _launch(self, character):
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0

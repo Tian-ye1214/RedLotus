@@ -16,7 +16,7 @@ from redlotus.runtime.resources import resource_root
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = {
-    "pets.json", "ASSET-NOTICE.md",
+    "ASSET-NOTICE.md",
     "charcoal/pet.json", "charcoal/sprites.png",
     "ivory/pet.json", "ivory/sprites.png",
 }
@@ -28,31 +28,26 @@ spec.loader.exec_module(verifier)
 def test_runtime_assets_are_complete_and_self_contained():
     root = resource_root() / "static/pets"
     actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
-    assert actual == ASSETS
-    catalog = json.loads((root / "pets.json").read_text(encoding="utf-8"))
-    assert catalog["format"] == "redlotus.pet-catalog"
-    assert [pet["id"] for pet in catalog["pets"]] == ["charcoal", "ivory"]
-    for pet in catalog["pets"]:
-        manifest = root / pet["manifest"]
+    assert ASSETS <= actual
+    assert not any(verifier.forbidden_asset("redlotus/static/pets/" + name) for name in actual)
+    assert not (root / "pets.json").exists()
+    for character in ("charcoal", "ivory"):
+        manifest = root / character / "pet.json"
         pack = json.loads(manifest.read_text(encoding="utf-8"))
-        assert pack["id"] == pet["id"]
-        assert pack["canvas"]["width"] == pack["canvas"]["height"] == 100
+        assert set(pack) == {"name", "actions", "enter"}
+        assert pack["name"]
         assert set(pack["actions"]) == {"idle", "look", "happy", "drag", "sleep"}
-        assert len(pack["frames"]) == 14
-        assert set(pack["provenance"]) == {"notice"}
-        assert (manifest.parent / pack["provenance"]["notice"]).resolve() == root / "ASSET-NOTICE.md"
-        png = (manifest.parent / pack["atlas"]["file"]).read_bytes()
+        png = (manifest.parent / "sprites.png").read_bytes()
         assert png[:8] == b"\x89PNG\r\n\x1a\n"
         width, height = struct.unpack(">II", png[16:24])
-        assert (width, height) == (pack["atlas"]["width"], pack["atlas"]["height"])
+        assert (width, height) == (400, 400)
         assert png[25] == 6  # PNG RGBA color type.
-        for frame in pack["frames"].values():
-            assert set(frame) == {"rect"}
-            x, y, w, h = frame["rect"]
-            assert w == h == 100 and 0 <= x <= width - w and 0 <= y <= height - h
-        for action in pack["actions"].values():
-            for frame in action["enter"] + action["sequence"]:
-                assert frame["frame"] in pack["frames"] and frame["duration_ms"] > 0
+        referenced = set()
+        for sequence in (*pack["actions"].values(), *pack["enter"].values()):
+            for frame, duration in sequence:
+                assert 0 <= frame < 16 and duration > 0
+                referenced.add(frame)
+        assert referenced == set(range(14))
 
 
 def test_pets_are_a_four_file_namespace_package():
@@ -98,6 +93,17 @@ def test_archive_checks_require_every_runtime_pet_asset(sdist):
     names += [prefix + "redlotus/static/pets/" + name for name in ASSETS]
     verifier.inspect_names(names, sdist=sdist)
     names.remove(prefix + "redlotus/static/pets/ivory/sprites.png")
+    with pytest.raises(SystemExit, match="[Pp]et"):
+        verifier.inspect_names(names, sdist=sdist)
+
+
+@pytest.mark.parametrize("sdist", [False, True])
+def test_archive_checks_discover_additional_complete_builtin_packs(sdist):
+    prefix = "redlotus-1.0/src/" if sdist else ""
+    names = [prefix + "redlotus/TTS/catalog.json"]
+    names += [prefix + "redlotus/static/pets/" + name for name in ASSETS | {"momo/pet.json", "momo/sprites.png"}]
+    verifier.inspect_names(names, sdist=sdist)
+    names.remove(prefix + "redlotus/static/pets/momo/sprites.png")
     with pytest.raises(SystemExit, match="[Pp]et"):
         verifier.inspect_names(names, sdist=sdist)
 

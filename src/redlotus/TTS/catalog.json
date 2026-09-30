@@ -6,27 +6,169 @@
       "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
       "sha256": "fa5f63d618e5a01526e275a358bb7772e403f84808a4769fba52cffd8160bf74",
       "root": "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
-      "required": ["encoder.int8.onnx", "decoder.onnx", "joiner.int8.onnx", "tokens.txt", "bpe.model"],
+      "required": [
+        "encoder.int8.onnx",
+        "decoder.onnx",
+        "joiner.int8.onnx",
+        "tokens.txt",
+        "bpe.model"
+      ],
       "archive_limit": 150000000,
       "unpack_limit": 190000000
     },
     "tts": {
-      "archive": "kokoro-multi-lang-v1_1.tar.bz2",
-      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_1.tar.bz2",
-      "sha256": "a3f4c73d043860e3fd2e5b06f36795eb81de0fc8e8de6df703245edddd87dbad",
-      "root": "kokoro-multi-lang-v1_1",
-      "required": ["model.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt", "lexicon-zh.txt", "espeak-ng-data/", "dict/", "phone-zh.fst", "date-zh.fst", "number-zh.fst", "LICENSE"],
-      "archive_limit": 400000000,
-      "unpack_limit": 450000000,
-      "compatible": [{
-        "archive": "kokoro-int8-multi-lang-v1_1.tar.bz2",
-        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
-        "sha256": "a1e94694776049035c4f2c6529f003aaece993c76aae9a78995831c3c4dcafc6",
-        "root": "kokoro-int8-multi-lang-v1_1",
-        "required": ["model.int8.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt", "lexicon-zh.txt", "espeak-ng-data/", "dict/", "phone-zh.fst", "date-zh.fst", "number-zh.fst", "LICENSE"],
-        "archive_limit": 165000000,
-        "unpack_limit": 240000000
-      }]
+      "archive": "redlotus-mambo-v1.2.1-onnx-int8-r1.tar.gz",
+      "url": "https://github.com/Tian-ye1214/RedLotus/releases/download/tts-mambo-v1.2.1-r1/redlotus-mambo-v1.2.1-onnx-int8-r1.tar.gz",
+      "sha256": "7a4cd8618955ac502a7c1fa2c261aed0aaddfb026d4418152436471210428be2",
+      "root": "redlotus-mambo-v1.2.1-onnx-int8-r1",
+      "required": [
+        "gpt_encoder.onnx",
+        "gpt_step.onnx",
+        "sovits.onnx",
+        "bert.onnx",
+        "config.json",
+        "mambo.gsppkg",
+        "frontend/",
+        "model.json",
+        "NOTICE.md",
+        "licenses/GPT-SoVITS-cpp-Apache-2.0.txt",
+        "licenses/cppjieba-MIT.txt",
+        "licenses/MamboTTS-project-MIT.txt"
+      ],
+      "archive_limit": 577329774,
+      "unpack_limit": 770000000,
+      "runtime": {
+        "schema": 1,
+        "kind": "tts",
+        "runtime": "mambo-onnx",
+        "native_family": "gpt_sovits_v2",
+        "base_model_id": "mambo-v1.2.1-v2-int8",
+        "sample_rate": 32000,
+        "cache_layout": "growing",
+        "native_model_files": {
+          "gpt_encoder": "gpt_encoder.onnx",
+          "gpt_step": "gpt_step.onnx",
+          "sovits": "sovits.onnx",
+          "bert": "bert.onnx",
+          "config": "config.json",
+          "voices": "mambo.gsppkg",
+          "data_dir": "frontend"
+        },
+        "generation": {
+          "mode": "features"
+        },
+        "voice": {
+          "id": "mambo"
+        }
+      },
+      "compatible": [
+        {
+          "archive": "kokoro-multi-lang-v1_1.tar.bz2",
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_1.tar.bz2",
+          "sha256": "a3f4c73d043860e3fd2e5b06f36795eb81de0fc8e8de6df703245edddd87dbad",
+          "root": "kokoro-multi-lang-v1_1",
+          "required": [
+            "model.onnx",
+            "voices.bin",
+            "tokens.txt",
+            "lexicon-us-en.txt",
+            "lexicon-zh.txt",
+            "espeak-ng-data/",
+            "dict/",
+            "phone-zh.fst",
+            "date-zh.fst",
+            "number-zh.fst",
+            "LICENSE"
+          ],
+          "archive_limit": 400000000,
+          "unpack_limit": 450000000,
+          "runtime": {
+            "schema": 1,
+            "kind": "tts",
+            "runtime": "sherpa-onnx",
+            "native_family": "kokoro",
+            "base_model_id": "kokoro-multi-lang-v1_1",
+            "sample_rate": 24000,
+            "native_model_files": {
+              "model": "model.onnx",
+              "voices": "voices.bin",
+              "tokens": "tokens.txt",
+              "data_dir": "espeak-ng-data",
+              "lexicon": [
+                "lexicon-us-en.txt",
+                "lexicon-zh.txt"
+              ]
+            },
+            "rule_fsts": [
+              "phone-zh.fst",
+              "date-zh.fst",
+              "number-zh.fst"
+            ],
+            "generation": {
+              "mode": "speaker"
+            },
+            "voice": {
+              "id": "bilingual-default",
+              "default_sid": 3,
+              "latin_sid": 0,
+              "english_number_words": true
+            }
+          }
+        },
+        {
+          "archive": "kokoro-int8-multi-lang-v1_1.tar.bz2",
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
+          "sha256": "a1e94694776049035c4f2c6529f003aaece993c76aae9a78995831c3c4dcafc6",
+          "root": "kokoro-int8-multi-lang-v1_1",
+          "required": [
+            "model.int8.onnx",
+            "voices.bin",
+            "tokens.txt",
+            "lexicon-us-en.txt",
+            "lexicon-zh.txt",
+            "espeak-ng-data/",
+            "dict/",
+            "phone-zh.fst",
+            "date-zh.fst",
+            "number-zh.fst",
+            "LICENSE"
+          ],
+          "archive_limit": 165000000,
+          "unpack_limit": 240000000,
+          "runtime": {
+            "schema": 1,
+            "kind": "tts",
+            "runtime": "sherpa-onnx",
+            "native_family": "kokoro",
+            "base_model_id": "kokoro-int8-multi-lang-v1_1",
+            "sample_rate": 24000,
+            "native_model_files": {
+              "model": "model.int8.onnx",
+              "voices": "voices.bin",
+              "tokens": "tokens.txt",
+              "data_dir": "espeak-ng-data",
+              "lexicon": [
+                "lexicon-us-en.txt",
+                "lexicon-zh.txt"
+              ]
+            },
+            "rule_fsts": [
+              "phone-zh.fst",
+              "date-zh.fst",
+              "number-zh.fst"
+            ],
+            "generation": {
+              "mode": "speaker"
+            },
+            "voice": {
+              "id": "bilingual-default",
+              "default_sid": 3,
+              "latin_sid": 0,
+              "english_number_words": true
+            }
+          }
+        }
+      ]
     }
   }
 }

@@ -9,6 +9,8 @@ import inspect
 import json
 import os
 import shutil
+import struct
+import subprocess
 import sys
 import threading
 import time
@@ -34,6 +36,96 @@ from redlotus.runtime.config import (
 _REPARSE_POINT = 0x400
 _workspace_context: ContextVar[WorkspaceContext | None] = ContextVar('workspace_context', default=None)
 _workspace = None
+
+
+@dataclass(frozen=True)
+class FileFingerprint:
+    size: int
+    sha256: str
+
+    def __post_init__(self):
+        if type(self.size) is not int or self.size < 0 or not isinstance(self.sha256, str):
+            raise ValueError("invalid model file fingerprint")
+
+
+class FramedProcess:
+    """A native worker's bounded binary channel and owned process lifetime."""
+
+    def __init__(self, command: list[str], cwd: Path, environment: dict[str, str]):
+        self.process = subprocess.Popen(command, cwd=cwd, env=environment,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+
+    def read_exact(self, size: int) -> bytes:
+        data = bytearray()
+        while len(data) < size:
+            block = self.process.stdout.read(size - len(data))
+            if not block:
+                raise ValueError("原生运行组件已退出或返回了不完整数据")
+            data.extend(block)
+        return bytes(data)
+
+    def receive_header(self, limit: int) -> dict:
+        size, = struct.unpack("<I", self.read_exact(4))
+        if not 0 < size <= limit:
+            raise ValueError("原生运行组件返回了无效消息长度")
+        row = json.loads(self.read_exact(size))
+        if not isinstance(row, dict):
+            raise ValueError("原生运行组件返回了无效消息")
+        return row
+
+    def send(self, data: bytes) -> None:
+        self.process.stdin.write(struct.pack("<I", len(data)) + data)
+        self.process.stdin.flush()
+
+    @contextmanager
+    def responses(self, block_limit: int, total_limit: int) -> Iterator[Iterator[bytes]]:
+        """Drain one bounded reply before allowing the next request on this pipe."""
+        blocks = self._response_blocks(block_limit, total_limit)
+        try:
+            yield blocks
+        finally:
+            for _ in blocks:
+                pass
+
+    def _response_blocks(self, block_limit: int, total_limit: int) -> Iterator[bytes]:
+        total = 0
+        try:
+            while True:
+                row = self.receive_header(8192)
+                if row.get("status") == "error":
+                    raise RuntimeError(str(row.get("message", "原生运行组件失败")))
+                size = row.get("size")
+                if type(size) is not int:
+                    raise ValueError("原生运行组件返回了无效分块长度")
+                if row.get("status") == "done":
+                    if not total or size != total:
+                        raise ValueError("原生运行组件返回了不匹配的完成消息")
+                    return
+                if row.get("status") != "data" or not 0 < size <= block_limit or total + size > total_limit:
+                    raise ValueError("原生运行组件返回了超限或无效的分块")
+                total += size
+                yield self.read_exact(size)
+        except (OSError, ValueError):
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self.process is None:
+            return
+        process, self.process = self.process, None
+        try:
+            process.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        finally:
+            process.stdout.close()
+
 
 @dataclass(frozen=True)
 class WorkspaceContext:

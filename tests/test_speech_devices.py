@@ -1,3 +1,4 @@
+from redlotus.TTS import inference
 """Device preflight regressions; these tests never open native audio streams."""
 
 import asyncio
@@ -10,8 +11,9 @@ import numpy as np
 import pytest
 
 from redlotus.TTS import PCMChunk, SpeechUnavailable
-from redlotus.TTS import asr, audio
-from redlotus.TTS.asr import AudioCapture
+import redlotus.TTS as asr
+from redlotus.TTS import audio
+from redlotus.TTS.audio import AudioCapture
 from redlotus.TTS.audio import AudioIO, AudioPlayer
 
 
@@ -283,7 +285,7 @@ def test_asr_loader_announces_native_warmup_before_warming(tmp_path, monkeypatch
             return ""
 
     monkeypatch.setitem(sys.modules, "sherpa_onnx", SimpleNamespace(OnlineRecognizer=Recognizer))
-    model = asr.XASRModel.load(tmp_path, 2)
+    model = inference.XASRModel.load(tmp_path, 2)
     events.append("warming")
     model.warmup()
     assert isinstance(model._native, Recognizer)
@@ -344,7 +346,7 @@ async def test_asr_eof_tail_completes_last_word_once_after_endpoint():
 
         @asynccontextmanager
         async def acquire(self, kind):
-            yield asr.XASRModel(native)
+            yield inference.XASRModel(native)
 
         async def run(self, kind, operation, *args):
             return operation(*args)
