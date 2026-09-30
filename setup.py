@@ -7,7 +7,7 @@ import sysconfig
 from setuptools import setup
 from setuptools.command.build_py import build_py
 from setuptools.command.sdist import sdist
-from wheel.bdist_wheel import bdist_wheel
+from setuptools.command.bdist_wheel import bdist_wheel
 
 
 NATIVE = Path("src/redlotus/TTS/native")
@@ -22,7 +22,7 @@ class SpeechBuildPy(build_py):
         files = super().find_data_files(package, src_dir)
         if os.name == "nt":
             return files
-        return [name for name in files if "/TTS/native/" not in Path(name).as_posix()]
+        return [name for name in files if "/TTS/native/" not in name.replace("\\", "/")]
 
 
 class SpeechArtifacts:

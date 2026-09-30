@@ -2499,6 +2499,8 @@ dev = [
     { name = "opencv-python-headless" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "setuptools" },
+    { name = "wheel" },
 ]
 pets = [
     { name = "pyside6" },
@@ -2561,6 +2563,7 @@ requires-dist = [
     { name = "reportlab", marker = "extra == 'viz'", specifier = ">=4.5.0" },
     { name = "requests", specifier = ">=2.33.1" },
     { name = "rich", specifier = ">=15.0.0" },
+    { name = "setuptools", marker = "extra == 'dev'", specifier = ">=70.1" },
     { name = "sherpa-onnx", marker = "extra == 'all'", specifier = "==1.13.8" },
     { name = "sherpa-onnx", marker = "extra == 'build'", specifier = "==1.13.8" },
     { name = "sherpa-onnx", marker = "extra == 'speech'", specifier = "==1.13.8" },
@@ -2576,6 +2579,7 @@ requires-dist = [
     { name = "textual", specifier = ">=8.2.7" },
     { name = "wechatbot-sdk", marker = "extra == 'all'", specifier = ">=0.2.1" },
     { name = "wechatbot-sdk", marker = "extra == 'bots'", specifier = ">=0.2.1" },
+    { name = "wheel", marker = "extra == 'dev'" },
     { name = "xlrd", specifier = ">=2.0.1" },
 ]
 provides-extras = ["browser", "bots", "viz", "speech", "pets", "build", "dev", "all"]
@@ -3108,6 +3112,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/42/fe/fc419ff228e64a5d02de7ad06a5b663dcef10502e10a2263ae667b7aa80b/wechatbot_sdk-0.2.1.tar.gz", hash = "sha256:7c06d252fdc35110e0ef6fdd701469c04a1436a602b1088e4d3c30f944ec01c3", size = 14824, upload-time = "2026-04-17T15:21:16.929Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/96/20/ddb52f93bc90e38d4112ba427a8ec7867a82fdea30e593540fe78b7dfd76/wechatbot_sdk-0.2.1-py3-none-any.whl", hash = "sha256:957e13161c9d689806cd78c39d5c050f1365ede4cfa8653ce4a7395ce1278b19", size = 16608, upload-time = "2026-04-17T15:21:15.526Z" },
+]
+
+[[package]]
+name = "wheel"
+version = "0.48.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d0/20/50ed6bdf27dec98b568a8ae25dc599f35baa3d9709f9e83fd1edb56b9a90/wheel-0.48.0.tar.gz", hash = "sha256:94800765601e9171bf5d58d066e640662842bcedcbab982b2c90787a2c987322", size = 66471, upload-time = "2026-08-11T22:02:27.327Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl", hash = "sha256:3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab", size = 33320, upload-time = "2026-08-11T22:02:26.1Z" },
 ]
 
 [[package]]

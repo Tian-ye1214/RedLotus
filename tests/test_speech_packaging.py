@@ -2,7 +2,7 @@
 
 import importlib.util
 import runpy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -157,6 +157,7 @@ def test_non_windows_build_filters_native_worker_and_notices(monkeypatch):
              r"src\redlotus\static\pets\ivory\sprites.png"]
     monkeypatch.setattr(build_py, "find_data_files", lambda *args: files)
     monkeypatch.setitem(speech_build.find_data_files.__globals__, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setitem(speech_build.find_data_files.__globals__, "Path", PurePosixPath)
     command = speech_build(setuptools.Distribution())
     assert command.find_data_files("redlotus", "src/redlotus") == files[2:]
 

@@ -178,6 +178,30 @@ async def test_failed_download_keeps_valid_incomplete_progress(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_clean_preserves_owned_incomplete_download_for_resume(tmp_path, monkeypatch, speech):
+    source, spec = tiny_archive(tmp_path, monkeypatch)
+    prefix = source.read_bytes()[:10]
+    part, metadata = owned_download(speech, spec, prefix)
+
+    await speech.clean()
+
+    assert part.read_bytes() == prefix and metadata.exists()
+    await speech.close()
+
+
+@pytest.mark.asyncio
+async def test_clean_removes_only_complete_owned_download(tmp_path, monkeypatch, speech):
+    source, spec = tiny_archive(tmp_path, monkeypatch)
+    part, metadata = owned_download(speech, spec, source.read_bytes())
+
+    await speech.clean()
+
+    assert not part.exists() and not metadata.exists()
+    assert source.exists()
+    await speech.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_silk_decode_failure_or_cancel_never_writes_files(monkeypatch, cancel):
     import builtins

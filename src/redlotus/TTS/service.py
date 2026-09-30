@@ -541,7 +541,8 @@ class SpeechService:
         for kind, spec in ((kind, spec) for kind in ModelKind for spec in self.catalog.all_specs(kind)):
             try:
                 with FileLock(str(self._dir(".locks") / f"download-{kind}-{spec.version}.lock")).acquire(timeout=0):
-                    self._discard_download(spec)
+                    resources.discard_completed_partial(*self._download_paths(spec),
+                                                        spec.identity, spec.archive_limit)
             except Timeout:
                 pass
         self._clean_staging()
