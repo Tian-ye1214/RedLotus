@@ -598,7 +598,7 @@ class SlashCommands:
             answer = await self.system.toolkit.ask_user(
                 f"Type CLEAR {label} to clear {label}. This cannot be undone."
             )
-            if answer.strip() == "CLEAR " + label:
+            if getattr(answer, "return_value", answer).strip() == "CLEAR " + label:
                 await (
                     memory.clear_long_term()
                     if global_scope

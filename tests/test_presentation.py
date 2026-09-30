@@ -12,6 +12,30 @@ from redlotus.ui.presentation import (
 from redlotus.ui.widgets import UsagePanel
 
 
+def test_memory_clear_accepts_rich_confirmation(monkeypatch):
+    import asyncio
+    from itertools import product
+    from unittest.mock import AsyncMock, Mock
+    from pydantic_ai import ToolReturn
+    from redlotus.ui import cli_commands
+
+    for scope, confirmed in product(("STM", "LTM"), (False, True)):
+        memory = Mock(short_term_snapshot=AsyncMock(return_value={}),
+                      clear_short_term=AsyncMock(), clear_long_term=AsyncMock())
+        memory.reader.long_term_snapshot = AsyncMock(return_value={})
+        system = SimpleNamespace(_memory=memory, wait_for_memory_quiescent=AsyncMock(return_value=True),
+            toolkit=SimpleNamespace(ask_user=AsyncMock(return_value=ToolReturn(
+                return_value=f"CLEAR {scope}" if confirmed else "cancel", content=["synthetic attachment"]))))
+        for name in ("_format_stm_snapshot", "_format_ltm_snapshot", "print_markdown_panel", "print_success"):
+            monkeypatch.setattr(cli_commands, name, Mock(return_value="snapshot"))
+        command = cli_commands.SlashCommands(SimpleNamespace(system=system), None, f"/{scope} clear")
+        asyncio.run(command.memory())
+        selected = memory.clear_long_term if scope == "LTM" else memory.clear_short_term
+        other = memory.clear_short_term if scope == "LTM" else memory.clear_long_term
+        assert selected.await_count == int(confirmed)
+        other.assert_not_awaited()
+
+
 def test_line_diff_retains_replace_delete_insert_order_and_numbers():
     lines = compute_line_diff(
         "keep\nold\nmiddle\nremoved\nend\n",

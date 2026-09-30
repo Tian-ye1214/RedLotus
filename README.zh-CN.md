@@ -25,7 +25,7 @@ redlotus
 
 ## 主要功能
 
-此前 `1.0.1.post1` 发布计划采用标题 `1.0.1-release`，保留线上既有 `1.0.1`。原授权豁免 Linux、macOS、真实 QQ／微信账号及未配置模型协议的真实验收，对应功能保留并标记未验证；旧版 `1.0.1` 启动及升级测试已从范围移除。本轮终端控制改动不发布或替换线上制品。记录状态见[项目设计](docs/design.md)，已发布制品及哈希见 [GitHub Releases](https://github.com/Tian-ye1214/RedLotus/releases)。
+各版本的制品、哈希、验收结果和未验收范围见 [GitHub Releases](https://github.com/Tian-ye1214/RedLotus/releases)。模拟通道测试不代表真实 QQ／微信账号联调通过。
 
 每次模型请求前，使用已报告的真实输入 Token 检查 `ceil(min(配置比例×上下文容量, 上下文容量－最大输出))`。支持持久检查点的主 Agent、子 Agent 和记忆请求被服务判定超限时，沿完整证据和闭合工具调用边界分段并发压缩，摘要全部保存成功后只重试该请求一次，不重复已经执行的工具；日志保留原始容量拒绝，服务未返回的 usage 仍记为未知。原始记录和 system 保留。
 
@@ -229,6 +229,7 @@ npx clawhub --dir skills install <slug>
 
 - 会话轨迹和感知任务保存在项目 `.redlotus`，不可变引用快照保存在项目 `WorkDatabase`；压缩只改变模型视图，完整原文保留。
 - 项目情景与全局长期记录保存在 LanceDB `memory_records_v3`，按 scope 和项目隔离，通过向量检索与重排召回，服务不可用时保留文本检索。
+- 本地 LanceDB 事务要求文件系统支持硬链接；Windows 使用 NTFS。exFAT 无法提交 LanceDB 记录，见[上游限制](https://github.com/lancedb/lancedb/issues/1231#issuecomment-2069322193)。
 - `MEMORY.md` 保存用户画像、环境、行为约束与通用经验，不设固定字符上限。它与 system prompt 在会话开始时完整形成快照，写入记忆不重写本会话前缀；新信息通过工具结果和检索消费，新会话读取最新版本。
 - 文件和命令工具默认操作当前项目，生成产物保存在 `WorkDatabase/`。`/cd` 先取消旧会话，再切换运行上下文。
 - 日志年龄清理每个会话只在输入开放前执行一次，仅按修改时间处理日志根目录直接包含的 `*.log`，严格超过 `storage.cleanup.log_retention_days` 才删除。字段缺失或小于等于零时跳过，不使用 14 天兜底。日志不按大小轮转，不创建、重命名或删除 `.log.1`，已有文件原样保留；普通日志写入和后台周期任务不触发清理。
@@ -266,7 +267,7 @@ QQ 接入需要先运行 [NapCat](https://github.com/NapNeko/NapCatQQ)，并配�
 git clone https://github.com/Tian-ye1214/RedLotus.git
 cd RedLotus
 
-pip install -e ".[dev]"
+pip install -e ".[dev,bots]"
 python main.py
 pytest -q
 ```

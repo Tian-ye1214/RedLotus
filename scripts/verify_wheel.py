@@ -26,7 +26,8 @@ SPEECH_NATIVE_ASSETS = {"redlotus_mambo.exe", "upstream-license.txt", "notice.md
 SPEECH_NATIVE_SOURCE = {"mambo_worker.cpp", "upstream.patch", "compacttrie.hpp",
                         "pronunciationdictionary.hpp", "streamingvocoder.hpp"}
 WORKER_SHA256 = "ce05b53e991313a7122b075035b94b33e8c2b2a31a25dad0b67f887c1b805f39"
-RELEASE_SCRIPTS = {"check_structure.py", "verify_wheel.py", "build_native_speech.py"}
+RELEASE_SCRIPTS = {"check_structure.py", "verify_wheel.py", "build_native_speech.py",
+                   "verify_live.py", "live_cases.py"}
 
 
 def forbidden_asset(name: str, *, sdist: bool = False) -> bool:

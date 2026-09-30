@@ -2,6 +2,8 @@ include README.md
 recursive-include tests *.py
 include scripts/check_structure.py
 include scripts/verify_wheel.py
+include scripts/verify_live.py
+include scripts/live_cases.py
 include src/redlotus/TTS/catalog.json
 include src/redlotus/TTS/native/mambo_worker.cpp
 include src/redlotus/TTS/native/upstream.patch
