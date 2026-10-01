@@ -2,7 +2,7 @@
 .SYNOPSIS
     将已验收、已冻结 SHA256 的 wheel 和 sdist 发布到 PyPI。
 .EXAMPLE
-    .\scripts\publish.ps1 -Version 1.0.1.post1 -ArtifactDirectory .\accepted-release
+    .\scripts\publish.ps1 -Version 1.1.0 -ArtifactDirectory .\accepted-release
 .NOTES
     制品目录必须包含 SHA256SUMS.txt。项目版本和制品版本必须一致。
     PYPI_TOKEN 从项目根 .env 读取；发布不修改版本、不重建或删除制品。

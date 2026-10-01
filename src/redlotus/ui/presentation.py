@@ -7,14 +7,17 @@ import difflib
 import math
 import sys
 import traceback
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from rich.ansi import AnsiDecoder
 from rich.align import Align
 from rich.console import Console, Group
 from rich.markdown import Markdown
@@ -34,14 +37,7 @@ from redlotus.core.history import (
 from redlotus.runtime import logging as logger
 from redlotus.runtime.resources import conversations_root
 from redlotus.sessions.control import UserMessage
-
-
-@dataclass(frozen=True)
-class ContextUsageItem:
-    role_label: str
-    used_tokens: int
-    max_tokens: int
-    percent: float
+from redlotus.sessions.context import ContextUsageItem
 
 
 class OutputSink(Protocol):
@@ -49,6 +45,36 @@ class OutputSink(Protocol):
 
     def emit(self, renderable: Any) -> None: ...
     def update(self, action: str, *args) -> None: ...
+
+
+class TextualOutputSink(OutputSink):
+    def __init__(self, app: Any, log: Any) -> None:
+        self._app = app
+        self._log = log
+        self._ansi_decoder = AnsiDecoder()
+
+    supports_model_stream = True
+
+    def emit(self, renderable: Any) -> None:
+        parts = (
+            list(self._ansi_decoder.decode(renderable))
+            if isinstance(renderable, str) and "\x1b[" in renderable
+            else [renderable]
+        )
+
+        def write():
+            for part in parts:
+                self._log.write(part, scroll_end=True)
+
+        self._app.call_ui(write)
+
+    def update(self, action: str, *args) -> None:
+        if action == "rule":
+            self.emit(Text(args[0], style="dim"))
+        else:
+            self._app.call_ui(lambda: getattr(self._app, action)(*args))
+
+
 
 
 class LegacyOutputSink:
@@ -69,6 +95,7 @@ class LegacyOutputSink:
 
 _console = Console(highlight=False, legacy_windows=sys.platform == "win32")
 _sink: OutputSink = LegacyOutputSink(_console)
+OUTPUT_SINK = ContextVar("output_sink", default=None)
 
 
 def set_output_sink(sink: OutputSink | None) -> None:
@@ -77,18 +104,18 @@ def set_output_sink(sink: OutputSink | None) -> None:
 
 
 def supports_model_stream() -> bool:
-    return _sink.supports_model_stream
+    return (OUTPUT_SINK.get() or _sink).supports_model_stream
 
 
 def emit_renderable(renderable: Any) -> None:
-    _sink.emit(renderable)
+    (OUTPUT_SINK.get() or _sink).emit(renderable)
 
 
 logger.console_sink = emit_renderable
 
 
 def update_output(action: str, *args) -> None:
-    _sink.update(action, *args)
+    (OUTPUT_SINK.get() or _sink).update(action, *args)
 
 
 class DiffKind(StrEnum):
@@ -299,10 +326,10 @@ def context_usage_renderable(items) -> Align:
     return Align.right(Text("  ".join(parts), style="dim"))
 
 
-def user_text_panel(content, title, *, text_style="bold white", border_style="bright_blue") -> Panel:
-    """Frame user text and streaming output with the same terminal panel layout."""
+def user_text_panel(content, title, *, text_style="bold white", border_style="bright_blue", markdown=False) -> Panel:
+    """Keep user input literal; assistant callers explicitly opt into Markdown."""
     return Panel(
-        Text(content or " ", style=text_style), title=title, title_align="left",
+        (Markdown if markdown else Text)(content or " ", style=text_style), title=title, title_align="left",
         border_style=border_style, padding=(0, 1), expand=False,
     )
 
@@ -758,3 +785,38 @@ def handle_turn_error(e: Exception) -> None:
         return
     print_warning(f"未预期的系统错误: {e}")
     logger.error("详细信息:\n%s", traceback.format_exc())
+
+
+@dataclass(frozen=True)
+class VisibleConversationEntry:
+    role: Literal["用户", "助手"]
+    text: str
+
+
+def visible_conversation_entries(messages) -> list[VisibleConversationEntry]:
+    """Keep only human-readable turns when replaying a restored conversation."""
+    entries = []
+    for message in messages:
+        if isinstance(message, ModelRequest):
+            parts = []
+            for part in message.parts:
+                if not isinstance(part, UserPromptPart):
+                    continue
+                content = part.content
+                if isinstance(content, str):
+                    parts.append(content)
+                elif isinstance(content, (list, tuple)) and content:
+                    # UserMessage.to_prompt() keeps the original request first;
+                    # later entries are references, media, or runtime metadata.
+                    if isinstance(content[0], str):
+                        parts.append(content[0])
+            role = "用户"
+        elif isinstance(message, ModelResponse):
+            parts = [part.content for part in message.parts if isinstance(part, TextPart)]
+            role = "助手"
+        else:
+            continue
+        text = "\n".join(part for part in parts if part.strip())
+        if text:
+            entries.append(VisibleConversationEntry(role, text))
+    return entries

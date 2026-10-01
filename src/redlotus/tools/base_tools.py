@@ -10,6 +10,7 @@ import mimetypes
 import platform as _platform
 import re
 import shlex
+import shutil
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -21,6 +22,8 @@ from ddgs import DDGS
 from pydantic_ai import BinaryContent, ToolReturn
 
 from redlotus.runtime import logging as logger
+from redlotus.runtime.access import FileAccessPolicy
+from redlotus.api import ChannelSender, LocalSender, LoopChannelSender, OutboundFile
 from redlotus.runtime.config import get_env
 from redlotus.runtime.network import get_client
 from redlotus.runtime.resources import (
@@ -28,6 +31,7 @@ from redlotus.runtime.resources import (
     atomic_write,
     bind_to_loop,
     current_workspace,
+    finish_io,
     runtime_dir,
     safe_name,
     user_skills_dir,
@@ -113,9 +117,14 @@ class BasicToolkit:
         self.review_store = PendingReviewStore(self._file_lock)
         self._references = ReferenceStore(self.workspace)
         self._ask_user_handler = None
+        self.access_policy = FileAccessPolicy(self.workspace.root, self._readable_path, self.ask_user)
+        self.channel_sender: ChannelSender = LocalSender()
         self._show_diff = show_diff
         self.skills_manager = skills_manager
+        if skills_manager is not None:
+            skills_manager.access_policy = self.access_policy
         self._browser_session = PlaywrightBrowserSession(self.workspace)
+        self._browser_session.access_policy = self.access_policy
         self._dangerous_patterns = [
             "rm -rf /",
             "rm -rf /*",
@@ -130,16 +139,6 @@ class BasicToolkit:
         self._dangerous_start_patterns = [
             "eval ",
             "exec ",
-        ]
-        self._confirm_patterns = [
-            (re.compile(r"\brm\s+-\w*r", re.I), "rm 递归删除"),
-            (re.compile(r"\brd\s+/s", re.I), "rd /s 递归删除目录"),
-            (re.compile(r"\brmdir\s+/s", re.I), "rmdir /s 递归删除目录"),
-            (re.compile(r"\bdel\s+/s", re.I), "del /s 递归删除文件"),
-            (
-                re.compile(r"\bRemove-Item\b.*-Recurse", re.I),
-                "Remove-Item -Recurse 递归删除",
-            ),
         ]
 
     async def close(self) -> None:
@@ -157,6 +156,9 @@ class BasicToolkit:
         child.review_store = self.review_store
         child._artifact_dir = self._artifact_dir
         child.set_ask_user_handler(bind_to_loop(self.ask_user, owner_loop))
+        child.access_policy.scope = self.access_policy.scope
+        child.access_policy.approvals = self.access_policy.approvals
+        child.channel_sender = LoopChannelSender(self.channel_sender, owner_loop)
         return child
 
     def set_task_directory(self, task_name: str) -> Path:
@@ -182,13 +184,6 @@ class BasicToolkit:
     def _readable_path(self, name: str) -> Path:
         return resolve_readable_path(name, work_base=self.workspace.root)
 
-    def _safe_path(self, name: str) -> Path:
-        path = self._readable_path(name)
-        root = self.workspace.root
-        if not path.is_relative_to(root):
-            raise ValueError(f"Path not under current project: {path}")
-        return path
-
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
         """Check if command contains dangerous patterns"""
         command_lower = command.lower().strip()
@@ -210,13 +205,6 @@ class BasicToolkit:
                     f"Skills dir: {user_skills_dir(self.workspace)}"
                 )
         return True, ""
-
-    def _command_needs_confirm(self, command: str) -> str | None:
-        """Return a short reason if the command performs a recursive delete, else None."""
-        for pattern, reason in self._confirm_patterns:
-            if pattern.search(command):
-                return reason
-        return None
 
     def set_ask_user_handler(self, handler):
         """
@@ -325,18 +313,27 @@ class BasicToolkit:
         except Exception as e:
             return f"Error listing files: {e}"
 
-    def _update_file(self, name, update):
+    async def _update_file(self, name, update):
         try:
-            path = self._safe_path(name)
-            old, content = self.review_store.write(path, name, update)
+            proposal = await finish_io(asyncio.to_thread(self.access_policy.plan_write, name, update))
+            if proposal.before == proposal.after:
+                return f"Unchanged '{name}' (content already matches)"
+            await self.access_policy.authorize(proposal)
+            def approved(previous):
+                self.access_policy.verify(proposal)
+                if previous != proposal.before:
+                    raise ValueError("文件已变化，请重新读取后发起操作。")
+                return proposal.after
+            old, content = await finish_io(asyncio.to_thread(self.review_store.write, proposal.path, name, approved))
             added, deleted, modified = self._show_diff(old, content, path=name)
             return f"Saved '{name}' ({len(content)} characters; +{added} -{deleted} ~{modified})"
         except (OSError, ValueError) as exc:
             return f"Error updating '{name}': {exc}"
 
-    def write_file(self, name: str, content: str | None = None, copy_from: str | None = None) -> str:
+    async def write_file(self, name: str, content: str | None = None, copy_from: str | None = None) -> str:
         """
-        Create or overwrite a project file and display the resulting diff.
+        Create or overwrite a file. WorkDatabase writes are direct; all other writes
+        require the user's approval of the concrete path and diff BEFORE modification.
         Provide exactly one of content or copy_from. For an exact UTF-8 text copy,
         choose copy_from to preserve source characters without regenerating them.
 
@@ -347,13 +344,14 @@ class BasicToolkit:
         """
         if (content is None) == (copy_from is None):
             return "Error: provide exactly one of content or copy_from."
-        return self._update_file(name, lambda previous: content if copy_from is None else self._readable_path(copy_from).read_bytes().decode("utf-8"))
+        return await self._update_file(name, lambda previous: content if copy_from is None else self._readable_path(copy_from).read_bytes().decode("utf-8"))
 
-    def edit_file(self, name: str, old_string: str, new_string: str) -> str:
+    async def edit_file(self, name: str, old_string: str, new_string: str) -> str:
         """
         Edit an existing file by replacing an EXACT, UNIQUE snippet (string replace).
         Prefer this over write_file when modifying an existing file: it makes a precise,
         local change and shows a colored diff instead of rewriting the whole file.
+        Outside WorkDatabase, the user must approve the diff before any write.
 
         Args:
             name: Path relative to the current project; use WorkDatabase/ for generated artifacts.
@@ -372,19 +370,54 @@ class BasicToolkit:
                 raise ValueError("old_string and new_string are identical")
             return previous.replace(old_string, new_string, 1)
 
-        return self._update_file(name, replace)
+        return await self._update_file(name, replace)
 
-    def search_in_files(self, keyword: str, file_extension: str = None) -> str:
+    async def delete_file(self, name: str, recursive: bool = False) -> str:
+        """Delete the named file, or an explicit directory with recursive=True.
+
+        WorkDatabase content can be removed directly; external deletion needs prior
+        confirmation of its actual path and scope. Changed targets are never deleted.
+        """
+        try:
+            proposal = await finish_io(asyncio.to_thread(self.access_policy.plan_delete, name, recursive))
+            await self.access_policy.authorize(proposal)
+            def remove():
+                self.access_policy.verify(proposal)
+                if proposal.path.is_dir():
+                    shutil.rmtree(proposal.path)
+                else:
+                    proposal.path.unlink()
+            await finish_io(asyncio.to_thread(self.review_store.remove, proposal.path, remove))
+            return f"Deleted '{proposal.path}'"
+        except (OSError, ValueError) as exc:
+            return f"Error deleting '{name}': {exc}"
+
+    async def send_file(self, name: str) -> str:
+        """Send this existing file/image to the CURRENT chat, or show its CLI link.
+
+        Reads OS-accessible paths, including the desktop. Do not guess ambiguous
+        filenames: list candidates or ask. There is no recipient parameter.
+        An unconfirmed result must not be automatically retried.
+        """
+        try:
+            item = await finish_io(asyncio.to_thread(OutboundFile.read, self._readable_path(name)))
+            return await self.channel_sender.send_file(item)
+        except Exception as exc:
+            return f"Error: 文件发送未确认，未自动重发：{exc}"
+
+    def search_in_files(self, keyword: str, file_extension: str = None, directory: str = "") -> str:
         """
         Search for a keyword in files.
 
         Args:
             keyword: Keyword to search for
             file_extension: Optional, limit search to specific file types, e.g., ".py", ".txt"
+            directory: Optional OS-readable directory; omitted searches the current project.
         """
         results = []
         try:
-            for file_path in self.workspace.root.rglob("*"):
+            root = self._readable_path(directory) if directory else self.workspace.root
+            for file_path in root.rglob("*"):
                 if not file_path.is_file():
                     continue
                 if file_extension and file_path.suffix != file_extension:
@@ -393,7 +426,7 @@ class BasicToolkit:
                     with open(self._readable_path(str(file_path)), "r", encoding="utf-8", errors="ignore") as f:
                         for line_num, line in enumerate(f, 1):
                             if keyword.lower() in line.lower():
-                                rel_path = file_path.relative_to(self.workspace.root)
+                                rel_path = file_path.relative_to(root)
                                 results.append(f"{rel_path}:{line_num}: {line.strip()}")
                 except Exception:
                     continue
@@ -451,13 +484,6 @@ class BasicToolkit:
             if not is_safe:
                 return f"Error: Security check rejected the command: {reason}"
 
-            danger = self._command_needs_confirm(command)
-            if danger:
-                answer = await self.ask_user(f"⚠ 该命令将递归删除文件:\n{command}\n确认执行？(y/N)")
-                text = answer.return_value if isinstance(answer, ToolReturn) else answer
-                if str(text).strip().lower() not in ("y", "yes", "是", "确认"):
-                    return f"已取消执行（用户未确认）: {danger}"
-
             async with self._command_lock:
                 use_shell = any(
                     c in command for c in ["|", ">", "<", "&&", "||", ";", "*", "?"]
@@ -478,6 +504,7 @@ class BasicToolkit:
                     env=overrides,
                     timeout=timeout,
                     workspace=self.workspace,
+                    access_policy=self.access_policy,
                 )
                 return result.to_text()
         except subprocess.TimeoutExpired as exc:
@@ -490,7 +517,7 @@ class BasicToolkit:
         return describe_execution_environment(
             cwd=self.workspace.root,
             workspace=self.workspace,
-        )
+        ) + f"\nDesktop (OS resolved): {self.access_policy.desktop()}"
 
     async def generate_image(
         self,
@@ -530,8 +557,9 @@ class BasicToolkit:
         name = f"generated_{uuid4().hex}{ext}"
         try:
             path = self._artifact_dir / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(path.write_bytes, image_bytes)
+            proposal = await finish_io(asyncio.to_thread(self.access_policy.plan_output, str(path), image_bytes))
+            await self.access_policy.authorize(proposal)
+            await finish_io(asyncio.to_thread(self.access_policy.commit_output, proposal, image_bytes))
         except ValueError as e:
             return f"Security error: {e}"
 
@@ -598,6 +626,8 @@ class ReviewEntry:
         return compute_hunks(self.baseline, self.snapshot)
 
     def check_current(self, current):
+        if self.path.resolve() != self.path:
+            raise ValueError("文件实际路径已变化；审查操作未应用。")
         rejected = {key for key, value in self.decisions.items() if value}
         expected = (
             None if not self.existed and len(rejected) == len(self.hunks)
@@ -652,6 +682,15 @@ class PendingReviewStore:
             callback = self._on_change
         self._notify(callback)
         return previous or "", content
+
+    def remove(self, path: Path, operation):
+        with self._lock:
+            operation()
+            for key in list(self._entries):
+                if Path(key) == path or Path(key).is_relative_to(path):
+                    self._entries.pop(key)
+            callback = self._on_change
+        self._notify(callback)
 
     def entries(self) -> list[ReviewEntry]:
         with self._lock:

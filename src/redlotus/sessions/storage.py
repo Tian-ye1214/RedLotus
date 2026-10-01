@@ -10,6 +10,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from enum import Enum
 from uuid import uuid4
 
 from filelock import FileLock, Timeout
@@ -570,5 +571,136 @@ class SessionFile(SessionJournal):
 
 
 
+
+
+
+
+@dataclass(frozen=True)
+class WorkspaceSnapshot:
+    path: Path
+    meta: dict
+    saved_at: datetime
+    agent: str
+    date: str
+    topic: str
+    message_count: int
+    error: str = ""
+
+    @property
+    def is_loadable(self) -> bool:
+        return not self.error
+
+    @property
+    def title(self) -> str:
+        return self.topic.strip() if isinstance(self.topic, str) and self.topic.strip() else "未命名会话"
+
+    @property
+    def session_id(self) -> str:
+        return str(self.meta.get("session_id") or self.path.parent.name)
+
+    @property
+    def completed_turns(self) -> int:
+        value = self.meta.get("completed_turns", 0)
+        return value if isinstance(value, int) and value >= 0 else 0
+
+    @property
+    def turn_count_label(self) -> str:
+        return (f"已确认 {self.completed_turns} 回合（历史计数不完整）"
+                if self.meta.get("turn_count_incomplete") else f"{self.completed_turns} 回合")
+
+    @property
+    def status(self) -> str:
+        if not self.is_loadable:
+            return "损坏"
+        return {
+            "active": "进行中",
+            "interrupted": "上次已中断",
+            "completed": "已完成",
+            "new": "未开始",
+        }[session_status(self.meta)]
+
+    @property
+    def local_activity_time(self) -> str:
+        return self.saved_at.astimezone().strftime("%Y-%m-%d %H:%M")
+
+    @property
+    def error_summary(self) -> str:
+        return " ".join(self.error.split()) or "会话文件不可读取"
+
+    @property
+    def label(self):
+        if not self.is_loadable:
+            return (
+                f"标题：无法加载 · 本地活动：{self.local_activity_time} · "
+                f"状态：损坏 · 原因：{self.error_summary}"
+            )
+        return (
+            f"标题：{self.title} · 本地活动：{self.local_activity_time} · "
+            f"{self.turn_count_label} · 状态：{self.status} · 会话：{self.session_id}"
+        )
+
+
+def list_workspace_snapshots(*, root=None, include_unloadable=False):
+    snapshots = []
+    for entry in SessionFile.scan_info(root or conversations_root()):
+        path, meta = entry.path, entry.info
+        if not entry.error:
+            snapshots.append(WorkspaceSnapshot(
+                path, meta, datetime.fromisoformat(meta["saved_at"]), "coordinator",
+                meta["saved_at"][:10], meta["title"], 0
+            ))
+        else:
+            from redlotus.ui.presentation import print_warning
+            print_warning(f"会话无法加载: {path}: {entry.error}")
+            if include_unloadable:
+                try:
+                    saved_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+                except OSError:
+                    saved_at = datetime.fromtimestamp(0, timezone.utc)
+                snapshots.append(WorkspaceSnapshot(
+                    path, {}, saved_at, "coordinator", "", path.parent.name, 0, entry.error
+                ))
+    return sorted(snapshots, key=lambda row: (row.saved_at, str(row.path)), reverse=True)
+
+
+class SnapshotAction(str, Enum):
+    NEW = "new"
+    RESTORE = "restore"
+    CANCEL = "cancel"
+
+
+@dataclass(frozen=True)
+class SnapshotSelection:
+    action: SnapshotAction
+    snapshot: WorkspaceSnapshot | None = None
+
+    @classmethod
+    def resolve(cls, choice, snapshots):
+        if choice in {"c", "cancel"}:
+            return cls(SnapshotAction.CANCEL)
+        if choice in {"0", "new"}:
+            return cls(SnapshotAction.NEW)
+        for index, snapshot in enumerate(snapshots, 1):
+            if choice in {str(index), snapshot.session_id} and snapshot.is_loadable:
+                return cls(SnapshotAction.RESTORE, snapshot)
+        raise ValueError("无效的会话编号或身份，请先 /load 查看可用会话。")
+
+
+
+
+
+
+def format_snapshot_choices(snapshots: list[WorkspaceSnapshot]) -> str:
+    return "\n".join(
+        [
+            "选择新建会话或恢复（新 → 旧）：",
+            "",
+            "  0. 新建会话",
+            *(f"  {index}. {snapshot.label}" for index, snapshot in enumerate(snapshots, 1)),
+            "  c. 取消",
+            "",
+            "输入序号恢复，输入 0 新建，留空或 c 取消。",
+        ]
+    )
 
 

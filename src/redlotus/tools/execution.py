@@ -19,6 +19,7 @@ from functools import wraps
 from pathlib import Path
 
 from redlotus.runtime.config import settings, config_value
+from redlotus.runtime.resources import finish_io
 
 _SEPARATORS = {";", "&", "&&", "|", "||", "\n"}
 _PYTHON_NAMES = {"python", "python.exe", "python3", "python3.exe"}
@@ -635,11 +636,14 @@ async def run_subprocess(
     env: dict | None = None,
     timeout: float | None = None,
     workspace=None,
+    access_policy=None,
 ) -> CommandResult:
     """Run a command with its launch evidence, reclaiming owned processes on cancellation."""
     maximum = config_value(settings(), ("agent_run_policy", "max_command_timeout_seconds"), purpose="命令执行的最长秒数", kind=int)
     timeout = maximum if timeout is None else max(1, min(timeout, maximum))
     await asyncio.to_thread(validate_agent_command, args, cwd=cwd)
+    if access_policy is not None:
+        approved_scope = await access_policy.authorize_command(args, cwd)
     python_required = any(
         _program_name(values[0]) in _PYTHON_NAMES | _PY_LAUNCHER_NAMES | _PIP_NAMES
         or (_program_name(values[0]) in _UV_NAMES and "pip" in values[1:3])
@@ -656,6 +660,8 @@ async def run_subprocess(
     env = environment.variables
     python_on_path = str(environment.python) if environment.python else None
 
+    if access_policy is not None and access_policy.scope() != approved_scope:
+        raise PermissionError("会话或任务已失效，命令未执行。")
     result = await _run_owned_process(
         args, shell=shell, cwd=cwd, env=env, timeout=timeout
     )
@@ -810,14 +816,11 @@ class PlaywrightBrowserSession:
 
         Returns:
             The saved screenshot path, or a browser error."""
-        from redlotus.tools.registry import resolve_readable_path
-
-        path = resolve_readable_path(name, work_base=self.workspace.root)
-        if not path.is_relative_to(self.workspace.root):
-            raise ValueError(f"Path not under current project: {path}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        await self._page.screenshot(path=str(path), full_page=full_page)
-        return f"Screenshot saved: {path}"
+        data = await self._page.screenshot(full_page=full_page)
+        proposal = await finish_io(asyncio.to_thread(self.access_policy.plan_output, name, data))
+        await self.access_policy.authorize(proposal)
+        await finish_io(asyncio.to_thread(self.access_policy.commit_output, proposal, data))
+        return f"Screenshot saved: {proposal.path}"
 
     @page_action
     async def browser_click(self, selector: str) -> str:

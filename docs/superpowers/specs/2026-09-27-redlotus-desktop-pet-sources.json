@@ -1,0 +1,265 @@
+{
+  "research_date": "2026-09-27",
+  "snapshot_completed_utc": "2026-09-27T14:18:25Z",
+  "scope": "Public GitHub repository and selected source-file review for RedLotus desktop-pet planning. No candidate was installed or executed.",
+  "notes": [
+    "Star counts are point-in-time popularity measurements, not a quality or security audit.",
+    "Default-branch commit dates are recorded separately from repository pushed_at; neither guarantees substantive code maintenance.",
+    "A null latest_stable_release means /releases/latest did not return a release during this review, not that the project has no other distribution.",
+    "A repository license is not an automatic license for every bundled artwork or third-party component."
+  ],
+  "repositories": [
+    {
+      "repository": "ayangweb/BongoCat",
+      "url": "https://github.com/ayangweb/BongoCat",
+      "metadata_url": "https://api.github.com/repos/ayangweb/BongoCat",
+      "stars": 23648,
+      "forks": 1161,
+      "language": "Vue",
+      "archived": false,
+      "created_at": "2025-03-28T04:50:22Z",
+      "pushed_at": "2026-09-27T07:43:19Z",
+      "default_branch": "master",
+      "detected_license": "MIT",
+      "default_branch_commit": {
+        "sha": "44f44bcf2b17b8e16463ad479a477a949d01cc9a",
+        "date": "2026-04-28T07:33:11Z",
+        "subject": "refactor: remove unnecessary class names (#954)",
+        "url": "https://github.com/ayangweb/BongoCat/commit/44f44bcf2b17b8e16463ad479a477a949d01cc9a"
+      },
+      "latest_stable_release": {
+        "tag": "v1.1.0",
+        "published_at": "2026-04-20T01:08:51Z",
+        "url": "https://github.com/ayangweb/BongoCat/releases/tag/v1.1.0"
+      },
+      "latest_stable_release_checked": true
+    },
+    {
+      "repository": "LorisYounger/VPet",
+      "url": "https://github.com/LorisYounger/VPet",
+      "metadata_url": "https://api.github.com/repos/LorisYounger/VPet",
+      "stars": 6844,
+      "forks": 676,
+      "language": "C#",
+      "archived": false,
+      "created_at": "2022-12-13T06:37:41Z",
+      "pushed_at": "2026-09-26T06:51:19Z",
+      "default_branch": "main",
+      "detected_license": "Apache-2.0",
+      "default_branch_commit": {
+        "sha": "be500dd6051273ea26367fe6d252a0d3585612e3",
+        "date": "2026-09-26T01:48:06Z",
+        "subject": "中秋节更新",
+        "url": "https://github.com/LorisYounger/VPet/commit/be500dd6051273ea26367fe6d252a0d3585612e3"
+      },
+      "latest_stable_release": null,
+      "latest_stable_release_checked": true
+    },
+    {
+      "repository": "tonybaloney/vscode-pets",
+      "url": "https://github.com/tonybaloney/vscode-pets",
+      "metadata_url": "https://api.github.com/repos/tonybaloney/vscode-pets",
+      "stars": 4171,
+      "forks": 551,
+      "language": "TypeScript",
+      "archived": false,
+      "created_at": "2021-02-22T01:01:35Z",
+      "pushed_at": "2026-09-10T17:57:50Z",
+      "default_branch": "main",
+      "detected_license": "MIT",
+      "default_branch_commit": {
+        "sha": "2c91214beb922288cca1938cddb607abc5f806b7",
+        "date": "2026-08-07T01:15:16Z",
+        "subject": "Bump actions/setup-node from 5 to 7 (#928)",
+        "url": "https://github.com/tonybaloney/vscode-pets/commit/2c91214beb922288cca1938cddb607abc5f806b7"
+      },
+      "latest_stable_release": {
+        "tag": "1.36.0",
+        "published_at": "2026-07-24T00:52:01Z",
+        "url": "https://github.com/tonybaloney/vscode-pets/releases/tag/1.36.0"
+      },
+      "latest_stable_release_checked": true
+    },
+    {
+      "repository": "adryd325/oneko.js",
+      "url": "https://github.com/adryd325/oneko.js",
+      "metadata_url": "https://api.github.com/repos/adryd325/oneko.js",
+      "stars": 1321,
+      "forks": 126,
+      "language": "JavaScript",
+      "archived": false,
+      "created_at": "2022-04-20T05:17:50Z",
+      "pushed_at": "2025-10-29T17:12:30Z",
+      "default_branch": "main",
+      "detected_license": "MIT",
+      "default_branch_commit": {
+        "sha": "5281d057c4ea9bd4f6f997ee96ba30491aed16c0",
+        "date": "2025-10-29T17:12:30Z",
+        "subject": "Merge pull request #31 from st4rburn/main",
+        "url": "https://github.com/adryd325/oneko.js/commit/5281d057c4ea9bd4f6f997ee96ba30491aed16c0"
+      },
+      "latest_stable_release": null,
+      "latest_stable_release_checked": true
+    },
+    {
+      "repository": "Adrianotiger/desktopPet",
+      "url": "https://github.com/Adrianotiger/desktopPet",
+      "metadata_url": "https://api.github.com/repos/Adrianotiger/desktopPet",
+      "stars": 1152,
+      "forks": 118,
+      "language": "C#",
+      "archived": false,
+      "created_at": "2015-12-19T20:16:52Z",
+      "pushed_at": "2026-09-11T13:46:11Z",
+      "default_branch": "master",
+      "detected_license": null,
+      "default_branch_commit": {
+        "sha": "c8e43f0dd30f9051b0f90604ee7d2515039679f9",
+        "date": "2026-09-11T13:46:11Z",
+        "subject": "Update acknowledgments in Readme.md",
+        "url": "https://github.com/Adrianotiger/desktopPet/commit/c8e43f0dd30f9051b0f90604ee7d2515039679f9"
+      },
+      "latest_stable_release": {
+        "tag": "v1.4.0",
+        "published_at": "2026-09-02T08:30:42Z",
+        "url": "https://github.com/Adrianotiger/desktopPet/releases/tag/v1.4.0"
+      },
+      "latest_stable_release_checked": true
+    },
+    {
+      "repository": "ChaozhongLiu/DyberPet",
+      "url": "https://github.com/ChaozhongLiu/DyberPet",
+      "metadata_url": "https://api.github.com/repos/ChaozhongLiu/DyberPet",
+      "stars": 983,
+      "forks": 105,
+      "language": "Python",
+      "archived": false,
+      "created_at": "2022-11-09T21:04:56Z",
+      "pushed_at": "2026-09-25T09:43:19Z",
+      "default_branch": "main",
+      "detected_license": "GPL-3.0",
+      "default_branch_commit": {
+        "sha": "012dbbc72046de6042e46643cb0fa83098d58f6d",
+        "date": "2026-09-25T09:43:14Z",
+        "subject": "collection updated",
+        "url": "https://github.com/ChaozhongLiu/DyberPet/commit/012dbbc72046de6042e46643cb0fa83098d58f6d"
+      },
+      "latest_stable_release": {
+        "tag": "v0.10.3",
+        "published_at": "2026-08-12T04:16:11Z",
+        "url": "https://github.com/ChaozhongLiu/DyberPet/releases/tag/v0.10.3"
+      },
+      "latest_stable_release_checked": true
+    },
+    {
+      "repository": "isHarryh/Ark-Pets",
+      "url": "https://github.com/isHarryh/Ark-Pets",
+      "metadata_url": "https://api.github.com/repos/isHarryh/Ark-Pets",
+      "stars": 1102,
+      "forks": 54,
+      "language": "Java",
+      "archived": false,
+      "created_at": "2022-09-15T02:12:47Z",
+      "pushed_at": "2026-09-26T07:13:35Z",
+      "default_branch": "v3.x",
+      "detected_license": "GPL-3.0",
+      "default_branch_commit": {
+        "sha": "d82d47ba4858adc91befd1e77a3abe6f2ce6a4f8",
+        "date": "2026-09-26T07:13:35Z",
+        "subject": "Merge pull request #173 from litwak913/pass",
+        "url": "https://github.com/isHarryh/Ark-Pets/commit/d82d47ba4858adc91befd1e77a3abe6f2ce6a4f8"
+      },
+      "latest_stable_release": null,
+      "latest_stable_release_checked": false
+    },
+    {
+      "repository": "1ilit/Desktop-Cat",
+      "url": "https://github.com/1ilit/Desktop-Cat",
+      "metadata_url": "https://api.github.com/repos/1ilit/Desktop-Cat",
+      "stars": 101,
+      "forks": 17,
+      "language": "Python",
+      "archived": false,
+      "created_at": "2022-08-15T19:21:40Z",
+      "pushed_at": "2022-11-29T10:53:33Z",
+      "default_branch": "main",
+      "detected_license": "MIT",
+      "default_branch_commit": {
+        "sha": "d0054a041ec7b000b1390fcbb2434ab22b922772",
+        "date": "2022-11-29T10:53:32Z",
+        "subject": "added license",
+        "url": "https://github.com/1ilit/Desktop-Cat/commit/d0054a041ec7b000b1390fcbb2434ab22b922772"
+      },
+      "latest_stable_release": null,
+      "latest_stable_release_checked": false
+    }
+  ],
+  "selected_evidence": [
+    {
+      "repository": "tonybaloney/vscode-pets",
+      "paths": [
+        "src/panel/basepettype.ts",
+        "src/panel/states.ts",
+        "src/panel/pets/cat.ts",
+        "media/README.md",
+        "media/dog/license.txt",
+        "LICENSE"
+      ],
+      "finding": "BasePetType/Cat inheritance and animation state model; cat redistribution restriction and separate CC BY-ND 4.0 dog-asset license."
+    },
+    {
+      "repository": "adryd325/oneko.js",
+      "paths": [
+        "oneko.js",
+        "README.md",
+        "LICENSE"
+      ],
+      "finding": "Small sprite animation and cursor-following implementation in browser JavaScript; MIT code."
+    },
+    {
+      "repository": "ayangweb/BongoCat",
+      "paths": [
+        "src-tauri/tauri.conf.json",
+        "src-tauri/src/plugins/window/src/commands/windows.rs",
+        "README.md",
+        "LICENSE"
+      ],
+      "finding": "Tauri desktop-window flags; Windows-specific topmost handling; README lists Linux X11."
+    },
+    {
+      "repository": "LorisYounger/VPet",
+      "paths": [
+        "README.md",
+        "LICENSE",
+        "VPet-Simulator.Core/Display/Main.xaml.cs"
+      ],
+      "finding": "WPF core and interaction examples; Apache-2.0 code and separate animation/image terms."
+    },
+    {
+      "repository": "ChaozhongLiu/DyberPet",
+      "paths": [
+        "README.md",
+        "LICENSE",
+        "DyberPet/DyberPet.py",
+        "DyberPet/modules.py"
+      ],
+      "finding": "PySide6 PetWidget mouse handlers; GPL-3.0; README warns about open-source/release-version differences and incomplete public LLM module."
+    },
+    {
+      "repository": "Adrianotiger/desktopPet",
+      "paths": [
+        "Readme.md",
+        "src/LocalData/AnimationXML.cs"
+      ],
+      "finding": "XML animation model; repository metadata has no detected license and the inspected tree has no standard license file."
+    },
+    {
+      "repository": "1ilit/Desktop-Cat",
+      "paths": [
+        "README.md",
+        "main.py"
+      ],
+      "finding": "Small Tkinter example; README explicitly lists mouse interaction as future work."
+    }
+  ]
+}

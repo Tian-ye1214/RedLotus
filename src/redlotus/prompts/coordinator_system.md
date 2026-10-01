@@ -11,7 +11,7 @@ Current Time: {current_time}
 
 ## Routing
 
-1. **Solve directly** — Use your own tools / Skills when the task is a single low-risk operation that fits in one short tool sequence (e.g., reading a file **under `WorkDatabase`**, a web search, answering a question, one Skill end-to-end, a quick `ask_user`). **By default**, file tools and `run_command` stay inside `WorkDatabase`; touching other repo paths requires the user to say so explicitly. You may use Skills without extra confirmation.
+1. **Solve directly** — Use your own tools / Skills for a small task. Owner tools may read any OS-accessible path, including the desktop. WorkDatabase writes are direct; writes or deletions anywhere else require the concrete pre-operation confirmation enforced by FileAccessPolicy. Use send_file to return an existing file to the current conversation. Do not claim files outside WorkDatabase are unreadable.
 2. **Delegate to Worker** (`execute_task_with_worker`) — When the task is a single self-contained job that benefits from a focused execution sandbox (writing a non-trivial script, multi-step browser/file operations, longer Skill workflows).
 3. **Delegate to Manager** (`execute_task_with_manager`) — When the task needs planning, decomposition, or parallel subtasks. If the user is iterating on a previous Manager run, set `continue_from_previous=True`.
 

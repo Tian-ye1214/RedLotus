@@ -4,6 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
+from pathlib import Path
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.patch_stdout import patch_stdout
+from redlotus.runtime.config import config_value, settings
+from redlotus.runtime.resources import user_data_dir
+from redlotus.pets.factory import PetFactory
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -29,6 +38,8 @@ from redlotus.ui.cli_commands import (
 )
 from redlotus.ui.presentation import (
     ContextUsageItem,
+    print_error,
+    print_panel,
     print_repl_welcome,
     print_startup_logo,
     print_success,
@@ -36,10 +47,10 @@ from redlotus.ui.presentation import (
     update_output,
 )
 from redlotus.ui.widgets import (
-    InteractiveRepl,
+    AgentCompleter,
+    format_snapshot_choices,
     SnapshotAction,
     SnapshotSelection,
-    legacy_pick_snapshot,
 )
 
 
@@ -47,27 +58,11 @@ class AgentCliController:
     """CLI/TUI orchestration for AgentSystem."""
 
     EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit", "退出"}
-    BUSY_SAFE_COMMANDS = {
-        "/agent",
-        "/stop",
-        "/cd",
-        "/status",
-        "/cancel",
-        "/help",
-        "/trace",
-        "/tasks",
-        "/pwd",
-        "/config",
-        "/context",
-        "/usage",
-        "/panel",
-        "/skills",
-        "/ltm",
-        "/stm",
-    }
+    BUSY_SAFE_COMMANDS = SlashCommands.BUSY_SAFE
 
     def __init__(self, system: "AgentSystem") -> None:
         self.system = system
+        self.pets = PetFactory.service()
         self._ready = asyncio.Event()
         self._ready.set()
         self._admission_lock = asyncio.Lock()
@@ -110,7 +105,7 @@ class AgentCliController:
             return await legacy_pick_snapshot(snapshots, self._legacy_repl.read_line)
         return SnapshotSelection(SnapshotAction.CANCEL)
 
-    async def enter_current_workspace(self, *, state=None, force_picker=False, workspace=None):
+    async def enter_current_workspace(self, *, state=None, force_picker=False, workspace=None, choice=None):
         """Lock admission throughout discovery, selection and restoring the chosen session."""
         if self.is_transitioning:
             return None
@@ -119,7 +114,7 @@ class AgentCliController:
         try:
             if workspace is not None:
                 await self.reset_session(state.history, workspace=workspace)
-            result = await self._choose_current_workspace(state=state, force_picker=force_picker)
+            result = await self._choose_current_workspace(state=state, force_picker=force_picker, choice=choice)
             if not force_picker or result is not None:
                 self._prepare_session_logs()
             return result
@@ -128,7 +123,7 @@ class AgentCliController:
             if not self._active_transitions:
                 self._ready.set()
 
-    async def _choose_current_workspace(self, *, state=None, force_picker=False):
+    async def _choose_current_workspace(self, *, state=None, force_picker=False, choice=None):
         generation = self.system._session.generation
         state = state or getattr(self, "_active_session_state", None)
         if state is None:
@@ -144,7 +139,7 @@ class AgentCliController:
             if not force_picker:
                 return None
             print_warning("当前工作区没有可加载的对话快照。可新建会话或取消。")
-        selection = await self._pick_snapshot(snapshots)
+        selection = SnapshotSelection.resolve(choice, snapshots) if choice is not None else await self._pick_snapshot(snapshots)
         if generation != self.system._session.generation:
             return None
         if selection.action is SnapshotAction.CANCEL:
@@ -181,6 +176,7 @@ class AgentCliController:
             return None
 
     def new_session_state(self) -> SessionController:
+        self.system._session.reply_output = self.pets.publish_reply
         return self.system._session
 
     async def pause_current_turn(self):
@@ -251,6 +247,7 @@ class AgentCliController:
                 return False
             if self.system._memory._processing.locked():
                 raise ValueError("记忆重试仍在运行，完成后才能切换或清空会话。")
+            await self.pets.clear_reply()
             if restore is not None:
                 await restore()
             else:
@@ -279,6 +276,10 @@ class AgentCliController:
     async def prepare_session(self) -> tuple[str, ...]:
         print_startup_logo()
         print_repl_welcome()
+        try:
+            await self.pets.list_pets()
+        except (OSError, ValueError) as exc:
+            print_warning(f"桌宠资源发现失败：{exc}")
         missing = app_config.missing_main_api_keys()
         if missing:
             print_warning(
@@ -312,18 +313,6 @@ class AgentCliController:
     async def _handle_slash_command(
         self, raw_input: str, state: SessionController
     ) -> str:
-        command = raw_input.split()[0].lower()
-        if self.system.has_current_turn:
-            if command not in self.BUSY_SAFE_COMMANDS and not (
-                self.system._session.is_compressing and command in {"/load", "/compress"}
-            ):
-                print_warning(
-                    "A turn is currently running. Use /stop first or wait for it to finish."
-                )
-                return "continue"
-        if command == "/load" and self.system._session.is_compressing:
-            await self.system._session.cancel_compression()
-
         await asyncio.to_thread(self.system._skills_manager.refresh)
         first_override = await SlashCommands(self, state, raw_input).run()
         if first_override is not None:
@@ -406,10 +395,8 @@ class AgentCliController:
             print_success("Bye.")
             return "break"
 
-        if command in ("/clear", "新任务"):
-            await self.reset_session(state.history)
-            state.is_first_input = True
-            return "continue"
+        if command == "新任务":
+            command = raw_input = "/clear"
 
         if command.startswith("/"):
             await self._publish_context_usage(state.history)
@@ -433,9 +420,7 @@ class AgentCliController:
                 )
                 return "continue"
             data = {'text': raw_input, 'id': admission.id, 'goal_mode': goal_mode}
-            references = self.system._session.track_preparation(
-                load_file_refs(raw_input, workspace=admission.workspace, captured=data)
-            )
+            references = self.system._session.prepare_cli_references(self.system, raw_input, data)
             if self.system._session.paused:
                 await references
             if transition != self._transition or not self._ready.is_set() or not self.system._session.accepts(admission):
@@ -544,3 +529,192 @@ class AgentCliController:
             for task in line_handlers:
                 task.cancel()
             await asyncio.gather(*line_handlers, return_exceptions=True)
+
+
+ReadLineFn = Callable[[], Awaitable[str | None]]
+
+def _history_path() -> Path | None:
+    if not os.getenv("REDLOTUS_DATA_DIR") and config_value(settings(), ("storage", "state_dir"), ..., kind=(str, type(None))) is ...:
+        return None
+    (base := user_data_dir()).mkdir(parents=True, exist_ok=True)
+    return base / "history"
+
+
+class InteractiveRepl:
+    """TTY 交互循环；非 TTY 回退到标准 input。"""
+
+    def __init__(
+        self,
+        *,
+        prompt: str = "\n📝 请输入您的任务: ",
+        on_interrupt_during_handler: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self.prompt = prompt
+        self._session: PromptSession | None = None
+        self._interrupt_hits = 0
+        self._on_interrupt_during_handler = on_interrupt_during_handler
+
+    def _create_prompt_session(self) -> PromptSession:
+        kb = KeyBindings()
+
+        @kb.add("c-c", eager=True)
+        def _interrupt(event) -> None:
+            if event.app.current_buffer.text:
+                self._interrupt_hits = 0
+                return event.app.current_buffer.reset()
+            # Use a regular exception so the input task cannot abort the event loop.
+            event.app.exit(exception=InterruptedError())
+
+        return PromptSession(
+            history=FileHistory(str(path)) if (path := _history_path()) is not None else None,
+            completer=AgentCompleter(),
+            complete_while_typing=False,
+            key_bindings=kb,
+            interrupt_exception=InterruptedError,
+        )
+
+    def _on_keyboard_interrupt(self) -> bool:
+        """处理空行 Ctrl+C。返回 True 表示应退出 REPL。"""
+        self._interrupt_hits += 1
+        if self._interrupt_hits < 2:
+            print_warning("再次按 Ctrl+C 退出，或输入 /exit、quit。")
+        return self._interrupt_hits >= 2
+
+    async def read_line(self, *, stop_event: asyncio.Event | None = None) -> str | None:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            if self._session is None:
+                self._session = self._create_prompt_session()
+            try:
+                with patch_stdout(raw=True):
+                    read_coro = self._session.prompt_async(self.prompt)
+                    if stop_event is None:
+                        return (await read_coro).strip()
+                    read_task = asyncio.create_task(read_coro)
+                    stop_task = asyncio.create_task(stop_event.wait())
+                    done, pending = await asyncio.wait(
+                        {read_task, stop_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for t in pending:
+                        t.cancel()
+                        try:
+                            await t
+                        except asyncio.CancelledError:
+                            pass
+                    return None if stop_task in done else read_task.result().strip()
+            except (EOFError, asyncio.CancelledError):
+                return None
+        try:
+            return (await asyncio.to_thread(input, self.prompt)).strip()
+        except EOFError:
+            return None
+
+    async def run(
+        self,
+        handler: Callable[[str], Awaitable[str]],
+        *,
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
+        """
+        handler 返回 "continue" | "break"。
+        空行 Ctrl+C：连按两次退出；有内容时 Ctrl+C 仅清空输入行。
+        """
+        while stop_event is None or not stop_event.is_set():
+            try:
+                line = await self.read_line(stop_event=stop_event)
+                if line is None:
+                    break
+                self._interrupt_hits = 0
+                action = await handler(line)
+                if action == "break":
+                    break
+            except (KeyboardInterrupt, InterruptedError):
+                if self._on_interrupt_during_handler is not None:
+                    try:
+                        await self._on_interrupt_during_handler()
+                        continue
+                    except KeyboardInterrupt:
+                        pass
+                if self._on_keyboard_interrupt():
+                    print_success("再见！")
+                    break
+            except asyncio.CancelledError:
+                break
+
+
+async def legacy_pick_snapshot(
+    snapshots: list[WorkspaceSnapshot],
+    read_line: ReadLineFn,
+) -> SnapshotSelection:
+    print_panel(format_snapshot_choices(snapshots), title="加载对话")
+    while True:
+        try:
+            raw = await read_line()
+        except (KeyboardInterrupt, InterruptedError):
+            raw = None
+        if raw is None:
+            return SnapshotSelection(SnapshotAction.CANCEL)
+        text = raw.strip()
+        if not text or text.lower() in ("c", "cancel"):
+            return SnapshotSelection(SnapshotAction.CANCEL)
+        if text == "0":
+            return SnapshotSelection(SnapshotAction.NEW)
+        if not text.isdigit():
+            print_error("请输入有效序号。")
+            continue
+        index = int(text)
+        if index < 1 or index > len(snapshots):
+            print_error(f"序号超出范围（1-{len(snapshots)}）。")
+            continue
+        snapshot = snapshots[index - 1]
+        if not snapshot.is_loadable:
+            print_error("该会话条目无法加载，请选择其他会话或新建会话。")
+            continue
+        return SnapshotSelection(SnapshotAction.RESTORE, snapshot)
+
+
+def terminal_driver():
+    if sys.platform != "win32":
+        return None
+    from ctypes import POINTER, cast
+    from textual.drivers import win32
+    from textual.drivers.windows_driver import WindowsDriver
+
+    class ControlEnterDriver(WindowsDriver):
+        def start_application_mode(self):
+            if hasattr(self, "_native_reader"):
+                return
+            native = self._native_reader = win32.KERNEL32.ReadConsoleInputW
+            def read(handle, records, size, count):
+                result = native(handle, records, size, count)
+                rows = cast(records, POINTER(win32.INPUT_RECORD))
+                for index in range(cast(count, POINTER(win32.DWORD)).contents.value):
+                    row = rows[index]
+                    key = row.Event.KeyEvent
+                    if (row.EventType == 1 and key.bKeyDown and key.wVirtualKeyCode == 13
+                            and key.dwControlKeyState & 0x000C and key.uChar.UnicodeChar == "\r"):
+                        key.uChar.UnicodeChar = "\n"
+                return result
+            read.argtypes, read.restype = native.argtypes, native.restype
+            win32.KERNEL32.ReadConsoleInputW = read
+            try:
+                super().start_application_mode()
+            except BaseException:
+                win32.KERNEL32.ReadConsoleInputW = self._native_reader
+                del self._native_reader
+                raise
+
+        def stop_application_mode(self):
+            if not hasattr(self, "_native_reader"):
+                return
+            try:
+                super().stop_application_mode()
+            finally:
+                win32.KERNEL32.ReadConsoleInputW = self._native_reader
+                del self._native_reader
+
+        def close(self):
+            self.stop_application_mode()
+            super().close()
+
+    return ControlEnterDriver

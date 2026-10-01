@@ -51,6 +51,6 @@ needs_user_confirmation: false
 
 ## Reminders
 
-- **Workspace**: Unless the user explicitly asks otherwise, keep file I/O, directory ops, and **`run_command`** inside the **`WorkDatabase` tree** (relative paths from the current task directory). Do not edit or write outputs under `src/`, repo root, or other paths outside that sandbox.
+- **Workspace**: Relative paths use the current project root. Owner tools may read OS-accessible files outside WorkDatabase. WorkDatabase content may be created, edited or deleted for the task; changes elsewhere (including src) require the tool-layer confirmation before writing. send_file returns an existing file only to the current conversation. Use execution_environment to obtain the actual desktop path; ask when the desired file is ambiguous.
 - Ask when uncertain: use `ask_user` for unclear or ambiguous requirements.
 - Read relevant context before acting; deliver complete solutions, not partial ones.

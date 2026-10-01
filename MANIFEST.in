@@ -4,8 +4,51 @@ include scripts/check_structure.py
 include scripts/verify_wheel.py
 include scripts/verify_live.py
 include scripts/live_cases.py
+include src/redlotus/TTS/catalog.json
+include src/redlotus/TTS/native/mambo_worker.cpp
+include src/redlotus/TTS/native/upstream.patch
+include src/redlotus/TTS/native/CompactTrie.hpp
+include src/redlotus/TTS/native/PronunciationDictionary.hpp
+include src/redlotus/TTS/native/StreamingVocoder.hpp
+include src/redlotus/TTS/native/Cargo.lock
+include src/redlotus/TTS/native/UPSTREAM-LICENSE.txt
+include src/redlotus/TTS/native/NOTICE.md
+include src/redlotus/TTS/native/THIRD-PARTY-NOTICES.md
+recursive-include src/redlotus/TTS/native/licenses *.txt *.md
+include src/redlotus/TTS/native/redlotus_mambo.exe
+include scripts/build_native_speech.py
+include src/redlotus/static/pets/ASSET-NOTICE.md
+recursive-include src/redlotus/static/pets pet.json sprites.png
 global-exclude config.json
 global-exclude .env
+global-exclude *.onnx
+global-exclude *.tar.bz2
+global-exclude *.tar.gz
+global-exclude *.part
+global-exclude installed.json
+global-exclude *.pt
+global-exclude *.pth
+global-exclude *.ckpt
+global-exclude *.safetensors
+global-exclude *.npy
+global-exclude *.npz
+global-exclude *.wav
+global-exclude *.mp3
+global-exclude *.flac
+global-exclude *.bin
+global-exclude *.gguf
+global-exclude *.ort
+prune model
+prune ZipVoice
+prune SpeechProducer
+prune scripts/mambo
+prune src/redlotus/model
+prune src/redlotus/TTS/model
+prune src/redlotus/TTS/checkpoints
+prune src/redlotus/TTS/weights
+prune src/redlotus/TTS/.downloads
+prune src/redlotus/TTS/.staging
+prune src/redlotus/TTS/.locks
 recursive-include src/redlotus/prompts *.md
 prune src/redlotus/prompts/LongTermMemory
 

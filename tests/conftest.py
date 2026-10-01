@@ -5,6 +5,8 @@ import pytest
 def no_live_models(monkeypatch):
     from pydantic_ai import models
     monkeypatch.setattr(models, "ALLOW_MODEL_REQUESTS", False)
+    from redlotus.TTS.service import SpeechService
+    monkeypatch.setattr(SpeechService, "bootstrap", lambda self, **kwargs: None)
 
 
 def pytest_sessionstart(session):
@@ -17,7 +19,7 @@ def pytest_sessionstart(session):
 
         root = Path(expected).resolve()
         for module in ("runtime.config", "sessions.storage", "core.system", "tools.references",
-                       "memory.records", "api.base", "ui.console", "prompts.prompt"):
+                       "memory.records", "api.base", "ui.console", "prompts.prompt", "TTS.service"):
             origin = Path(importlib.util.find_spec("redlotus." + module).origin).resolve()
             if not origin.is_relative_to(root):
                 raise pytest.UsageError(f"Wheel check imported checkout/dependency package: {origin}")
@@ -103,6 +105,7 @@ def phone(isolated_config, tmp_path, monkeypatch):
         async def stop_current_turn(self):
             state.reset()
             await state.queue.cancel()
+            return "已停止当前任务，保留会话记录。"
 
         async def shutdown(self):
             pass

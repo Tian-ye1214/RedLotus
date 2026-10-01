@@ -11,10 +11,11 @@ import os
 import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 import re
 import socket
-from contextlib import ExitStack
+from contextlib import ExitStack, aclosing
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -35,6 +36,12 @@ def norm_url(url: str) -> str:
 
 
 def mime_magic(raw: bytes) -> str:
+    if raw.startswith((b"\x02#!SILK_V3", b"#!SILK_V3")):
+        return "audio/silk"
+    if raw.startswith((b"#!AMR\n", b"#!AMR-WB\n")):
+        return "audio/amr"
+    if len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE":
+        return "audio/wav"
     for signature, mime in ((b"\xff\xd8\xff", "image/jpeg"), (b"\x89PNG", "image/png"),
                             (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"), (b"BM", "image/bmp")):
         if raw.startswith(signature):
@@ -154,8 +161,8 @@ def iter_segments(event: BaseMessageEvent):
         for seg in segments:
             yield (seg.get("type", ""), seg.get("data", {})) if isinstance(seg, dict) else (seg.msg_seg_type, vars(seg))
     else:
-        for match in re.finditer(r"\[CQ:(\w+),([^\]]*)\]", getattr(event, "raw_message", "") or ""):
-            yield match[1], dict(field.split("=", 1) for field in match[2].split(",") if "=" in field)
+        for match in re.finditer(r"\[CQ:(\w+)(?:,([^\]]*))?\]", getattr(event, "raw_message", "") or ""):
+            yield match[1], dict(field.split("=", 1) for field in (match[2] or "").split(",") if "=" in field)
 
 
 async def file_id_to_binary(bot_api, event: BaseMessageEvent, file_id: str, filename: str) -> BinaryContent:
@@ -171,24 +178,223 @@ async def file_id_to_binary(bot_api, event: BaseMessageEvent, file_id: str, file
         raise ValueError(f"附件 {filename}（{file_id}）无法获取下载内容：{exc}") from exc
 
 
+class _AudioSourceKind(Enum):
+    BYTES = "bytes"
+    BASE64 = "base64"
+    PUBLIC_URL = "http(s)"
+    SDK_CACHE = "sdk-cache"
+
+
+@dataclass(frozen=True)
+class _AudioSource:
+    kind: _AudioSourceKind
+    value: bytes | str
+    declared_size: int | None = None
+
+
+class QQRecord:
+    """Resolve voice bytes without requesting a converted NapCat recording."""
+
+    def __init__(self, api):
+        self.api = api
+
+    async def parse(self, data: dict, filename: str) -> BinaryContent:
+        supplied = data.get("file") or ""
+        file = supplied.strip() if isinstance(supplied, str) else ""
+        file_id = str(data.get("file_id") or "").strip()
+        url = str(data.get("url") or "").strip()
+        if isinstance(supplied, bytes):
+            source = _AudioSource(_AudioSourceKind.BYTES, supplied)
+        elif file.startswith("base64://"):
+            source = _AudioSource(_AudioSourceKind.BASE64, file[9:])
+        elif callable(getattr(self.api, "get_file", None)) and (
+            file_id or file and Path(file).name == file
+        ):
+            source = await self._sdk_source(file_id, file)
+        elif url or file.startswith(("http://", "https://")):
+            source = _AudioSource(_AudioSourceKind.PUBLIC_URL, url or file)
+            direct = await self._binary(source, filename)
+            return direct
+        elif file_id or (file and Path(file).name == file):
+            source = await self._sdk_source(file_id, file)
+        elif file:
+            raise ValueError("附件地址必须是完整的 http/https URL")
+        else:
+            raise ValueError("语音段缺少文件名或文件 ID")
+        return await self._binary(source, filename)
+
+    async def _sdk_source(self, file_id: str, file: str) -> _AudioSource:
+        if not callable(getattr(self.api, "get_file", None)):
+            raise ValueError("当前 NapCat 接口不支持 get_file 原始语音查询")
+        resolved = await self.api.get_file(file_id=file_id or None, file=None if file_id else file)
+        values = resolved if isinstance(resolved, dict) else vars(resolved)
+        # This ncatbot release wraps the entire GetFileBase data dict in File.file.
+        if isinstance(values.get("file"), dict):
+            values = values["file"]
+        returned_id = str(values.get("file_id") or "")
+        returned_name = str(values.get("file_name") or "")
+        if returned_id and file_id and returned_id != file_id:
+            raise ValueError("NapCat 返回的语音文件身份不匹配")
+        if file and not file_id and not returned_name:
+            raise ValueError("NapCat 未返回可核验的语音文件身份")
+        if returned_name and file and Path(file).name == file and returned_name != file:
+            raise ValueError("NapCat 返回的语音文件名不匹配")
+        size = values.get("file_size")
+        if size is not None and size != "":
+            try:
+                size = int(size)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("NapCat 返回的语音文件大小无效") from exc
+            if size < 0:
+                raise ValueError("NapCat 返回的语音文件大小无效")
+            ModelInputPolicy.for_role().check([size])
+        else:
+            size = None
+        encoded = values.get("base64") or ""
+        location = values.get("file") or values.get("url") or ""
+        if isinstance(location, bytes):
+            return _AudioSource(_AudioSourceKind.BYTES, location, size)
+        if encoded:
+            return _AudioSource(_AudioSourceKind.BASE64, str(encoded).removeprefix("base64://"), size)
+        location = str(location).strip()
+        if location.startswith("base64://"):
+            return _AudioSource(_AudioSourceKind.BASE64, location[9:], size)
+        if location.startswith(("http://", "https://")):
+            return _AudioSource(_AudioSourceKind.PUBLIC_URL, location, size)
+        if location:
+            return _AudioSource(_AudioSourceKind.SDK_CACHE, location, size)
+        raise ValueError("NapCat 未返回可读取的原始语音")
+
+    async def _binary(self, source: _AudioSource, filename: str) -> BinaryContent:
+        policy = ModelInputPolicy.for_role()
+        if source.kind is _AudioSourceKind.BYTES:
+            raw = source.value
+        elif source.kind is _AudioSourceKind.BASE64:
+            encoded = source.value
+            policy.check([len(encoded.rstrip("=")) * 3 // 4])
+            raw = base64.b64decode(encoded, validate=True)
+        elif source.kind is _AudioSourceKind.PUBLIC_URL:
+            raw = (await asyncio.to_thread(download_to_binary, source.value, filename)).data
+        else:
+            raw = await finish_io(asyncio.to_thread(self._read_cache, source.value, policy))
+        policy.check([len(raw)])
+        if source.declared_size is not None and len(raw) != source.declared_size:
+            raise ValueError("NapCat 返回的语音文件大小不一致")
+        mime = mime_magic(raw)
+        if mime not in {"audio/silk", "audio/wav", "audio/amr"}:
+            raise ValueError("语音内容不是可解析的 SILK、WAV 或 AMR")
+        return BinaryContent(raw, media_type=mime, identifier=filename)
+
+    @staticmethod
+    def _read_cache(value: str, policy: ModelInputPolicy) -> bytes:
+        path = Path(value)
+        if not path.is_file():
+            raise ValueError("NapCat 返回的本地缓存不可访问")
+        policy.check([path.stat().st_size])
+        with path.open("rb") as source:
+            raw = source.read(policy.max_file_bytes + 1)
+        policy.check([len(raw)])
+        return raw
+
+
+async def record_to_binary(bot_api, data: dict, filename: str) -> BinaryContent:
+    return await QQRecord(bot_api).parse(data, filename)
+
+
+class QQImage:
+    """Resolve an opaque QQ image identifier through the authenticated SDK."""
+
+    def __init__(self, api):
+        self.api = api
+
+    async def parse(self, data: dict, filename: str) -> BinaryContent:
+        file = str(data.get("file") or "")
+        if file and Path(file).name == file and callable(getattr(self.api, "get_image", None)):
+            resolved = await self.api.get_image(file=file)
+            values = resolved if isinstance(resolved, dict) else vars(resolved)
+            return await finish_io(asyncio.to_thread(self._read, values, filename))
+        return await finish_io(asyncio.to_thread(download_to_binary, data.get("url") or file, filename))
+
+    def _read(self, resolved: dict, filename: str) -> BinaryContent:
+        # Only the SDK response may supply a cache path, never the incoming message.
+        path = Path(str(resolved.get("file") or ""))
+        if not path.is_file():
+            return download_to_binary(resolved.get("url") or str(resolved.get("file") or ""), filename)
+        policy = ModelInputPolicy.for_role()
+        policy.check([path.stat().st_size])
+        with path.open("rb") as source:
+            mime = mime_magic(source.read(12))
+            if not mime.startswith("image/"):
+                raise ValueError("NapCat 返回的内容不是可识别的图片")
+            source.seek(0)
+            raw = source.read(policy.max_file_bytes + 1)
+        policy.check([len(raw)])
+        return BinaryContent(raw, media_type=mime, identifier=filename)
+
+
 async def extract_media(bot_api, event: BaseMessageEvent) -> list:
     """Preserve SDK/raw segment order; any invalid item rejects the whole request."""
     attachments = []
     for index, (kind, data) in enumerate(iter_segments(event)):
-        if kind not in {"file", "image", "video"}:
+        if kind not in {"file", "image", "video", "record"}:
             continue
-        filename = data.get("name") or data.get("file") or f"{kind}[{index + 1}]"
+        file = data.get("file") or ""
+        if kind == "record":
+            file_name = (
+                Path(file).name if isinstance(file, str) and file
+                and not file.startswith(("base64://", "http://", "https://")) else ""
+            )
+            filename = data.get("name") or file_name or f"record[{index + 1}]"
+        else:
+            filename = data.get("name") or file or f"{kind}[{index + 1}]"
         try:
             if kind == "file":
                 item = await file_id_to_binary(bot_api, event, (data.get("file_id") or "").strip(), filename)
+            elif kind == "record":
+                item = await record_to_binary(bot_api, data, filename)
             elif item := binary_b64(data.get("file") or ""):
                 item = BinaryContent(item.data, media_type=item.media_type, identifier=data.get("name") or f"{kind}[{index + 1}]")
+            elif kind == "image":
+                item = await QQImage(bot_api).parse(data, filename)
             else:
                 item = await asyncio.to_thread(download_to_binary, data.get("url") or data.get("file") or "", filename)
             attachments.append(item)
         except Exception as exc:
+            if isinstance(exc, ValueError) and str(exc).startswith(f"附件 {filename} 准备失败："):
+                raise
             raise ValueError(f"附件 {filename} 准备失败：{exc}；请重新发送完整消息。") from exc
     return attachments
+
+
+async def transcribe_voice_message(system, message):
+    """Merge platform transcripts and locally recognize remaining audio in order."""
+    from redlotus.TTS import NoSpeechDetected, Transcript
+    from redlotus.TTS import StreamingRecognizer
+    from redlotus.TTS.audio import AudioIO
+    policy = ModelInputPolicy.for_role("coordinator")
+    policy.check([len(item.data) for item in message.attachments if isinstance(item, BinaryContent)])
+    remaining, texts = [], []
+    for item in message.attachments:
+        if isinstance(item, Transcript):
+            texts.append(item.text)
+            continue
+        if not isinstance(item, BinaryContent) or not (item.media_type.startswith("audio/") or b"#!SILK_V3" in item.data[:12]):
+            remaining.append(item)
+            continue
+        mime = "audio/silk" if b"#!SILK_V3" in item.data[:12] else item.media_type
+        text = ""
+        async with aclosing(AudioIO.parse_input(item.data, format=mime)) as pcm:
+            async with aclosing(StreamingRecognizer().recognize(pcm)) as results:
+                async for result in results:
+                    if result.is_final:
+                        text = result.text.strip()
+        if not text:
+            raise NoSpeechDetected("未识别到语音，请重试。")
+        texts.append(text)
+    message.text = "\n".join(part for part in [message.text, *texts] if part)
+    message.original_text = message.text
+    message.speech_body = None
+    message.attachments, message.voice = remaining, False
 
 
 # A period can end the preceding sentence; normal email local parts cannot end in one.

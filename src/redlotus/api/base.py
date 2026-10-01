@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import importlib
 import mimetypes
 import os
 import signal
@@ -9,6 +10,7 @@ import sys
 import threading
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from functools import partial
 from urllib.parse import urlsplit
 
 from redlotus.runtime import config as app_config
@@ -25,8 +27,9 @@ from redlotus.runtime.config import (
 )
 from redlotus.runtime.network import close_all_clients
 
-from redlotus.runtime.resources import WorkspaceContext, current_workspace
+from redlotus.runtime.resources import WorkspaceContext, current_workspace, finish_io
 from redlotus.sessions.control import SessionController, UserMessage
+from redlotus.TTS import NoSpeechDetected, SpeechError
 from redlotus.tools import registry as tool_telemetry
 
 
@@ -76,6 +79,7 @@ class BotBase(ABC):
         if state.agent is None:
             state.agent = AgentSystem(
                 presentation=presentation,
+                workspace=getattr(state, "workspace", None),
                 owner_memory_allowed=self._is_owner(session_id),
                 input_controller=state,
             )
@@ -93,6 +97,7 @@ class BotBase(ABC):
 
     async def _close_session(self, state):
         state.reset(discard=True)
+        await state.drain_voice()
         await state.queue.cancel(discard=True)
         await state.queue.join()
         if state.agent:
@@ -101,6 +106,7 @@ class BotBase(ABC):
     async def _reset_session(self, session_id, *, preserve_queue=False):
         old = self._sessions.pop(session_id, None)
         state = SessionController()
+        state.workspace = getattr(old.agent, "workspace", None) if old else None
         state.queue.ready.clear()
         self._sessions[session_id] = state
         if old:
@@ -109,21 +115,50 @@ class BotBase(ABC):
             old.queue.discard()
             if preserve_queue:
                 for request in pending:
-                    message, reply, _, prepare = old.deliveries[request["id"]]
-                    self._submit_turn(session_id, state, message, reply, prepare=prepare, request=request)
+                    delivery = old.deliveries[request["id"]]
+                    await self._submit_turn(session_id, state, delivery.message, delivery.reply, prepare=delivery.prepare, request=request)
         try:
             if old:
                 await self._close_session(old)
         finally:
             state.queue.ready.set()
 
-    def _submit_turn(self, identity, state, message, send_reply, *, prepare=None, request=None):
-        admission = state.admit(WorkspaceContext.from_path(current_workspace()), input_id=(request or {}).get('id'))
+    async def _submit_turn(self, identity, state, message, send_reply, *, prepare=None, request=None):
+        system = self._agent_for_session(identity)
+        workspace = getattr(system, 'workspace', WorkspaceContext.from_path(current_workspace()))
+        admission = state.admit(workspace, urgent=True, input_id=(request or {}).get('id'))
         request = request if request is not None else dict(text=message.text, id=admission.id, goal_mode=False)
-        state.deliveries[admission.id] = (message, send_reply, asyncio.get_running_loop(), prepare)
+        message.input_id = admission.id
+        from redlotus.api import InputDelivery
+        state.deliveries[admission.id] = InputDelivery(message, send_reply, asyncio.get_running_loop(),
+                                                      prepare, admission.turn_id or admission.id)
+        question = state.question
+        if admission.urgent:
+            async def failed(exc):
+                state.deliveries.pop(admission.id, None)
+                if self._sessions.get(identity) is state and state.accepts(admission):
+                    detail = "未识别到语音，请重试。" if isinstance(exc, NoSpeechDetected) else str(exc)
+                    try:
+                        await send_reply(f"输入 {admission.id} 未加入当前任务：{detail}")
+                    except Exception as error:
+                        logger.warning("[%s] 输入失败提示发送未确认，未重发: %s", self.platform_tag, error)
+            preparation = (partial(self._prepare_answer, state, question, message, prepare)
+                           if question is not None and not question.done() else None)
+            await system.add_urgent_message(message, admission=admission, input_data=request,
+                attachments=prepare, on_error=failed, prepare_input=preparation)
+            return
         async def capture():
-            await state.prepare_message(self._agent_for_session(identity), message, prepare=prepare)
+            if question is not None and not question.done():
+                if await self._prepare_answer(state, question, message, prepare) is None:
+                    return None
+                prepare_input = None
+            else:
+                prepare_input = prepare
+            await state.prepare_message(self._agent_for_session(identity), message, prepare=prepare_input)
+            request['text'] = message.text
             request['reference_ids'] = [ref.id for ref in message.references]
+            if message.speech_body is not None:
+                request['speech_body'] = message.speech_body
             if state.paused:
                 await state.save_pause(state.agent)
             return message
@@ -134,15 +169,28 @@ class BotBase(ABC):
     async def _consume_turn(self, identity, state, message, admission, request, prepared=None):
         try:
             generation = state.generation
-            _, send_reply, loop, prepare = state.deliveries[admission.id]
+            delivery = state.deliveries[admission.id]
+            send_reply, loop, prepare = delivery.reply, delivery.loop, delivery.prepare
             self._agent_ctx.set((identity, state, send_reply, loop, generation))
+            self._bind_voice_output(identity, state, send_reply, generation)
+            from redlotus.api import BoundChannelSender
+            self._agent_for_session(identity).toolkit.channel_sender = BoundChannelSender(
+                lambda: getattr(self._reply_for(state, send_reply), "file_sender", None),
+                lambda: self._is_owner(identity) and self._sessions.get(identity) is state
+                and state.generation == generation and state.active and state.turn_id == admission.id)
             tool_telemetry.set_user_notify_callback(self._notify)
+            succeeded = False
             try:
                 if prepared is not None and not prepared.cancelled():
                     message = await prepared
+                    if message is None:
+                        return
                 with logger.session_log_context(identity):
                     result = await state.start(self._agent_for_session(identity), message, state.history, admission,
                                                prepare=prepare if prepared is not None and prepared.cancelled() else None)
+                succeeded = True
+            except NoSpeechDetected:
+                result = "未识别到语音，请重试。"
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 logger.error("[%s] Agent 请求失败: %s", self.platform_tag, error)
@@ -150,18 +198,51 @@ class BotBase(ABC):
             paused = state.paused and state.paused['request']['id'] == admission.id
             if self._sessions.get(identity) is state and (generation == state.generation or paused):
                 try:
+                    if succeeded:
+                        send_reply = self._reply_for(state, send_reply)
                     await send_reply("任务已暂停，发送 /resume 恢复。" if paused else result)
                 except Exception as exc:
                     logger.error("[%s] 回复发送未确认，未自动重发: %s", self.platform_tag, exc)
                     raise
         finally:
             if not state.paused:
-                state.deliveries.pop(admission.id, None)
+                for input_id in [key for key, delivery in state.deliveries.items() if delivery.turn_id == admission.id]:
+                    state.deliveries.pop(input_id, None)
+
+    def _reply_for(self, state, fallback):
+        delivery = state.deliveries.get(state.last_consumed_input_id)
+        return delivery.reply if delivery else fallback
 
     def guess_download_mime(self, *, filename="", media_type_key=""):
         return mimetypes.guess_type(filename)[0] or self._MIME_MAP.get(
             media_type_key.lower(), "application/octet-stream"
         )
+
+    def _bind_voice_output(self, identity, state, reply, generation):
+        from contextlib import aclosing
+        sender = getattr(reply, "speech_sender", None)
+        if sender is None:
+            state.voice_output = None
+            return
+        def current():
+            return self._sessions.get(identity) is state and state.generation == generation
+        async def output(pcm):
+            if problem := getattr(reply, "speech_error", None):
+                raise SpeechError(str(problem))
+            from redlotus.TTS.audio import AudioIO
+            from redlotus.TTS.service import SpeechService
+            service = await finish_io(asyncio.to_thread(SpeechService.shared))
+            async with aclosing(AudioIO.parse_output(pcm, target=reply.speech_format,
+                max_seconds=service.config.clip_seconds)) as clips:
+                async for segment in clips:
+                    if not current():
+                        return
+                    await sender(segment)
+        async def error(exc):
+            logger.warning("[%s] 语音失败，未自动重发: %s", self.platform_tag, exc)
+            if current():
+                await reply(f"语音处理或发送未确认，文字回复保留：{exc}")
+        state.voice_output, state.voice_error = output, error
 
     def _notify(self, text):
         identity, state, send_reply, loop, generation = self._agent_ctx.get()
@@ -169,7 +250,7 @@ class BotBase(ABC):
         async def send():
             if self._sessions.get(identity) is state and generation == state.generation:
                 try:
-                    await send_reply(text)
+                    await self._reply_for(state, send_reply)(text)
                 except Exception as exc:
                     logger.error("[%s] 通知发送失败: %s", self.platform_tag, exc)
 
@@ -182,64 +263,52 @@ class BotBase(ABC):
                 return None
             state.question = asyncio.get_running_loop().create_future()
             try:
-                await send_reply(question)
+                await self._reply_for(state, send_reply)(question)
                 return await (state.question if timeout is None else asyncio.wait_for(state.question, timeout))
             except TimeoutError:
                 return None
             finally:
                 state.question = None
 
+    async def _prepare_answer(self, state, question, message, prepare):
+        async with state.answer_lock:
+            await state.prepare_message(state.agent, message, prepare=prepare)
+            if not question.done():
+                question.set_result(message)
+                return None
+            return message
+
     async def dispatch_user_message(self, session_id, message, send_reply, *, prepare=None):
         user_text = message.text.strip()
         if not session_id or self._released:
             return
         state = self._session(session_id)
-        if user_text == "/stop":
-            if state.agent:
-                await state.agent.stop_current_turn()
-            else:
-                state.reset()
-                await state.queue.cancel()
-            await send_reply("已停止当前任务，保留会话记录。")
-            return
-        if (
-            user_text in self.RESET_COMMANDS
-            or user_text == "/clear"
-            or user_text in self.END_TASK_COMMANDS
-        ):
-            await self._reset_session(
-                session_id, preserve_queue=user_text in self.END_TASK_COMMANDS
-            )
+        if user_text in self.RESET_COMMANDS or user_text in self.END_TASK_COMMANDS:
+            await self._reset_session(session_id, preserve_queue=user_text in self.END_TASK_COMMANDS)
             await send_reply("已结束当前任务并清空上下文。")
             return
-        if user_text == "/resume":
-            resumed = await state.resume(self._agent_for_session(session_id),
-                lambda message, admission, data: self._consume_turn(session_id, state, message, admission, data), lambda: None)
-            await send_reply("正在恢复任务。" if resumed else "没有暂停的任务。")
+        if user_text.startswith("/"):
+            from redlotus.api import ChannelCommands
+            await ChannelCommands(self, session_id, state, send_reply).run(user_text)
             return
-        if state.question and not state.question.done():
-            question, generation = state.question, state.generation
-            try:
-                await state.prepare_message(self._agent_for_session(session_id), message, prepare=prepare)
-            except asyncio.CancelledError:
-                return
-            except (OSError, ValueError) as exc:
-                if generation == state.generation:
-                    await send_reply(str(exc))
-            else:
-                if generation == state.generation and not question.done():
-                    question.set_result(message)
+        if state.control_busy:
+            await send_reply("会话正在切换，请稍后重试。")
             return
         if not user_text and not message.attachments and not message.references and prepare is None:
             return
         if missing := app_config.missing_main_api_keys():
             await send_reply("缺少模型接口配置：" + ", ".join(missing))
             return
-        self._submit_turn(
-            session_id,
-            state,
-            message, send_reply, prepare=prepare,
-        )
+        answering = state.question is not None and not state.question.done()
+        pending = await self._submit_turn(session_id, state, message, send_reply, prepare=prepare)
+        if answering:
+            if pending is not None:
+                try:
+                    await pending
+                except asyncio.CancelledError:
+                    if asyncio.current_task().cancelling():
+                        raise
+            return
         await send_reply("✓ 收到，正在处理…")
 
     async def release_all_resources_async(self):
@@ -248,6 +317,8 @@ class BotBase(ABC):
         self._released = True
         sessions, self._sessions = list(self._sessions.values()), {}
         await asyncio.gather(*(self._close_session(state) for state in sessions))
+        from redlotus.TTS.service import SpeechService
+        await SpeechService.close_shared()
         await close_all_clients()
 
     def clean_text(self, raw):
@@ -420,6 +491,21 @@ def install_stop_handlers(stop_event: asyncio.Event) -> None:
         except (NotImplementedError, ValueError):
             signal.signal(sig, lambda *_: stop_event.set())
 
+async def start_speech():
+    def initialize():
+        speech = importlib.import_module("redlotus.TTS.service")
+        instance = speech.SpeechService.shared() if speech.ModelFactory.available() else None
+        return instance, WorkspaceContext.from_path(current_workspace())
+
+    try:
+        service, workspace = await finish_io(asyncio.to_thread(initialize))
+        if service is not None:
+            service.bootstrap(report_failure=partial(logger.speech_log, workspace, "语音模型准备失败"))
+        return service
+    except Exception as exc:
+        await logger.speech_log(None, "语音启动失败，文字功能仍可使用", exc)
+
+
 async def run_cli(system=None):
     """Run the interactive RedLotus CLI/TUI."""
     from redlotus.core.system import AgentSystem
@@ -430,19 +516,28 @@ async def run_cli(system=None):
         system = AgentSystem(presentation=presentation)
     stop_event = asyncio.Event()
     install_stop_handlers(stop_event)
+    controller = AgentCliController(system)
+    speech_task = asyncio.create_task(start_speech(), name="speech-startup")
     try:
-        await AgentCliController(system).run_interactive(stop_event=stop_event)
+        await controller.run_interactive(stop_event=stop_event)
     finally:
-        seconds = config_value(settings(), ('lifecycle', 'shutdown_grace_seconds'), kind=(int, float))
-        deadline = ExitDeadline(seconds) if seconds is not None else None
-        if deadline is not None:
-            deadline.start()
         try:
-            await system.shutdown()
-            await close_all_clients()
+            await finish_io(controller.pets.close())
         finally:
+            speech_task.cancel()
+            await asyncio.gather(speech_task, return_exceptions=True)
+            seconds = config_value(settings(), ('lifecycle', 'shutdown_grace_seconds'), kind=(int, float))
+            deadline = ExitDeadline(seconds) if seconds is not None else None
             if deadline is not None:
-                deadline.close()
+                deadline.start()
+            try:
+                await system.shutdown()
+                from redlotus.TTS.service import SpeechService
+                await SpeechService.close_shared()
+                await close_all_clients()
+            finally:
+                if deadline is not None:
+                    deadline.close()
     return system
 
 def main(channel=None) -> None:

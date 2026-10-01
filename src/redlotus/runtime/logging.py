@@ -1,6 +1,7 @@
 """Project-aware log routing with an injected terminal renderer."""
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from contextlib import contextmanager, suppress
@@ -15,7 +16,7 @@ from rich.console import Console
 from rich.text import Text
 
 from redlotus.runtime.config import settings, config_value
-from redlotus.runtime.resources import active_workspace, logs_dir, safe_name
+from redlotus.runtime.resources import active_workspace, finish_io, logs_dir, safe_name, workspace_context
 
 console_sink = Console().print
 CONSOLE_FMT = "{time:HH:mm:ss} | {level: <8} | {message}"
@@ -120,7 +121,7 @@ def _emit(
     level: str,
     msg: object,
     *args: Any,
-    exc_info: bool = False,
+    exc_info: bool | BaseException = False,
     file_only: bool = False,
 ) -> None:
     # loguru 用 {}-style；这里沿用项目的 %-style 先自行格式化，再把成品串原样交给 loguru
@@ -181,3 +182,15 @@ info = partial(_emit, "INFO")
 warning = partial(_emit, "WARNING")
 error = partial(_emit, "ERROR")
 info_file_only = partial(_emit, "INFO", file_only=True)
+
+
+async def speech_log(workspace, message: str, error: BaseException | None = None) -> None:
+    """Retain voice diagnostics before the first Agent turn, without terminal output."""
+    def write():
+        with workspace_context(workspace):
+            directory = prepare_log_dir(workspace)
+            if directory is None:
+                return
+            with _lg.contextualize(session="speech", session_log_dir=str(directory)):
+                _emit("ERROR" if error else "INFO", message, exc_info=error or False, file_only=True)
+    await finish_io(asyncio.to_thread(write))
