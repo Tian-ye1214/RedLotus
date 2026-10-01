@@ -870,13 +870,20 @@ from PySide6.QtWidgets import QPushButton
 close = bubble.findChild(QPushButton)
 assert bubble.height() <= 180 and bubble.text.geometry().right() < close.x()
 assert bubble.text.y() > bubble.banner.y() and close.y() == 12
-assert bubble._timer.isActive() and 14000 <= bubble._timer.remainingTime() <= 15000
+assert bubble._timer.isActive() and bubble._timer.interval() == 15000
+started = bubble._timer.remainingTime()
+assert 0 < started <= bubble._timer.interval() * 1.05, (
+    f'remaining={started}, interval={bubble._timer.interval()}, type={bubble._timer.timerType()}')
 bubble.enterEvent(QEvent(QEvent.Type.Enter))
 remaining = bubble._remaining
-assert not bubble._timer.isActive()
+assert not bubble._timer.isActive() and 0 < remaining <= started
 time.sleep(.03)
+assert bubble._remaining == remaining and not bubble._timer.isActive()
 bubble.leaveEvent(QEvent(QEvent.Type.Leave))
-assert bubble._timer.isActive() and bubble._timer.remainingTime() <= remaining
+assert bubble._timer.isActive() and bubble._timer.interval() == remaining
+resumed = bubble._timer.remainingTime()
+assert 0 < resumed <= remaining * 1.05, (
+    f'remaining={resumed}, interval={bubble._timer.interval()}, type={bubble._timer.timerType()}')
 bubble._timer.setInterval(1)
 from PySide6.QtTest import QTest
 QTest.qWait(20)
