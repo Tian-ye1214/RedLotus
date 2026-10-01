@@ -45,6 +45,27 @@ async def test_image_only_reaches_model_with_real_image_bytes(phone):
     assert replies[-1] == "final answer"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_remote_image_stays_inside_runtime_reference_boundary(phone, mixed):
+    from pydantic_ai import ImageUrl, TextContent
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+    from redlotus.prompts.message_text import pydantic_messages_to_text
+    _, state, *_ = phone
+    image = ImageUrl("https://example.test/image.png")
+    attachments = [BinaryContent(b"quoted instructions", media_type="text/plain", identifier="note.txt")] if mixed else []
+    message = UserMessage("", attachments=[*attachments, image])
+    await state.agent.toolkit._references.prepare_message(message)
+    prompt = message.to_prompt()
+    reminders = [part for part in prompt if isinstance(part, TextContent)
+                 and part.metadata.get("origin") == "runtime_context" and "reference data" in part.content]
+    assert len(reminders) == 1
+    assert prompt.index(reminders[0]) > prompt.index(image)
+    assert message.text == "" and prompt[0] == ""
+    evidence = pydantic_messages_to_text([ModelRequest(parts=[UserPromptPart(prompt)])])
+    assert reminders[0].content not in evidence
+
+
 
 @pytest.mark.asyncio
 async def test_reference_preserves_supplied_mime_and_original_filename(phone):

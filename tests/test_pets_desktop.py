@@ -756,7 +756,10 @@ assert bubble.height() <= 64 and bubble.width() == 280
 assert bubble._timer.isActive() == (PHASE != 'streaming')
 if PHASE != 'streaming':
     assert bubble._timer.interval() == 15000
-    assert 0 < bubble._timer.remainingTime() <= bubble._timer.interval()
+    # Unix CoarseTimer deadlines may be coalesced by up to 5%.
+    remaining = bubble._timer.remainingTime()
+    assert 0 < remaining <= bubble._timer.interval() * 1.05, (
+        f'remaining={remaining}, interval={bubble._timer.interval()}, type={bubble._timer.timerType()}')
     bubble.enterEvent(QEvent(QEvent.Type.Enter))
     assert not bubble._timer.isActive()
     bubble.leaveEvent(QEvent(QEvent.Type.Leave))
