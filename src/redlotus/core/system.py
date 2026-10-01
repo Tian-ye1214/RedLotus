@@ -30,6 +30,7 @@ from redlotus.runtime.resources import (
 )
 from redlotus.sessions.context import (
     ChatHistory,
+    current_turn_id,
     messages_safe_for_new_prompt,
     repair_interrupted_tool_calls,
 )
@@ -94,7 +95,13 @@ class AgentSystem:
         memory = MemoryService(workspace=workspace, owner_memory_allowed=self._owner_memory_allowed, factory=self._factory)
         memory.bind_runner(self.registry, input_source=lambda: self._session.user_inputs)
         toolkit = BasicToolkit(skills, workspace=workspace, show_diff=self.presentation.show_file_diff)
+        toolkit.access_policy.scope = self._file_access_scope
         return skills, memory, toolkit
+
+    def _file_access_scope(self):
+        if current_turn_id() is not None and (not self._session.active or current_turn_id() != self._session.turn_id):
+            raise PermissionError("原任务已结束，不能继续执行文件操作。")
+        return id(self._session), self._session.generation, self._session.turn_id
 
     async def bind_session(self, session_key: str, *, storage=None, generation=None, task_title=None) -> None:
         previous = self._session_file
@@ -337,8 +344,10 @@ class AgentSystem:
                 if isinstance(answer, str):
                     message.references = await load_file_refs(answer, workspace=self.workspace)
                 await self._session.prepare_message(self, message)
-                await self.record_user_input(uuid.uuid4().hex, message, context=context[:3])
+                await self.record_user_input(message.input_id or uuid.uuid4().hex, message, context=context[:3])
                 answer = ToolReturn(return_value=message.text, content=message.to_prompt()) if message.references else message.text
+            if isinstance(answer, UserMessage):
+                answer = answer.text
             return answer if context == (self._session.generation, self._session.turn_id, self._session_file, self._session.active) else None
 
         self.toolkit.set_ask_user_handler(recorded_answer if handler else None)
@@ -466,7 +475,8 @@ class AgentSystem:
         return True
 
     async def add_urgent_message(
-        self, message: UserMessage, *, admission=None, references=None, input_data=None
+        self, message: UserMessage, *, admission=None, references=None, input_data=None,
+        attachments=None, on_error=None, prepare_input=None
     ) -> bool:
         admission = admission or self._session.admit(self.workspace, urgent=True)
         if not admission.urgent or not self._session.accepts(admission):
@@ -479,18 +489,28 @@ class AgentSystem:
                     message.references = await references
                 if not self._session.accepts(admission):
                     return None
-                await self._session.prepare_message(self, message)
+                if prepare_input is not None:
+                    result = await prepare_input()
+                    if result is None:
+                        self._session.pending_inputs.pop(admission.id, None)
+                        return None
+                else:
+                    await self._session.prepare_message(self, message, prepare=attachments)
+                pending_input['text'] = message.text
                 pending_input['reference_ids'] = [ref.id for ref in message.references]
                 if message.speech_body is not None:
                     pending_input['speech_body'] = message.speech_body
                 return message if self._session.accepts(admission) else None
-            except (OSError, ValueError) as exc:
+            except Exception as exc:
                 self._session.pending_inputs.pop(admission.id, None)
                 if self._session.accepts(admission):
                     self.last_rejected_input = (
                         message.original_text or message.text
                     )
-                    self.presentation.print_warning(str(exc))
+                    if on_error is not None:
+                        await on_error(exc)
+                    else:
+                        self.presentation.print_warning(str(exc))
                 return None
 
         self._session.queue_urgent(admission, prepare())
@@ -503,7 +523,7 @@ class AgentSystem:
         )
         return True
 
-    async def switch_workspace(self, path) -> None:
+    async def switch_workspace(self, path, *, update_default=True) -> None:
         """Prepare the target before releasing or replacing the current conversation."""
         workspace = WorkspaceContext.from_path(path)
         if not workspace.root.is_dir():
@@ -518,7 +538,8 @@ class AgentSystem:
         self._coordinator_agent = None
         from redlotus.runtime.resources import set_workspace
 
-        set_workspace(workspace.root)
+        if update_default:
+            set_workspace(workspace.root)
         logger.activate_log_dir(log_dir)
         review_store.clear()
         self._orchestrator._toolkit = toolkit

@@ -24,8 +24,8 @@ PET_ASSETS = {
 SPEECH_NATIVE_ASSETS = {"redlotus_mambo.exe", "upstream-license.txt", "notice.md",
                         "third-party-notices.md"}
 SPEECH_NATIVE_SOURCE = {"mambo_worker.cpp", "upstream.patch", "compacttrie.hpp",
-                        "pronunciationdictionary.hpp", "streamingvocoder.hpp"}
-WORKER_SHA256 = "ce05b53e991313a7122b075035b94b33e8c2b2a31a25dad0b67f887c1b805f39"
+                        "pronunciationdictionary.hpp", "streamingvocoder.hpp", "cargo.lock"}
+WORKER_SHA256 = "07a051bdaf8fe7c1bd5fbbf8ad74dc07711d40d7af07a9170288c0b1cd0ce1ba"
 RELEASE_SCRIPTS = {"check_structure.py", "verify_wheel.py", "build_native_speech.py",
                    "verify_live.py", "live_cases.py"}
 
@@ -101,7 +101,7 @@ def inspect_native_assets(names, *, sdist: bool = False, wheel_name: str = "", e
                     ("redlotus_mambo.exe", "NOTICE.md", "UPSTREAM-LICENSE.txt",
                      "THIRD-PARTY-NOTICES.md",
                      "mambo_worker.cpp", "upstream.patch", "CompactTrie.hpp",
-                     "PronunciationDictionary.hpp", "StreamingVocoder.hpp")}
+                     "PronunciationDictionary.hpp", "StreamingVocoder.hpp", "Cargo.lock")}
         required.add("scripts/build_native_speech.py")
         missing = [name for name in sorted(required) if not any(
             item.endswith("/" + name) for item in names)]

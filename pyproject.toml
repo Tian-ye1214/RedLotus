@@ -38,16 +38,16 @@ dependencies = [
 [project.optional-dependencies]
 # 浏览器自动化（用后需 `playwright install chromium`）
 browser = ["playwright>=1.49.0"]
-bots = ["ncatbot>=4.4.1.post1", "wechatbot-sdk>=0.2.1"]
+bots = ["ncatbot>=4.4.1.post1", "wechatbot-sdk>=0.3.0"]
 viz = ["matplotlib>=3.10.9", "reportlab>=4.5.0", "pillow>=12.2.0"]
 speech = ["sherpa-onnx==1.13.8", "sounddevice==0.5.6", "silk-python==0.2.8", "soxr==1.1.0", "num2words==0.5.14"]
 pets = ["PySide6>=6.8,<7"]
-build = ["pyinstaller>=6.20.0", "playwright>=1.49.0", "sherpa-onnx==1.13.8", "sounddevice==0.5.6", "silk-python==0.2.8", "soxr==1.1.0", "num2words==0.5.14", "PySide6>=6.8,<7"]
+build = ["pyinstaller>=6.20.0", "playwright>=1.49.0", "wechatbot-sdk>=0.3.0", "sherpa-onnx==1.13.8", "sounddevice==0.5.6", "silk-python==0.2.8", "soxr==1.1.0", "num2words==0.5.14", "PySide6>=6.8,<7"]
 dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0", "opencv-python-headless>=4.8.0", "setuptools>=70.1", "wheel"]
 all = [
     "playwright>=1.49.0",
     "ncatbot>=4.4.1.post1",
-    "wechatbot-sdk>=0.2.1",
+    "wechatbot-sdk>=0.3.0",
     "matplotlib>=3.10.9",
     "reportlab>=4.5.0",
     "pillow>=12.2.0",

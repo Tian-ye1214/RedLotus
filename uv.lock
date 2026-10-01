@@ -2494,6 +2494,7 @@ build = [
     { name = "silk-python" },
     { name = "sounddevice" },
     { name = "soxr" },
+    { name = "wechatbot-sdk" },
 ]
 dev = [
     { name = "opencv-python-headless" },
@@ -2577,8 +2578,9 @@ requires-dist = [
     { name = "soxr", marker = "extra == 'build'", specifier = "==1.1.0" },
     { name = "soxr", marker = "extra == 'speech'", specifier = "==1.1.0" },
     { name = "textual", specifier = ">=8.2.7" },
-    { name = "wechatbot-sdk", marker = "extra == 'all'", specifier = ">=0.2.1" },
-    { name = "wechatbot-sdk", marker = "extra == 'bots'", specifier = ">=0.2.1" },
+    { name = "wechatbot-sdk", marker = "extra == 'all'", specifier = ">=0.3.0" },
+    { name = "wechatbot-sdk", marker = "extra == 'bots'", specifier = ">=0.3.0" },
+    { name = "wechatbot-sdk", marker = "extra == 'build'", specifier = ">=0.3.0" },
     { name = "wheel", marker = "extra == 'dev'" },
     { name = "xlrd", specifier = ">=2.0.1" },
 ]
@@ -3103,15 +3105,15 @@ wheels = [
 
 [[package]]
 name = "wechatbot-sdk"
-version = "0.2.1"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "cryptography" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/42/fe/fc419ff228e64a5d02de7ad06a5b663dcef10502e10a2263ae667b7aa80b/wechatbot_sdk-0.2.1.tar.gz", hash = "sha256:7c06d252fdc35110e0ef6fdd701469c04a1436a602b1088e4d3c30f944ec01c3", size = 14824, upload-time = "2026-04-17T15:21:16.929Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b6/75/d8f1e16df0d9de9035a63441c6e673574b97e5ae2a2329b0b818f6069911/wechatbot_sdk-0.3.0.tar.gz", hash = "sha256:65ecec0ef835391e8f7ce0035a2fc924ebf645e0d82ec9bdfd7f19bd27cccf98", size = 16940, upload-time = "2026-07-01T23:12:13.934Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/96/20/ddb52f93bc90e38d4112ba427a8ec7867a82fdea30e593540fe78b7dfd76/wechatbot_sdk-0.2.1-py3-none-any.whl", hash = "sha256:957e13161c9d689806cd78c39d5c050f1365ede4cfa8653ce4a7395ce1278b19", size = 16608, upload-time = "2026-04-17T15:21:15.526Z" },
+    { url = "https://files.pythonhosted.org/packages/19/2a/4d57cf79c0b3bbe82e08de8d2f5e9a75c57d62aaa175703ed57bcb17c849/wechatbot_sdk-0.3.0-py3-none-any.whl", hash = "sha256:717ce38c5a7b0c207f2bef1f6e203ca18064fefc589c638d8890ade49cb742fb", size = 18424, upload-time = "2026-07-01T23:12:12.719Z" },
 ]
 
 [[package]]

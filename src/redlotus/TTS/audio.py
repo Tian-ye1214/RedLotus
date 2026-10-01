@@ -27,8 +27,9 @@ _OUTPUT_RATE = 24000
 _SILK_HEADERS = (b"\x02#!SILK_V3", b"#!SILK_V3")
 _FORMAT_ALIASES = {"wave": "wav", "mpeg": "mp3", "pcm": "pcm_s16le", "s16le": "pcm_s16le",
                    "f32le": "pcm_f32le", "mp4": "m4a", "opus+ogg": "opus"}
-_MAGIC_FORMATS = {b"fLaC": "flac", b"OggS": "ogg", b"ID3": "mp3"}
-_FFMPEG_FORMATS = {"mp3", "ogg", "flac", "m4a", "aac", "opus"}
+_MAGIC_FORMATS = {b"fLaC": "flac", b"OggS": "ogg", b"ID3": "mp3",
+                  b"#!AMR\n": "amr", b"#!AMR-WB\n": "amr"}
+_FFMPEG_FORMATS = {"mp3", "ogg", "flac", "m4a", "aac", "opus", "amr"}
 
 
 class _SilkSink:
@@ -375,10 +376,8 @@ class AudioIO:
                     writer.writeframesraw(data) if writer is not None else buffer.write(data)
                     frames += take
                     offset += take
-                    if frames == max_frames or (chunk.end_of_segment and offset == samples.size):
+                    if frames == max_frames:
                         yield await finish_segment()
-                if chunk.end_of_segment and not samples.size and frames:
-                    yield await finish_segment()
             if frames:
                 yield await finish_segment()
         finally:

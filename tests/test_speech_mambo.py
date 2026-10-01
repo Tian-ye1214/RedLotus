@@ -1,8 +1,10 @@
 """Mambo's passive bundle, bounded pipe protocol, and model lifetime."""
 import io
+import asyncio
 import importlib.util
 import json
 import struct
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, get_type_hints
@@ -10,9 +12,9 @@ from typing import Literal, get_type_hints
 import numpy as np
 import pytest
 
-from redlotus.TTS import SpeechError, SpeechUnavailable, SynthesisRequest, TTSModel, VoiceProfile
+from redlotus.TTS import ModelKind, SpeechError, SpeechSettings, SpeechUnavailable, StreamingSynthesizer, SynthesisRequest, TTSModel, VoiceProfile
 from redlotus.TTS.inference import MamboTTSModel
-from redlotus.runtime.resources import FramedProcess
+from redlotus.runtime.resources import FramedProcess, finish_io
 
 
 class WorkerStub:
@@ -68,11 +70,67 @@ def test_framed_reply_drains_after_callback_failure():
         assert list(blocks) == [b"next"]
 
 
+@pytest.mark.parametrize("text", ["😊", "…"])
+def test_nonphonetic_reply_is_empty_and_next_request_uses_same_worker(text):
+    pcm = np.array([0.125, -0.375], dtype="<f4")
+    model = model_for(packet({"status": "skipped", "size": 0}) +
+                      packet({"status": "data", "size": pcm.nbytes}, pcm.tobytes()) +
+                      packet({"status": "done", "size": pcm.nbytes}))
+    request = SynthesisRequest(text, model.prepare_voice(model.profile))
+    skipped = model.generate(request, callback=lambda *_: pytest.fail("empty text emitted PCM"))
+    assert skipped.sample_rate == 32000 and skipped.end_of_segment and len(skipped.samples) == 0
+    assert model._worker.process is not None
+    next_audio = model.generate(SynthesisRequest("你好。", request.voice))
+    np.testing.assert_array_equal(next_audio.samples, pcm)
+
+
+async def test_nonphonetic_segment_does_not_abort_later_chinese_audio():
+    pcm = np.full(3200, 0.25, dtype="<f4")
+    model = model_for(packet({"status": "skipped", "size": 0}) +
+                      packet({"status": "skipped", "size": 0}) +
+                      packet({"status": "data", "size": pcm.nbytes}, pcm.tobytes()) +
+                      packet({"status": "done", "size": pcm.nbytes}))
+
+    class Service:
+        config = SpeechSettings(pcm_seconds=.2, flush_ms=1)
+
+        @asynccontextmanager
+        async def acquire(self, kind):
+            assert kind is ModelKind.TTS
+            yield model
+
+        async def run(self, kind, operation, *args):
+            assert kind is ModelKind.TTS
+            return await finish_io(asyncio.to_thread(operation, *args))
+
+    async def deltas():
+        yield "😊"
+        await asyncio.sleep(.05)
+        yield "…"
+        await asyncio.sleep(.05)
+        yield "你好。"
+
+    chunks = [chunk async for chunk in StreamingSynthesizer(Service()).synthesize(deltas())]
+    assert chunks and chunks[-1].end_of_segment
+    assert all(np.all(np.isfinite(chunk.samples)) for chunk in chunks)
+    assert sum(len(chunk.samples) for chunk in chunks) > 0
+    assert model._worker.process is not None
+    wire = model._worker.process.stdin.getvalue()
+    requests = []
+    while wire:
+        size, = struct.unpack("<I", wire[:4])
+        requests.append(wire[4:4 + size].decode("utf-8"))
+        wire = wire[4 + size:]
+    assert requests == ["😊", "…", "你好。"]
+
+
 @pytest.mark.parametrize("output", [
     packet({"status": "data", "size": 9}),
     packet({"status": "data", "size": 4}, b"data") + packet({"status": "done", "size": 3}),
     packet({"status": "data", "size": 4}, b"data") * 3,
     packet({"status": "done", "size": 0}),
+    packet({"status": "skipped", "size": 4}),
+    packet({"status": "data", "size": 4}, b"data") + packet({"status": "skipped", "size": 0}),
     packet({"status": "data", "size": True}, b"x"),
 ])
 def test_framed_reply_rejects_invalid_bounds_and_reaps_worker(output):

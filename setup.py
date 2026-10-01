@@ -14,7 +14,7 @@ NATIVE = Path("src/redlotus/TTS/native")
 WORKER = NATIVE / "redlotus_mambo.exe"
 NOTICES = (NATIVE / "NOTICE.md", NATIVE / "UPSTREAM-LICENSE.txt",
            NATIVE / "THIRD-PARTY-NOTICES.md")
-WORKER_SHA256 = "ce05b53e991313a7122b075035b94b33e8c2b2a31a25dad0b67f887c1b805f39"
+WORKER_SHA256 = "07a051bdaf8fe7c1bd5fbbf8ad74dc07711d40d7af07a9170288c0b1cd0ce1ba"
 
 
 class SpeechBuildPy(build_py):

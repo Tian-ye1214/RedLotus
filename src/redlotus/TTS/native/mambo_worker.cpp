@@ -100,6 +100,7 @@ class MamboWorker {
       if (text.empty()) break;
       try {
         std::size_t frames = 0;
+        bool no_phonemes = false;
         auto audio = pipeline.Infer("voice", text, "auto", sampling, 0.5f, 1.0f, nullptr, {},
             [&](const std::vector<float>& samples) {
               if (samples.empty() || samples.size() > 2 * kSampleRate || frames + samples.size() > kMaxFrames)
@@ -108,7 +109,11 @@ class MamboWorker {
                 if (!std::isfinite(sample)) throw std::runtime_error("Non-finite speech sample");
               Write({{"status", "data"}, {"size", samples.size() * sizeof(float)}}, &samples);
               frames += samples.size();
-            });
+            }, &no_phonemes);
+        if (no_phonemes && audio && !frames) {
+          Write({{"status", "skipped"}, {"size", 0}});
+          continue;
+        }
         if (!audio || !frames) throw std::runtime_error("No speech samples generated");
         Write({{"status", "done"}, {"size", frames * sizeof(float)}});
       } catch (const std::exception& error) {

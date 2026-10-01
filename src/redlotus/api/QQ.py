@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import re
 from functools import partial
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from redlotus.TTS import AudioSegment
+from redlotus.api import ChannelSender, OutboundFile
 from redlotus.api.base import BotBase, main
 from redlotus.api.media import extract_media, iter_segments
 from redlotus.runtime.config import user_config_dir
@@ -16,6 +18,39 @@ from redlotus.sessions.control import UserMessage
 
 if TYPE_CHECKING:
     from ncatbot.core import BaseMessageEvent
+
+
+class _TransportDebugFilter(logging.Filter):
+    """Keep SDK connection diagnostics without logging raw message frames."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno > logging.DEBUG
+
+
+_TRANSPORT_DEBUG_FILTER = _TransportDebugFilter()
+
+
+class _ConfigLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if type(record.msg).__module__ == "ncatbot.utils.config":
+            record.msg, record.args = "QQ SDK 配置已校验，私人字段不写入日志。", ()
+        return True
+
+
+_CONFIG_LOG_FILTER = _ConfigLogFilter()
+
+
+class _MediaRequest:
+    """Omit absent SDK media selectors: NapCat accepts omission, not JSON null."""
+
+    def __init__(self, send):
+        self.send = send
+
+    async def __call__(self, path: str, params: dict | None = None, **kwargs):
+        if params is not None and path in {"/get_image", "/get_record", "/get_file"}:
+            params = {key: value for key, value in params.items()
+                if key not in {"file", "file_id"} or value is not None}
+        return await self.send(path, params, **kwargs)
 
 
 class QQBot(BotBase):
@@ -27,8 +62,16 @@ class QQBot(BotBase):
             raise ValueError(f"[QQ] 缺少 NapCat 配置文件: {config_path}；请按 api/config.yaml.example 填写。")
         os.environ["NCATBOT_CONFIG_PATH"] = str(config_path)
         from ncatbot.core import BotClient
+        for name in ("Adapter", "websockets.client"):
+            transport_log = logging.getLogger(name)
+            if _TRANSPORT_DEBUG_FILTER not in transport_log.filters:
+                transport_log.addFilter(_TRANSPORT_DEBUG_FILTER)
+        config_log = logging.getLogger("Config")
+        if _CONFIG_LOG_FILTER not in config_log.filters:
+            config_log.addFilter(_CONFIG_LOG_FILTER)
         self._doctor()
         self._bot_client = BotClient()
+        self._bot_client.api.async_callback = _MediaRequest(self._bot_client.api.async_callback)
         adapter = self._bot_client.adapter
         adapter.connect_websocket = partial(self._run_connection, adapter.connect_websocket)
         self._bot_client.add_private_message_handler(self._handle_message)
@@ -70,6 +113,7 @@ class QQBot(BotBase):
             re.search(r"\[CQ:(?:image|video|file|record)(?:,|\])", raw_text)
         )
         reply = partial(event.reply, at=False) if is_group else partial(event.reply)
+        reply.file_sender = QQFileSender(self._bot_client.api, event)
         reply.speech_sender = partial(self.send_voice, event)
         reply.speech_format = "silk"
         return (
@@ -86,13 +130,11 @@ class QQBot(BotBase):
     async def send_voice(self, event: BaseMessageEvent, segment: AudioSegment) -> None:
         if segment.format != "silk":
             raise ValueError("QQ 语音回复需要 SILK 音频")
-        from ncatbot.core.event.message_segment import MessageArray, Record
-
-        message = MessageArray(Record(file="base64://" + base64.b64encode(segment.data).decode("ascii")))
+        payload = "base64://" + base64.b64encode(segment.data).decode("ascii")
         if event.is_group_msg():
-            await event.reply(rtf=message, at=False)
+            await self._bot_client.api.send_group_record(event.group_id, payload)
         else:
-            await event.reply(rtf=message)
+            await self._bot_client.api.send_private_record(event.user_id, payload)
 
     def _doctor(self) -> None:
         """启动前体检：配置缺失/无效时立即报错退出，避免 ncatbot 回退到 input() 静默卡死。"""
@@ -113,12 +155,35 @@ class QQBot(BotBase):
             )
 
     def run(self, **kwargs):
+        from ncatbot.utils import config
         self._doctor()
         self._released = False
+        save = config.save
+        config.save = self._keep_config
         try:
             self._bot_client.run_frontend(**kwargs)
         finally:
+            config.save = save
             asyncio.run(self.release_all_resources_async())
+
+    def _keep_config(self) -> None:
+        """SDK persistence hook: the channel only reads the user's NapCat settings."""
+        logging.getLogger("Config").debug("QQ 使用现有配置，不自动回写。")
+
+
+class QQFileSender(ChannelSender):
+    def __init__(self, api, event):
+        self.api, self.event = api, event
+
+    async def send_file(self, item: OutboundFile) -> str:
+        payload = "base64://" + base64.b64encode(item.data).decode("ascii")
+        prefix = "group" if self.event.is_group_msg() else "private"
+        recipient = self.event.group_id if prefix == "group" else self.event.user_id
+        if item.media_type.startswith("image/"):
+            await getattr(self.api, f"send_{prefix}_image")(recipient, payload)
+        else:
+            await getattr(self.api, f"send_{prefix}_file")(recipient, payload, name=item.path.name)
+        return f"QQ 已受理文件发送：{item.path.name}；未自动重复发送。"
 
 
 if __name__ == "__main__":

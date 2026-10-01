@@ -324,16 +324,32 @@ async def test_unknown_partial_is_preserved_and_prepare_reports_conflict(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_clean_reclaims_owned_compatible_partial(tmp_path, monkeypatch, recovery_speech):
-    _, old = recovery_archive(tmp_path, monkeypatch, root="compatible-old")
+async def test_clean_preserves_owned_compatible_partial(tmp_path, monkeypatch, recovery_speech):
+    source, old = recovery_archive(tmp_path, monkeypatch, root="compatible-old")
     _, current = recovery_archive(tmp_path, monkeypatch, root="recommended-new")
     current["compatible"] = [old]
     part, meta = recovery_speech._download_paths(service.ModelSpec.from_dict("asr", old))
     part.parent.mkdir(parents=True)
-    part.write_bytes(b"partial")
+    prefix = source.read_bytes()[:10]
+    part.write_bytes(prefix)
+    meta.write_text(json.dumps({"sha256": old["sha256"], "url": old["url"]}))
+    await recovery_speech.clean()
+    assert part.read_bytes() == prefix and meta.exists()
+    await recovery_speech.close()
+
+
+@pytest.mark.asyncio
+async def test_clean_reclaims_owned_compatible_complete_archive(tmp_path, monkeypatch, recovery_speech):
+    source, old = recovery_archive(tmp_path, monkeypatch, root="compatible-old")
+    _, current = recovery_archive(tmp_path, monkeypatch, root="recommended-new")
+    current["compatible"] = [old]
+    part, meta = recovery_speech._download_paths(service.ModelSpec.from_dict("asr", old))
+    part.parent.mkdir(parents=True)
+    part.write_bytes(source.read_bytes())
     meta.write_text(json.dumps({"sha256": old["sha256"], "url": old["url"]}))
     await recovery_speech.clean()
     assert not part.exists() and not meta.exists()
+    assert source.exists()
     await recovery_speech.close()
 
 

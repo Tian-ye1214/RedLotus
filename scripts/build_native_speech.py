@@ -46,10 +46,26 @@ class NativeBuild:
         if "#define ORT_API_VERSION 28" not in header.read_text(encoding="utf-8"):
             raise ValueError("ONNX Runtime 1.28 SDK headers are required")
 
+    def install_cargo_lock(self):
+        expected = (self.native / "Cargo.lock").read_bytes()
+        lock = self.source / "third_party/tokenizers-cpp/rust/Cargo.lock"
+        if lock.is_symlink() or (lock.exists() and (not lock.is_file() or lock.read_bytes() != expected)):
+            raise ValueError("tokenizers-cpp Cargo.lock differs from the pinned native build resource")
+        if not lock.exists():
+            with lock.open("xb") as stream:
+                stream.write(expected)
+        return lock, expected
+
+    @staticmethod
+    def verify_cargo_lock(lock, expected):
+        if lock.is_symlink() or not lock.is_file() or lock.read_bytes() != expected:
+            raise RuntimeError("tokenizers-cpp Cargo.lock drifted during the offline build")
+
     def run(self):
         if os.name != "nt":
             raise RuntimeError("This worker build currently targets Windows x64")
         self.prepare_source()
+        lock, expected = self.install_cargo_lock()
         subprocess.run([self.cmake, "-S", str(self.source), "-B", str(self.build_dir),
             "-G", "Visual Studio 17 2022", "-A", "x64", "-DENABLE_CUDA=OFF", "-DUSE_TENSORRT=OFF",
             "-DUSE_ONNX=ON", "-DNO_TEST=ON", f"-DONNXRUNTIME_PATH={self.sdk.as_posix()}",
@@ -57,6 +73,7 @@ class NativeBuild:
             f"-DREDLOTUS_SOURCE_ROOT={self.project.as_posix()}"], env=self.env, check=True)
         subprocess.run([self.cmake, "--build", str(self.build_dir), "--config", "Release",
                         "--target", "redlotus_mambo", "--parallel", "4"], env=self.env, check=True)
+        self.verify_cargo_lock(lock, expected)
         destination = self.native / "redlotus_mambo.exe"
         shutil.copyfile(self.build_dir / "Release/redlotus_mambo.exe", destination)
         with destination.open("rb") as stream:

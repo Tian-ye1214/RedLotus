@@ -463,7 +463,9 @@ class MamboTTSModel(TTSModel):
         bundle = TTSBundle.read(root)
         model = cls(FramedProcess([str(executable), str(threads)], executable.parent, environment), bundle)
         try:
-            ready = model._reply()
+            ready = model._worker.receive_header(8192)
+            if ready.get("status") == "error":
+                raise SpeechError(f"曼波合成失败: {ready.get('message', '未知错误')}")
             if (ready.get("status") != "ready" or ready.get("protocol") != 2 or ready.get("sample_rate") != 32000
                     or not Path(ready.get("runtime", "")).samefile(runtime)):
                 raise SpeechUnavailable("曼波运行组件协议或 ONNX Runtime 不兼容")
@@ -471,12 +473,6 @@ class MamboTTSModel(TTSModel):
         except BaseException:
             model.close()
             raise
-
-    def _reply(self) -> dict:
-        row = self._worker.receive_header(8192)
-        if row.get("status") == "error":
-            raise SpeechError(f"曼波合成失败: {row.get('message', '未知错误')}")
-        return row
 
     def warmup(self) -> None:
         self.generate(SynthesisRequest("你好。Hello.", self.prepare_voice(self.profile)))
@@ -494,6 +490,8 @@ class MamboTTSModel(TTSModel):
         try:
             with self._worker.responses(32000 * 2 * 4, 32000 * 55 * 4) as blocks:
                 for block in blocks:
+                    if not block:
+                        return PCMChunk(np.empty(0, dtype=np.float32), self.sample_rate, True)
                     chunk = PCMChunk.from_bytes(block, self.sample_rate)
                     if callback is None:
                         collected.append(chunk.samples)
@@ -558,6 +556,8 @@ class _SegmentStream:
         if self.stopped.is_set():
             return
         if not received:
+            if audio is not None and audio.sample_rate == native_rate and audio.end_of_segment and not len(audio.samples):
+                return
             if audio is None or audio.sample_rate != native_rate or not len(audio.samples):
                 raise SpeechError("语音模型未产生有效单声道音频")
             callback(audio.samples, 1.0)

@@ -8,9 +8,14 @@ import pytest
 
 
 def test_pcm_annotations_resolve_to_concrete_numpy_type():
-    from typing import get_type_hints
+    from typing import get_args, get_origin, get_type_hints
+    import numpy as np
     from redlotus.TTS import PCMChunk
-    assert "numpy.ndarray" in str(get_type_hints(PCMChunk)["samples"])
+    annotation = get_type_hints(PCMChunk)["samples"]
+    assert get_origin(annotation) is np.ndarray
+    dtype = get_args(annotation)[1]
+    assert get_origin(dtype) is np.dtype
+    assert get_args(dtype) == (np.float32,)
 
 
 def test_native_resource_lease_is_retained_once_until_process_exit(tmp_path):

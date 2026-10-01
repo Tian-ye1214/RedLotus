@@ -416,11 +416,20 @@ async def test_fast_stream_coalesces_unicode_and_final_snapshot_is_authoritative
     assert not service._tasks
 
 
-async def test_clear_and_next_reply_reject_late_previous_fragments(tmp_path):
+async def test_clear_and_next_reply_reject_late_previous_fragments(tmp_path, monkeypatch):
     path = tmp_path / "messages.jsonl"
     service = MessageService(path, "read")
     try:
         await service.start()
+        sent_at = []
+        writer = service._process.stdin
+        write = writer.write
+
+        def record_write(packet):
+            sent_at.append(asyncio.get_running_loop().time())
+            write(packet)
+
+        monkeypatch.setattr(writer, "write", record_write)
         await service.publish_reply(reply_id="1", phase="start", text="")
         await service.publish_reply(reply_id="1", phase="delta", text="old text")
         await records(path, lambda rows: rows and rows[-1]["message"]["text"] == "old text")
@@ -435,7 +444,10 @@ async def test_clear_and_next_reply_reject_late_previous_fragments(tmp_path):
         await service.publish_reply(reply_id="2", phase="cancelled", text="")
         rows = await records(path, lambda rows: rows and rows[-1]["message"]["phase"] == "cancelled")
         assert rows[-1]["message"]["text"] == "new text"
-        assert all(b["at"] - a["at"] >= .035 for a, b in zip(rows, rows[1:]))
+        assert len(sent_at) == len(rows)
+        sent_intervals = [b - a for a, b in zip(sent_at, sent_at[1:])]
+        received_intervals = [b["at"] - a["at"] for a, b in zip(rows, rows[1:])]
+        assert all(interval >= .035 for interval in sent_intervals), (sent_intervals, received_intervals)
         assert [r["message"]["seq"] for r in rows] == sorted({r["message"]["seq"] for r in rows})
     finally:
         await service.close()

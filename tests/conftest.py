@@ -105,6 +105,7 @@ def phone(isolated_config, tmp_path, monkeypatch):
         async def stop_current_turn(self):
             state.reset()
             await state.queue.cancel()
+            return "已停止当前任务，保留会话记录。"
 
         async def shutdown(self):
             pass

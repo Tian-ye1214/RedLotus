@@ -11,8 +11,9 @@ and thread pool, producer-compatible BERT boundary tokens and feature alignment,
 deterministic resource teardown, and owned PCM without file codecs or reference-audio
 preparation. The source headers provide compact Chinese and English dictionary
 storage and a bounded vocoder window with history, lookahead and waveform overlap.
-`mambo_worker.cpp` provides protocol 2: bounded PCM byte blocks and an explicit
-completion length. The host drains each reply before reusing the worker after
+`mambo_worker.cpp` provides protocol 2: bounded PCM byte blocks, an explicit
+completion length, and a zero-PCM `skipped` reply for text with no phonemes.
+The host drains each reply before reusing the worker after
 cancellation, and resamples each request to 24 kHz with preserved filter state.
 The executable loads the installed sherpa-onnx ONNX Runtime by absolute path;
 no second runtime DLL, model weights, training environment, or audio is bundled.

@@ -806,6 +806,40 @@ window.close()
 
 
 @requires_qt
+def test_reply_autoscrolls_when_qt_reports_scroll_range_after_show():
+    result = probe(WINDOW + """
+import json
+from PySide6.QtWidgets import QAbstractSlider
+bubble = window.bubble
+bubble.apply_snapshot(dict(event='reply', reply_id='a', seq=1, phase='streaming',
+                           text='\\n'.join(str(i) for i in range(100)), truncated=False))
+app.processEvents()
+bar = bubble.text.verticalScrollBar()
+end = bar.maximum()
+assert end > 0
+bar.setRange(0, 0)
+bar.setRange(0, end)
+followed = [bar.value(), bar.maximum()]
+bar.triggerAction(QAbstractSlider.SliderAction.SliderToMinimum)
+bar.setRange(0, end + 20)
+scrolled = [bar.value(), bar.maximum()]
+bubble.apply_snapshot(dict(event='reply', reply_id='', seq=2, phase='clear',
+                           text='', truncated=False))
+bubble.apply_snapshot(dict(event='reply', reply_id='b', seq=3, phase='streaming',
+                           text='\\n'.join(str(i) for i in range(100)), truncated=False))
+app.processEvents()
+new_end = bar.maximum()
+bar.setRange(0, 0)
+bar.setRange(0, new_end)
+print(json.dumps([followed, scrolled, [bar.value(), bar.maximum()]]))
+window.close()
+""")
+    assert result[0][0] == result[0][1], f"late scroll range left the fresh reply at {result[0]}"
+    assert result[1][0] == 0, f"later scroll range overrode the user's scroll: {result[1]}"
+    assert result[2][0] == result[2][1] > 0, f"new reply did not follow after clear: {result[2]}"
+
+
+@requires_qt
 def test_reply_scroll_and_truncation_are_bounded_and_terminal_hover_pauses():
     result = probe(WINDOW + """
 import json, time
@@ -817,7 +851,9 @@ text = '\\n'.join(str(i) for i in range(100))
 snap(text, 1)
 app.processEvents()
 bar = bubble.text.verticalScrollBar()
-assert bar.value() == bar.maximum() and bar.maximum() > 0
+assert bar.value() == bar.maximum() and bar.maximum() > 0, (
+    f'scroll={bar.value()}/{bar.maximum()}, bubble={bubble.width()}x{bubble.height()}, '
+    f'text={bubble.text.width()}x{bubble.text.height()}, document={bubble.text.document().size()}')
 assert bubble.height() == 180 and bubble.text.height() == 152
 bar.setValue(12)
 snap(text + '\\nlast', 2)

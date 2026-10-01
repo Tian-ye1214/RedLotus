@@ -61,15 +61,34 @@ async def test_reset_cancels_voice_work_and_discard_disables_voice():
     assert not state.voice_enabled
 
 
-async def test_bot_voice_command_controls_session_without_model_request(phone):
+async def test_bot_voice_command_controls_session_without_model_request(phone, monkeypatch):
     from redlotus.sessions.context import UserMessage
     bot, state, send, replies, calls = phone
+    from redlotus.TTS import ModelKind, ModelStage
+    from redlotus.TTS.service import SpeechService
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(SpeechService, "_shared", SimpleNamespace(
+        status=lambda: {ModelKind.TTS: SimpleNamespace(stage=ModelStage.READY)}))
+    send.speech_sender = AsyncMock()
     await bot.dispatch_user_message("wx_owner", UserMessage("/voice on"), send)
     assert state.voice_enabled
     await bot.dispatch_user_message("wx_owner", UserMessage("/voice off"), send)
     assert not state.voice_enabled
     assert not calls
     assert len(replies) == 2
+
+
+async def test_bot_rejects_unavailable_voice_before_enabling_or_synthesizing(phone):
+    from redlotus.TTS import SpeechUnavailable
+    from redlotus.sessions.context import UserMessage
+    bot, state, send, replies, calls = phone
+    send.speech_error = SpeechUnavailable("当前微信账号尚未验证原生语音播放")
+    await bot.dispatch_user_message("wx_owner", UserMessage("/voice on"), send)
+    assert not state.voice_enabled
+    assert not calls
+    assert len(replies) == 1 and "当前微信账号" in replies[0]
+    await bot.dispatch_user_message("wx_owner", UserMessage("/voice off"), send)
+    assert replies[-1] == "已关闭语音回复。"
 
 
 async def test_silent_channel_voice_reports_retry_without_agent_turn(phone, monkeypatch):
@@ -80,7 +99,7 @@ async def test_silent_channel_voice_reports_retry_without_agent_turn(phone, monk
     async def silent(*args, **kwargs):
         raise NoSpeechDetected("未识别到语音，请重试。")
     monkeypatch.setattr(state, "prepare_message", silent)
-    bot._submit_turn("wx_owner", state, UserMessage("", voice=True), send)
+    await bot._submit_turn("wx_owner", state, UserMessage("", voice=True), send)
     await state.queue.join()
 
     assert not calls
@@ -131,7 +150,7 @@ async def test_channel_fifo_request_saves_original_speech_body(phone):
     from redlotus.sessions.context import UserMessage
     bot, state, send, _, _ = phone
     state.queue.ready.clear()
-    bot._submit_turn("wx_owner", state, UserMessage("typed\nspoken", speech_body="typed"), send)
+    await bot._submit_turn("wx_owner", state, UserMessage("typed\nspoken", speech_body="typed"), send)
     try:
         await asyncio.gather(*tuple(state._preparations))
         request = state.queue.pending[0][2]
@@ -185,7 +204,7 @@ async def test_resumed_voice_prompt_keeps_main_and_supplement_order_without_reco
     assert any(isinstance(part, str) and "spoken-2" in part for part in resumed)
 
 
-def test_wechat_ignores_sdk_voice_transcription_but_keeps_actual_text():
+def test_wechat_prepares_voice_separately_from_sdk_combined_text():
     from functools import partial
     from redlotus.api.WeChat import WeChatAgentBot
     msg = SimpleNamespace(user_id="owner", text="实际文字\nSDK转写", voices=[object()], images=[], files=[], videos=[], raw={"item_list": [{"type": 1, "text_item": {"text": "实际文字"}}, {"type": 3, "voice_item": {"text": "SDK转写"}}]})
@@ -337,7 +356,7 @@ async def test_channel_output_keeps_original_destination_without_files(phone, is
             state.reset()
     reply.speech_sender, reply.speech_format = sender, "wav"
     monkeypatch.setattr(service.SpeechService, "_shared", SimpleNamespace(
-        config=SpeechSettings(model_dir=state.agent.workspace.root / "model"), _closed=False))
+        config=SpeechSettings(model_dir=state.agent.workspace.root / "model", clip_seconds=.01), _closed=False))
     bot._bind_voice_output("wx_owner", state, reply, state.generation)
     async def pcm():
         for _ in range(2):

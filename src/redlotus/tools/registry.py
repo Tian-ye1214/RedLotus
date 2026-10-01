@@ -354,16 +354,12 @@ def readable_roots(*, work_base: Path) -> tuple[Path, ...]:
 
 
 def assert_readable_path(path: Path, *, work_base: Path) -> Path:
-    """解析后的路径必须落在 当前项目 或技能目录（基线 / overlay）下。"""
-    resolved = path.resolve()
-    roots = readable_roots(work_base=work_base)
-    if any(resolved.is_relative_to(root) for root in roots):
-        return resolved
-    raise ValueError(f"Path not allowed (must be under: {', '.join(map(str, roots))}): {resolved}")
+    """Owner tools may read any OS-accessible resolved path; writes use FileAccessPolicy."""
+    return path.resolve()
 
 
 def resolve_readable_path(name: str, *, work_base: Path) -> Path:
-    """相对路径：技能路径锚定到基线/overlay，其余锚定到 当前项目；绝对路径须落在可读根内。"""
+    """Resolve project-relative paths and Skill aliases; OS permissions govern reads."""
     name = (name or "").strip()
     if not name:
         raise ValueError("Path name must not be empty")
@@ -402,6 +398,7 @@ class SkillsManager:
     def __init__(self, skills_dir: str | Path | None = None, *, workspace=None):
         self.skills_dir = Path(skills_dir) if skills_dir is not None else user_skills_dir(workspace, required=False)
         self.workspace = workspace
+        self.access_policy = None
         self._roots = (shipped_skills_dir(), *((self.skills_dir,) if self.skills_dir is not None else ()))
         self._refresh_lock = threading.Lock()
         self.skills = {}
@@ -566,6 +563,7 @@ class SkillsManager:
                 cwd=str(self.skills[skill_name].path),
                 timeout=timeout,
                 workspace=self.workspace,
+                access_policy=self.access_policy,
             )
             return result.to_text()
         except subprocess.TimeoutExpired as exc:

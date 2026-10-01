@@ -58,26 +58,7 @@ class AgentCliController:
     """CLI/TUI orchestration for AgentSystem."""
 
     EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit", "退出"}
-    BUSY_SAFE_COMMANDS = {
-        "/agent",
-        "/stop",
-        "/cd",
-        "/status",
-        "/cancel",
-        "/help",
-        "/trace",
-        "/tasks",
-        "/pwd",
-        "/config",
-        "/context",
-        "/usage",
-        "/panel",
-        "/skills",
-        "/ltm",
-        "/stm",
-        "/voice",
-        "/pets",
-    }
+    BUSY_SAFE_COMMANDS = SlashCommands.BUSY_SAFE
 
     def __init__(self, system: "AgentSystem") -> None:
         self.system = system
@@ -124,7 +105,7 @@ class AgentCliController:
             return await legacy_pick_snapshot(snapshots, self._legacy_repl.read_line)
         return SnapshotSelection(SnapshotAction.CANCEL)
 
-    async def enter_current_workspace(self, *, state=None, force_picker=False, workspace=None):
+    async def enter_current_workspace(self, *, state=None, force_picker=False, workspace=None, choice=None):
         """Lock admission throughout discovery, selection and restoring the chosen session."""
         if self.is_transitioning:
             return None
@@ -133,7 +114,7 @@ class AgentCliController:
         try:
             if workspace is not None:
                 await self.reset_session(state.history, workspace=workspace)
-            result = await self._choose_current_workspace(state=state, force_picker=force_picker)
+            result = await self._choose_current_workspace(state=state, force_picker=force_picker, choice=choice)
             if not force_picker or result is not None:
                 self._prepare_session_logs()
             return result
@@ -142,7 +123,7 @@ class AgentCliController:
             if not self._active_transitions:
                 self._ready.set()
 
-    async def _choose_current_workspace(self, *, state=None, force_picker=False):
+    async def _choose_current_workspace(self, *, state=None, force_picker=False, choice=None):
         generation = self.system._session.generation
         state = state or getattr(self, "_active_session_state", None)
         if state is None:
@@ -158,7 +139,7 @@ class AgentCliController:
             if not force_picker:
                 return None
             print_warning("当前工作区没有可加载的对话快照。可新建会话或取消。")
-        selection = await self._pick_snapshot(snapshots)
+        selection = SnapshotSelection.resolve(choice, snapshots) if choice is not None else await self._pick_snapshot(snapshots)
         if generation != self.system._session.generation:
             return None
         if selection.action is SnapshotAction.CANCEL:
@@ -332,18 +313,6 @@ class AgentCliController:
     async def _handle_slash_command(
         self, raw_input: str, state: SessionController
     ) -> str:
-        command = raw_input.split()[0].lower()
-        if self.system.has_current_turn:
-            if command not in self.BUSY_SAFE_COMMANDS and not (
-                self.system._session.is_compressing and command in {"/load", "/compress"}
-            ):
-                print_warning(
-                    "A turn is currently running. Use /stop first or wait for it to finish."
-                )
-                return "continue"
-        if command == "/load" and self.system._session.is_compressing:
-            await self.system._session.cancel_compression()
-
         await asyncio.to_thread(self.system._skills_manager.refresh)
         first_override = await SlashCommands(self, state, raw_input).run()
         if first_override is not None:
@@ -426,10 +395,8 @@ class AgentCliController:
             print_success("Bye.")
             return "break"
 
-        if command in ("/clear", "新任务"):
-            await self.reset_session(state.history)
-            state.is_first_input = True
-            return "continue"
+        if command == "新任务":
+            command = raw_input = "/clear"
 
         if command.startswith("/"):
             await self._publish_context_usage(state.history)

@@ -111,7 +111,9 @@ class SessionController:
         self.is_first_input = True
         self.agent = self.question = None
         self.deliveries = {}
+        self.last_consumed_input_id = None
         self.question_lock = asyncio.Lock()
+        self.answer_lock = asyncio.Lock()
         self._storage_retry = asyncio.Event()
         self._write_lock = asyncio.Lock()
         self.storage_paused = False
@@ -168,7 +170,9 @@ class SessionController:
                 raise
             except Exception as exc:
                 if self.voice_error is not None:
-                    self.voice_error(exc)
+                    result = self.voice_error(exc)
+                    if inspect.isawaitable(result):
+                        await result
                 else:
                     logger.error("语音试听失败: %s", exc, exc_info=True)
 
@@ -357,6 +361,7 @@ class SessionController:
                 raise asyncio.CancelledError()
             self.active = True
             self.turn_id = turn_id or uuid4().hex
+            self.last_consumed_input_id = self.turn_id
             self.open_inbox()
             self.task = asyncio.current_task()
             self.user_inputs = list(user_inputs) if user_inputs is not None else [text]
@@ -381,6 +386,7 @@ class SessionController:
         if context != (self.generation, self.turn_id) or identity in self.recorded_input_ids:
             return False
         self.recorded_input_ids.add(identity)
+        self.last_consumed_input_id = identity
         if identity == self.turn_id:
             return False  # The outer turn seeded its first input before persistence.
         self.user_inputs.append(message.original_text if message.original_text is not None else message.text)

@@ -102,6 +102,9 @@ class FramedProcess:
                     if not total or size != total:
                         raise ValueError("原生运行组件返回了不匹配的完成消息")
                     return
+                if row.get("status") == "skipped" and not total and size == 0:
+                    yield b""
+                    return
                 if row.get("status") != "data" or not 0 < size <= block_limit or total + size > total_limit:
                     raise ValueError("原生运行组件返回了超限或无效的分块")
                 total += size

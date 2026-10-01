@@ -30,6 +30,7 @@ class UserMessage:
     resume: dict | None = None
     voice: bool = False
     speech_body: str | None = None
+    input_id: str | None = None
 
     def to_prompt(self):
         """Pass original requirements and explicitly labelled reference data together."""
@@ -302,5 +303,15 @@ class SubagentResult(BaseModel):
     @property
     def success(self) -> bool:
         return self.status == "success"
+
+
+
+
+@dataclass(frozen=True)
+class ContextUsageItem:
+    role_label: str
+    used_tokens: int
+    max_tokens: int
+    percent: float
 
 

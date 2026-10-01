@@ -69,13 +69,21 @@ async def test_command_confirmation_accepts_rich_question_text(tmp_path, isolate
     workspace = WorkspaceContext.from_path(tmp_path)
     toolkit = BasicToolkit(SkillsManager(workspace=workspace), workspace=workspace, show_diff=Mock())
     toolkit.set_ask_user_handler(AsyncMock(return_value=ToolReturn(return_value=answer, content=["evidence"])))
-    monkeypatch.setattr(toolkit, "_is_command_safe", lambda command: (True, ""))
-    monkeypatch.setattr(toolkit, "_command_needs_confirm", lambda command: "recursive delete")
-    execute = AsyncMock(return_value=Mock(to_text=Mock(return_value="executed")))
-    monkeypatch.setattr("redlotus.tools.base_tools.run_subprocess", execute)
-    result = await toolkit.run_command("dummy command")
-    assert result == "executed" if answer == "yes" else "已取消执行" in result
-    assert execute.await_count == (answer == "yes")
+    from redlotus.tools.execution import run_subprocess
+    import sys
+    target = tmp_path / "confirmed.txt"
+    command = [sys.executable, "-c", "from pathlib import Path; Path('confirmed.txt').write_text('executed')"]
+    if answer == "yes":
+        result = await run_subprocess(command, shell=False, cwd=str(tmp_path),
+                                      workspace=workspace, access_policy=toolkit.access_policy)
+        assert result.returncode == 0
+        assert target.read_text() == "executed"
+    else:
+        with pytest.raises(PermissionError, match="已取消"):
+            await run_subprocess(command, shell=False, cwd=str(tmp_path),
+                                 workspace=workspace, access_policy=toolkit.access_policy)
+        assert not target.exists()
+
 
 
 @pytest.mark.asyncio
@@ -341,7 +349,7 @@ async def test_channel_send_failure_preserves_completed_result(make_system):
     async def fail_send(text):
         raise OSError("synthetic transport failure")
     try:
-        future = bot._submit_turn("private_owner", state, UserMessage("request"), fail_send)
+        future = await bot._submit_turn("private_owner", state, UserMessage("request"), fail_send)
         with pytest.raises(OSError, match="transport failure"):
             await future
         loaded = SessionFile.load(system._session_file.path, workspace=system.workspace)
@@ -388,17 +396,21 @@ async def test_channel_image_answer_reaches_model_during_same_turn(make_system):
         replies.append(text)
         if text == "send image":
             question.set()
+    answer_replies = []
+    async def answer_send(text):
+        answer_replies.append(text)
     try:
-        future = bot._submit_turn("private_owner", state, UserMessage("request"), send)
+        future = await bot._submit_turn("private_owner", state, UserMessage("request"), send)
         await asyncio.wait_for(question.wait(), 5)
         await bot.dispatch_user_message("private_owner", UserMessage("", attachments=[
-            BinaryContent(png, media_type="image/png", identifier="answer.png")]), send)
+            BinaryContent(png, media_type="image/png", identifier="answer.png")]), answer_send)
         await asyncio.wait_for(future, 5)
         media = [item for message in requests[-1] for part in message.parts
                  for item in (part.content if isinstance(getattr(part, "content", None), list) else [])
                  if isinstance(item, BinaryContent)]
         assert [item.data for item in media] == [png]
-        assert replies[-1] == "received image"
+        assert answer_replies[-1] == "received image"
+        assert "received image" not in replies
         assert system._session_file.completed_turns == 1
         assert len(system._session_file._turns) == 1
         assert not state.queue.pending

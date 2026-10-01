@@ -46,9 +46,9 @@ def worker_tool_groups(toolkit, memory, *, owner_loop=None, include_browser=True
             toolkit.ask_user,
             toolkit._references.read_reference,
         ],
-        "file_mutation": [toolkit.write_file, toolkit.edit_file],
+        "file_mutation": [toolkit.write_file, toolkit.edit_file, toolkit.delete_file],
         "execution": [toolkit.run_command, toolkit.execution_environment],
-        "media": [toolkit.generate_image, toolkit.extract_text],
+        "media": [toolkit.generate_image, toolkit.extract_text, toolkit.send_file],
         "memory": memory_tools,
         "skills": [
             skills.list_available_skills,

@@ -40,6 +40,7 @@ COMMAND_HELP = {
     "/exit": "退出程序（也接受 quit、exit、退出）",
     "/quit": "退出程序",
     "/clear": "清空上下文并开启新对话（也接受“新任务”，旧快照保留）",
+    "/resume": "恢复当前暂停的任务",
     "/status": "查看 Agent 生命周期与调用状态",
     "/config": "查看配置摘要",
     "/context": "查看上下文 token 用量分解与压缩阈值",

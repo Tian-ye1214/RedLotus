@@ -43,7 +43,8 @@ from redlotus.runtime.network import (
 )
 from redlotus.runtime.resources import conversations_root, current_workspace
 from redlotus.sessions.context import TRACE_STORE, ChatHistory
-from redlotus.sessions.storage import SessionFile, session_status
+from redlotus.sessions.storage import (WorkspaceSnapshot, SnapshotAction, SnapshotSelection,
+                                        list_workspace_snapshots, format_snapshot_choices)
 from redlotus.tools.registry import SkillsManager
 from redlotus.ui.presentation import (
     build_panel_snapshot,
@@ -112,12 +113,13 @@ def _openrouter_agent_meta_lines(model_name: str) -> list[str]:
     return lines
 
 
-def print_cli_help() -> None:
+def print_cli_help(allowed=None) -> None:
     from redlotus.ui.widgets import COMMAND_HELP
 
     rows = [
         f"| `{command}` | {description.replace('<', '&lt;').replace('>', '&gt;')} |"
         for command, description in COMMAND_HELP.items()
+        if allowed is None or command.lower() in allowed
     ]
     print_markdown(
         "\n".join(
@@ -391,19 +393,27 @@ def _format_stm_snapshot(snapshot: dict) -> str:
     return "\n".join(lines)
 
 
-class SlashCommands:
+class CommandDispatcher:
     """Commands use the same session controller and histories as normal input."""
 
     def __init__(self, controller, state, raw):
         self.controller, self.state, self.system = controller, state, controller.system
         self.raw, self.parts = raw, raw.strip().split(maxsplit=2)
 
+    BUSY_SAFE = frozenset({"/agent", "/stop", "/clear", "/resume", "/cd", "/status", "/cancel", "/help",
+        "/trace", "/tasks", "/pwd", "/config", "/context", "/usage", "/panel", "/skills",
+        "/ltm", "/stm", "/voice", "/pets"})
+    DESKTOP_ONLY = frozenset({"/pets", "/exit", "/quit", "/api"})
+    PUBLIC = frozenset({"/help", "/status", "/tasks", "/context", "/skills", "/stop", "/clear", "/resume"})
+
     async def run(self):
         handlers = {
-            "/help": print_cli_help,
+            "/help": self.help,
+            "/clear": self.clear,
+            "/resume": self.resume,
             "/config": print_config_summary,
             "/pwd": lambda: print_success(str(self.system.workspace.root)),
-            "/skills": lambda: print_loaded_skills(self.system._skills_manager),
+            "/skills": self.skills,
             "/tasks": lambda: print_markdown_panel(
                 self.system._task_manager.structured_status(), title="任务状态"
             ),
@@ -427,12 +437,72 @@ class SlashCommands:
             "/voice": self.voice,
             "/pets": self.pets,
         }
+        command = self.parts[0].lower()
+        if problem := self.validate(command):
+            print_warning(problem)
+            return
+        chat = getattr(self.controller, "is_chat", False)
+        if chat and command in self.DESKTOP_ONLY:
+            print_warning(f"{command} 需要在 CLI 操作。")
+            return
+        if chat and not self.controller.is_owner and command in handlers:
+            if command not in self.PUBLIC and not (command == "/voice" and self.parts[1:] in [[], ["on"], ["off"], ["test"], ["status"]]):
+                print_warning("当前聊天未绑定本人，无文件和执行权限；请在 CLI 配置 bot.owner_channels。")
+                return
+        if command in handlers and getattr(self.system, "has_current_turn", False):
+            if command not in self.BUSY_SAFE and not (self.state.is_compressing and command in {"/load", "/compress"}):
+                print_warning("当前任务仍在运行，请先 /stop 或等待完成。")
+                return
+        if command == "/load" and self.state.is_compressing:
+            await self.state.cancel_compression()
         handler = handlers.get(self.parts[0].lower())
         if handler is None:
             print_warning(f"未知命令 {self.parts[0]}，输入 /help 查看可用命令")
             return None
         value = handler()
         return await value if inspect.isawaitable(value) else value
+
+    def help(self):
+        chat = getattr(self.controller, "is_chat", False)
+        owner = not chat or self.controller.is_owner
+        print_cli_help(None if owner else self.PUBLIC | {"/voice"})
+        print_message("身份：" + ("本人；可读取外部文件，WorkDatabase 内可直接修改，外部修改需事前确认，可回传文件。"
+                      if owner else "未绑定本人；文件、命令执行及私人记忆不可用。绑定项：bot.owner_channels。"))
+        if chat:
+            print_message("/pets、/exit、/quit、/api 请在 CLI 操作；/cd、/load 仅影响当前会话。")
+
+    def skills(self):
+        if getattr(self.controller, "is_chat", False) and not self.controller.is_owner:
+            print_message("当前身份未绑定本人，Skills 执行不可用。")
+        else:
+            print_loaded_skills(self.system._skills_manager)
+
+    def validate(self, command):
+        if len(self.parts) > 1 and command in {"/help", "/clear", "/resume", "/status", "/tasks", "/context",
+                "/skills", "/pwd", "/config", "/panel", "/stop", "/compress"}:
+            return f"用法：{command}（不接受额外参数）"
+        args = self.raw.split()[1:]
+        if command == "/cancel" and not (len(args) == 1 and args[0] != "agent" or len(args) == 2 and args[0] == "agent"):
+            return "用法：/cancel <invocation_id> 或 /cancel agent <agent_id>"
+        if command == "/trace" and len(self.parts) != 2:
+            return "用法：/trace <turn_id>"
+        if command in {"/ltm", "/stm", "/load"} and len(self.parts) > 2:
+            return "用法：/load <编号或会话ID>" if command == "/load" else f"用法：{command} show|clear|retry"
+        if command == "/voice":
+            args = self.raw.split(maxsplit=3)[1:]
+            action = args[0] if args else "status"
+            limits = {"on": 1, "off": 1, "test": 1, "status": 1, "clean": 1, "update": 2, "rollback": 2, "prepare": 3}
+            if action not in limits or len(args) > limits[action] or (action == "rollback" and len(args) != 2) or (len(args) > 1 and args[1] not in {"asr", "tts"}):
+                return "用法：/voice on|off|test|status|prepare [asr|tts] [归档路径]|update [asr|tts]|rollback asr|tts|clean"
+
+    async def clear(self):
+        await self.controller.reset_session(self.state.history)
+        self.state.is_first_input = True
+        print_success("已清空当前会话。")
+
+    async def resume(self):
+        resumed = await self.controller.resume_current_turn(self.state)
+        print_success("正在恢复任务。" if resumed else "没有暂停的任务。")
 
     async def pets(self):
         if message := await self.controller.pets.command(self.parts[1:]):
@@ -447,6 +517,9 @@ class SlashCommands:
             if action == "off":
                 self.state.stop_voice(disable=True)
                 print_success("已关闭语音回复。")
+                return
+            if action in {"on", "test"} and getattr(self.controller, "voice_problem", None):
+                print_warning(str(self.controller.voice_problem))
                 return
             service = SpeechService._shared
             if service is None:
@@ -464,6 +537,9 @@ class SlashCommands:
                                   else "语音合成模型准备失败，请查看日志；文字功能可正常使用。")
                     return
                 if self.state.voice_output is None:
+                    if getattr(self.controller, "is_chat", False):
+                        print_warning("当前渠道不支持语音输出；文字回复仍可使用。")
+                        return
                     from redlotus.TTS.audio import AudioPlayer
                     player = AudioPlayer(pcm_seconds=service.config.pcm_seconds)
                     self.state.voice_output, self.state.voice_stop, self.state.voice_error = (
@@ -702,7 +778,7 @@ class SlashCommands:
 
     async def load(self):
         loaded = await self.controller.enter_current_workspace(
-            state=self.state, force_picker=True
+            state=self.state, force_picker=True, choice=self.parts[1] if len(self.parts) > 1 else None
         )
         return None if loaded is None else not loaded
 
@@ -714,124 +790,6 @@ class SlashCommands:
 MODEL_MESSAGES_GLOB = "*/model_messages.json"
 
 
-@dataclass(frozen=True)
-class WorkspaceSnapshot:
-    path: Path
-    meta: dict
-    saved_at: datetime
-    agent: str
-    date: str
-    topic: str
-    message_count: int
-    error: str = ""
-
-    @property
-    def is_loadable(self) -> bool:
-        return not self.error
-
-    @property
-    def title(self) -> str:
-        return self.topic.strip() if isinstance(self.topic, str) and self.topic.strip() else "未命名会话"
-
-    @property
-    def session_id(self) -> str:
-        return str(self.meta.get("session_id") or self.path.parent.name)
-
-    @property
-    def completed_turns(self) -> int:
-        value = self.meta.get("completed_turns", 0)
-        return value if isinstance(value, int) and value >= 0 else 0
-
-    @property
-    def turn_count_label(self) -> str:
-        return (f"已确认 {self.completed_turns} 回合（历史计数不完整）"
-                if self.meta.get("turn_count_incomplete") else f"{self.completed_turns} 回合")
-
-    @property
-    def status(self) -> str:
-        if not self.is_loadable:
-            return "损坏"
-        return {
-            "active": "进行中",
-            "interrupted": "上次已中断",
-            "completed": "已完成",
-            "new": "未开始",
-        }[session_status(self.meta)]
-
-    @property
-    def local_activity_time(self) -> str:
-        return self.saved_at.astimezone().strftime("%Y-%m-%d %H:%M")
-
-    @property
-    def error_summary(self) -> str:
-        return " ".join(self.error.split()) or "会话文件不可读取"
-
-    @property
-    def label(self):
-        if not self.is_loadable:
-            return (
-                f"标题：无法加载 · 本地活动：{self.local_activity_time} · "
-                f"状态：损坏 · 原因：{self.error_summary}"
-            )
-        return (
-            f"标题：{self.title} · 本地活动：{self.local_activity_time} · "
-            f"{self.turn_count_label} · 状态：{self.status} · 会话：{self.session_id}"
-        )
-
-
-def list_workspace_snapshots(*, root=None, include_unloadable=False):
-    snapshots = []
-    for entry in SessionFile.scan_info(root or conversations_root()):
-        path, meta = entry.path, entry.info
-        if not entry.error:
-            snapshots.append(WorkspaceSnapshot(
-                path, meta, datetime.fromisoformat(meta["saved_at"]), "coordinator",
-                meta["saved_at"][:10], meta["title"], 0
-            ))
-        else:
-            from redlotus.ui.presentation import print_warning
-            print_warning(f"会话无法加载: {path}: {entry.error}")
-            if include_unloadable:
-                try:
-                    saved_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
-                except OSError:
-                    saved_at = datetime.fromtimestamp(0, timezone.utc)
-                snapshots.append(WorkspaceSnapshot(
-                    path, {}, saved_at, "coordinator", "", path.parent.name, 0, entry.error
-                ))
-    return sorted(snapshots, key=lambda row: (row.saved_at, str(row.path)), reverse=True)
-
-
-class SnapshotAction(str, Enum):
-    NEW = "new"
-    RESTORE = "restore"
-    CANCEL = "cancel"
-
-
-@dataclass(frozen=True)
-class SnapshotSelection:
-    action: SnapshotAction
-    snapshot: WorkspaceSnapshot | None = None
-
-
-
-
-
-
-def format_snapshot_choices(snapshots: list[WorkspaceSnapshot]) -> str:
-    return "\n".join(
-        [
-            "选择新建会话或恢复（新 → 旧）：",
-            "",
-            "  0. 新建会话",
-            *(f"  {index}. {snapshot.label}" for index, snapshot in enumerate(snapshots, 1)),
-            "  c. 取消",
-            "",
-            "输入序号恢复，输入 0 新建，留空或 c 取消。",
-        ]
-    )
-
-
 class TuiRunMode(str, Enum):
     REVIEW = "review"
     PASS = "pass"
@@ -839,3 +797,6 @@ class TuiRunMode(str, Enum):
 
     def next(self) -> "TuiRunMode":
         return list(TuiRunMode)[(list(TuiRunMode).index(self) + 1) % len(TuiRunMode)]
+
+
+SlashCommands = CommandDispatcher

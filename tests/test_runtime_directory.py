@@ -22,12 +22,13 @@ def workspace(tmp_path, isolated_config):
 
 
 @pytest.mark.parametrize('configured', [None, '', '   '])
-def test_chat_files_and_bundled_skills_without_runtime(workspace, isolated_config, configured):
+@pytest.mark.asyncio
+async def test_chat_files_and_bundled_skills_without_runtime(workspace, isolated_config, configured):
     isolated_config['storage']['runtime_dir'] = configured
     manager = SkillsManager(workspace=workspace)
     toolkit = BasicToolkit(manager, workspace=workspace, show_diff=lambda *a, **kw: (0, 0, 0))
-    assert 'Saved' in toolkit.write_file('notes.txt', content='hello')
-    assert toolkit.read_file('notes.txt').return_value == 'hello'
+    assert 'Saved' in await toolkit.write_file('WorkDatabase/notes.txt', content='hello')
+    assert toolkit.read_file('WorkDatabase/notes.txt').return_value == 'hello'
     assert manager.skills
     layout = get_skills_layout_text(manager)
     assert str(resources.skills_dir()) in layout
@@ -256,19 +257,20 @@ def test_cleanup_reclaims_only_owned_cache_and_retries(workspace, isolated_confi
     assert skill.read_text(encoding='utf-8') == 'persistent'
 
 
-def test_file_operations_preserve_text_and_review_decisions(workspace):
+@pytest.mark.asyncio
+async def test_file_operations_preserve_text_and_review_decisions(workspace):
     from redlotus.tools.base_tools import reconstruct
     toolkit = BasicToolkit(SkillsManager(workspace=workspace), workspace=workspace, show_diff=lambda *a, **kw: (0, 0, 0))
     toolkit.review_store.activate(lambda: None)
-    toolkit.write_file('one.txt', content='first\r\nsecond\r\nthird\r\n')
-    toolkit.write_file('copy.txt', copy_from='one.txt')
-    assert toolkit.read_file('copy.txt').return_value == 'first\r\nsecond\r\nthird\r\n'
-    assert 'copy.txt' in toolkit.list_files()
+    await toolkit.write_file('WorkDatabase/one.txt', content='first\r\nsecond\r\nthird\r\n')
+    await toolkit.write_file('WorkDatabase/copy.txt', copy_from='WorkDatabase/one.txt')
+    assert toolkit.read_file('WorkDatabase/copy.txt').return_value == 'first\r\nsecond\r\nthird\r\n'
+    assert 'copy.txt' in toolkit.list_files('WorkDatabase')
     assert 'copy.txt:2: second' in toolkit.search_in_files('SECOND', '.txt')
-    toolkit.edit_file('one.txt', 'first', 'FIRST')
-    entry = next(e for e in toolkit.review_store.entries() if e.name == 'one.txt')
+    await toolkit.edit_file('WorkDatabase/one.txt', 'first', 'FIRST')
+    entry = next(e for e in toolkit.review_store.entries() if e.name == 'WorkDatabase/one.txt')
     assert toolkit.review_store.decide(entry, 0, True)
-    assert not (workspace.root / 'one.txt').exists()
+    assert not (workspace.root / 'WorkDatabase/one.txt').exists()
     assert reconstruct('a\nb\nc\nd\ne\n', 'A\nb\nc\nd\nE\n', {0}) == 'a\nb\nc\nd\nE\n'
 
 

@@ -139,6 +139,13 @@ async def rich_answer(audit, directory):
 
 async def main_file(audit, directory):
     async with application(audit, directory) as system:
+        async def approve(question):
+            audit.check("主工具产物.txt" in question and "MAIN-FILE-831" in question,
+                        "External write confirmation includes the concrete target and content")
+            audit.check(not (directory / "主工具产物.txt").exists(), "Confirmation precedes the actual write")
+            audit.record("synthetic_confirmation", question=question, answer="yes")
+            return "yes"
+        system.set_ask_user_handler(approve)
         await turn(audit, system,
             '直接使用 write_file 在当前工作区根目录（非 WorkDatabase 子目录）创建 ./主工具产物.txt，内容必须恰好为 MAIN-FILE-831，末尾无换行。'
             '不要委派，不要执行命令。', identity="main-file")
@@ -151,9 +158,9 @@ async def main_file(audit, directory):
 async def worker_file(audit, directory):
     async with application(audit, directory) as system:
         await turn(audit, system,
-            '请使用 execute_task_with_worker 委派一个独立任务：使用 write_file 在当前项目创建 Worker产物.txt，'
+            '请使用 execute_task_with_worker 委派一个独立任务：使用 write_file 在当前项目创建 WorkDatabase/Worker产物.txt，'
             '内容必须恰好为 WORKER-FILE-492，末尾无换行。Worker 不执行命令，主 Agent 不要自己写文件。', identity="worker-file")
-        audit.check((directory / "Worker产物.txt").read_bytes() == b"WORKER-FILE-492", "Worker wrote independently verified exact bytes")
+        audit.check((directory / "WorkDatabase/Worker产物.txt").read_bytes() == b"WORKER-FILE-492", "Worker wrote independently verified exact bytes")
         audit.check(len(executions(audit, "execute_task_with_worker")) == 1 and any(row["role"] == "worker" for row in audit.of("model_response")),
                     "Independent Worker made real configured model requests")
         writes = executions(audit, "write_file")
@@ -269,14 +276,27 @@ async def channels(audit, directory):
         audit.check(any("WECHAT-615" in text and "92" in text for text in replies), "WeChat mixed attachments reach real model")
         audit.check(qstate.agent.session_key != wstate.agent.session_key and qstate.history is not wstate.history,
                     "QQ and WeChat have independent persisted conversations")
-        start = len(replies)
-        for prompt in ("第一条排队消息：只回复 FIFO-FIRST，不调用工具。", "第二条排队消息：只回复 FIFO-SECOND，不调用工具。"):
-            event = SimpleNamespace(raw_message=prompt, user_id="live-owner", is_group_msg=lambda: False, reply=send, message=[])
-            await qq._handle_message(event)
+        start, completed = len(replies), qstate.agent._session_file.completed_turns
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def gate(policy, context):
+            entered.set()
+            await release.wait()
+        audit.before_gate = gate
+        try:
+            for index, prompt in enumerate(("当前任务代号是 FIFO-FIRST；最后答复列出此回合收到的全部代号，不调用工具。",
+                                            "补充代号 FIFO-SECOND；最后答复同时列出本回合的两个代号，不调用工具。")):
+                event = SimpleNamespace(raw_message=prompt, user_id="live-owner", is_group_msg=lambda: False, reply=send, message=[])
+                await qq._handle_message(event)
+                if index == 0:
+                    await asyncio.wait_for(entered.wait(), 30)
+        finally:
+            release.set()
+            audit.before_gate = None
         await qstate.queue.join()
         ordered = [text for text in replies[start:] if "FIFO-" in text]
-        audit.check(len(ordered) == 2 and "FIFO-FIRST" in ordered[0] and "FIFO-SECOND" in ordered[1],
-                    "Queued QQ events run and reply in admission order")
+        audit.check(len(ordered) == 1 and "FIFO-FIRST" in ordered[0] and "FIFO-SECOND" in ordered[0]
+                    and qstate.agent._session_file.completed_turns == completed + 1,
+                    "An active QQ supplement joins the same outer turn without a duplicate final reply")
         for bot, identity in ((qq, "private_other"), (qq, "group_live-owner"), (wx, "wx_other")):
             audit.check(not bot._is_owner(identity), "Unbound private/group identities lack owner privileges", identity=identity)
         before = len(audit.of("model_request"))
@@ -317,7 +337,7 @@ async def send_failure(audit, directory):
     async def fail(text):
         raise OSError("synthetic send failure")
     try:
-        future = bot._submit_turn("private_live-owner", state, UserMessage("请只回复 DELIVERY-427，不要调用工具。"), fail)
+        future = await bot._submit_turn("private_live-owner", state, UserMessage("请只回复 DELIVERY-427，不要调用工具。"), fail)
         try:
             await future
         except OSError as error:

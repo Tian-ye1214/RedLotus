@@ -10,6 +10,7 @@ include src/redlotus/TTS/native/upstream.patch
 include src/redlotus/TTS/native/CompactTrie.hpp
 include src/redlotus/TTS/native/PronunciationDictionary.hpp
 include src/redlotus/TTS/native/StreamingVocoder.hpp
+include src/redlotus/TTS/native/Cargo.lock
 include src/redlotus/TTS/native/UPSTREAM-LICENSE.txt
 include src/redlotus/TTS/native/NOTICE.md
 include src/redlotus/TTS/native/THIRD-PARTY-NOTICES.md

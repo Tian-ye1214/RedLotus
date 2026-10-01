@@ -2,6 +2,7 @@
 
 import importlib.util
 import runpy
+import tomllib
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -15,6 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("speech_release_verifier", ROOT / "scripts/verify_wheel.py")
 verifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verifier)
+build_spec = importlib.util.spec_from_file_location("native_speech_builder", ROOT / "scripts/build_native_speech.py")
+builder_module = importlib.util.module_from_spec(build_spec)
+build_spec.loader.exec_module(builder_module)
 
 NATIVE = "redlotus/TTS/native/"
 WINDOWS_FILES = {
@@ -32,6 +36,7 @@ SOURCE_FILES = {
     "redlotus-1.0/src/" + NATIVE + "CompactTrie.hpp",
     "redlotus-1.0/src/" + NATIVE + "PronunciationDictionary.hpp",
     "redlotus-1.0/src/" + NATIVE + "StreamingVocoder.hpp",
+    "redlotus-1.0/src/" + NATIVE + "Cargo.lock",
     "redlotus-1.0/scripts/build_native_speech.py",
 }
 
@@ -94,6 +99,20 @@ def test_sdist_retains_worker_notices_and_rebuild_support():
             verifier.inspect_native_assets(SOURCE_FILES - {missing}, sdist=True)
 
 
+def test_cargo_lock_matches_distributed_rust_notice_checksums():
+    native = ROOT / "src/redlotus/TTS/native"
+    packages = tomllib.loads((native / "Cargo.lock").read_text(encoding="utf-8"))["package"]
+    checksums = {(item["name"], item["version"]): item["checksum"]
+                 for item in packages if "checksum" in item}
+    rows = [line.split(" | ") for line in (native / "THIRD-PARTY-NOTICES.md").read_text(
+        encoding="utf-8").splitlines() if line.startswith("| [")]
+    noticed = {tuple(row[0].removeprefix("| [").split("](", 1)[0].rsplit(" ", 1)):
+               row[2].strip("`") for row in rows}
+    assert len(packages) == 81
+    assert len(noticed) == 51
+    assert all(checksums.get(key) == digest for key, digest in noticed.items())
+
+
 def test_artifact_requires_every_source_license_file():
     expected = {"dependency-license.txt", "nested/other-license.md"}
     with pytest.raises(SystemExit, match="license"):
@@ -128,11 +147,55 @@ def test_sdist_allows_only_explicit_release_helpers():
 
 
 @pytest.mark.parametrize("filename", ["mambo_worker.cpp", "upstream.patch", "CompactTrie.hpp",
+                                     "Cargo.lock",
                                      "PronunciationDictionary.hpp", "StreamingVocoder.hpp"])
 def test_native_source_support_is_only_allowed_in_sdist(filename):
     name = NATIVE + filename
     assert verifier.forbidden_asset(name)
     assert not verifier.forbidden_asset("redlotus-1.0/src/" + name, sdist=True)
+
+
+def native_builder_fixture(tmp_path):
+    source = tmp_path / "source"
+    rust = source / "third_party/tokenizers-cpp/rust"
+    rust.mkdir(parents=True)
+    build = builder_module.NativeBuild(source, tmp_path / "build", tmp_path / "sdk",
+                                       tmp_path / "cmake", tmp_path / "rust-bin", tmp_path / "cargo-home")
+    build.native = tmp_path / "native"
+    build.native.mkdir()
+    (build.native / "Cargo.lock").write_bytes(b"pinned lock")
+    return build, rust / "Cargo.lock"
+
+
+def test_native_builder_installs_lock_without_overwriting_unknown_state(tmp_path):
+    build, target = native_builder_fixture(tmp_path)
+    lock, expected = build.install_cargo_lock()
+    assert lock == target
+    assert target.read_bytes() == expected == b"pinned lock"
+    assert build.install_cargo_lock() == (target, expected)
+    target.write_bytes(b"different lock")
+    with pytest.raises(ValueError, match="Cargo.lock"):
+        build.install_cargo_lock()
+    assert target.read_bytes() == b"different lock"
+
+
+def test_native_builder_rejects_cargo_lock_drift_after_offline_build(tmp_path, monkeypatch):
+    build, target = native_builder_fixture(tmp_path)
+    monkeypatch.setattr(build, "prepare_source", lambda: None)
+    monkeypatch.setitem(builder_module.__dict__, "os", SimpleNamespace(name="nt"))
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        assert target.read_bytes() == b"pinned lock"
+        if "--build" in args:
+            target.write_bytes(b"drifted lock")
+
+    monkeypatch.setattr(builder_module, "subprocess", SimpleNamespace(run=run))
+    with pytest.raises(RuntimeError, match="Cargo.lock"):
+        build.run()
+    assert len(calls) == 2
+    assert not (build.native / "redlotus_mambo.exe").exists()
 
 
 def test_artifact_rejects_changed_worker_bytes():

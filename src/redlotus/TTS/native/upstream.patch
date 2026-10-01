@@ -181,7 +181,7 @@ index 7dc37d6..9ea3de8 100644
 -#endif //GPT_SOVITS_CPP_AUDIOTOOLS_H
 +#endif
 diff --git a/include/GPTSoVITS/InferencePipeline.h b/include/GPTSoVITS/InferencePipeline.h
-index 2d63138..a7fd6a9 100644
+index 2d63138..fc3f86d 100644
 --- a/include/GPTSoVITS/InferencePipeline.h
 +++ b/include/GPTSoVITS/InferencePipeline.h
 @@ -125,7 +125,7 @@ using AudioChunkCallback = std::function<void(const AudioChunk&)>;
@@ -221,13 +221,14 @@ index 2d63138..a7fd6a9 100644
    /**
     * @brief 导入说话人数据包
     * @param package_path 数据包路径
-@@ -250,7 +229,8 @@ public:
+@@ -250,7 +229,9 @@ public:
        float noise_scale = 0.5f,
        float speed = 1.0f,
        Model::InferStats* stats = nullptr,
 -      std::function<void()> on_first_segment = nullptr);
 +      std::function<void()> on_first_segment = nullptr,
-+      std::function<void(const std::vector<float>&)> on_pcm = {});
++      std::function<void(const std::vector<float>&)> on_pcm = {},
++      bool* no_phonemes = nullptr);
  
    /**
     * @brief 简化推理接口（使用默认参数）
@@ -1176,7 +1177,7 @@ index 2a8c172..17d086f 100644
 -}  // namespace GPTSoVITS
 \ No newline at end of file
 diff --git a/src/InferencePipeline.cpp b/src/InferencePipeline.cpp
-index b813bd3..0cd8a34 100644
+index b813bd3..5ddac30 100644
 --- a/src/InferencePipeline.cpp
 +++ b/src/InferencePipeline.cpp
 @@ -2,6 +2,7 @@
@@ -1237,7 +1238,7 @@ index b813bd3..0cd8a34 100644
            if (config.backend != Model::BackendType::kAuto)
              cfg.backend = config.backend;
            if (!config.engine_cache_dir.empty())
-@@ -191,35 +210,40 @@ public:
+@@ -191,35 +210,41 @@ public:
      auto bert_engine_path = std::filesystem::path(config.model_path) / "bert.engine";
      auto tokenizer_path   = resources_path / "bert_tokenizer.json";
      // TRT backend 优先找 .engine，再找 .onnx
@@ -1280,11 +1281,24 @@ index b813bd3..0cd8a34 100644
        const std::string& lang, const Model::SampleConfig& sample_config,
 -      float noise_scale, float speed, Model::InferStats* stats = nullptr) {
 +      float noise_scale, float speed, Model::InferStats* stats = nullptr,
-+      const std::function<void(const std::vector<float>&)>& on_pcm = {}) {
++      const std::function<void(const std::vector<float>&)>& on_pcm = {},
++      bool* no_phonemes = nullptr) {
      PrintDebug("[InferencePipeline] Inferring segment: {}", text);
      auto device = device_ctx->GetDevice();
  
-@@ -255,7 +279,9 @@ public:
+@@ -230,7 +255,10 @@ public:
+       PrintError("[InferencePipeline] G2P processing failed");
+       return nullptr;
+     }
+-
++    if (target_bert_res->PhoneSeq->ElementCount() == 0) {
++      if (no_phonemes) *no_phonemes = true;
++      return AudioTools::FromByte({}, sampling_rate);
++    }
+     // 获取模型
+     auto gpt_encoder = model_pool.GetModel<Model::GPTEncoderModel>(
+         Model::ModelType::kGPTEncoder);
+@@ -255,7 +283,9 @@ public:
      auto refer_spec = speaker.GetReferSpec(device, Model::DataType::kFloat32);  // refer_spec通常为FP32
      auto sv_emb = speaker.GetSVEmbedding(device, Model::DataType::kFloat32);    // sv_emb通常为FP32
  
@@ -1295,7 +1309,7 @@ index b813bd3..0cd8a34 100644
        PrintError("[InferencePipeline] Speaker features incomplete");
        return nullptr;
      }
-@@ -327,252 +353,12 @@ public:
+@@ -327,252 +357,12 @@ public:
                 all_bert->Shape()[0], all_bert->Shape()[1], all_bert->Shape()[2],
                 prompts->Shape()[0], prompts->Shape()[1]);
  
@@ -1548,7 +1562,7 @@ index b813bd3..0cd8a34 100644
  
      // text_seq: 直接从 PhoneSeq 构建 (1, seq_len)
      auto text_seq = target_bert_res->PhoneSeq->To(
-@@ -595,11 +381,29 @@ public:
+@@ -595,11 +385,29 @@ public:
      // sv_emb: 确保 2D
      Model::Tensor* sv_emb_ptr = sv_emb;
      std::unique_ptr<Model::Tensor> sv_emb_reshaped;
@@ -1580,7 +1594,7 @@ index b813bd3..0cd8a34 100644
  
      // SoVITS 推理
      auto t_sovits_start = std::chrono::steady_clock::now();
-@@ -676,21 +480,6 @@ std::string InferencePipeline::GetModelInfo() const {
+@@ -676,21 +484,6 @@ std::string InferencePipeline::GetModelInfo() const {
    oss << "  Speakers: " << impl_->speaker_manager.SpeakerCount() << "\n";
    return oss.str();
  }
@@ -1602,17 +1616,19 @@ index b813bd3..0cd8a34 100644
  bool InferencePipeline::ImportSpeaker(const std::string& package_path,
                                        const std::string& rename) {
    return impl_->speaker_manager.ImportFromPackage(package_path, rename) !=
-@@ -720,7 +509,8 @@ std::unique_ptr<AudioTools> InferencePipeline::Infer(
+@@ -720,7 +513,10 @@ std::unique_ptr<AudioTools> InferencePipeline::Infer(
      const std::string& speaker_name, const std::string& text,
      const std::string& lang, const Model::SampleConfig& sample_config,
      float noise_scale, float speed, Model::InferStats* stats,
 -    std::function<void()> on_first_segment) {
 +    std::function<void()> on_first_segment,
-+    std::function<void(const std::vector<float>&)> on_pcm) {
++    std::function<void(const std::vector<float>&)> on_pcm,
++    bool* no_phonemes) {
++  if (no_phonemes) *no_phonemes = false;
    auto* speaker = GetSpeaker(speaker_name);
    if (!speaker) {
      PrintError("[InferencePipeline] Speaker not found: {}", speaker_name);
-@@ -728,41 +518,8 @@ std::unique_ptr<AudioTools> InferencePipeline::Infer(
+@@ -728,41 +524,8 @@ std::unique_ptr<AudioTools> InferencePipeline::Infer(
    }
    std::string use_lang = lang.empty() ? impl_->config.default_lang : lang;
  
@@ -1656,12 +1672,12 @@ index b813bd3..0cd8a34 100644
  
    // 预加载说话人特征到设备（使用模型检测的精度）
    speaker->EnsureOnDevice(impl_->device_ctx->GetDevice(), impl_->compute_precision);
-@@ -774,7 +531,7 @@ std::unique_ptr<AudioTools> InferencePipeline::Infer(
+@@ -774,7 +537,7 @@ std::unique_ptr<AudioTools> InferencePipeline::Infer(
                 i + 1, segments.size(), segments[i]);
  
      auto audio = impl_->InferSegment(*speaker, segments[i], use_lang,
 -                                     sample_config, noise_scale, speed, stats);
-+                                     sample_config, noise_scale, speed, stats, on_pcm);
++                                     sample_config, noise_scale, speed, stats, on_pcm, no_phonemes);
      if (i == 0 && on_first_segment) {
        on_first_segment();
      }

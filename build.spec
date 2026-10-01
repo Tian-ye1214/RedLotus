@@ -13,7 +13,7 @@ from playwright.sync_api import sync_playwright
 
 project = os.path.dirname(os.path.abspath(SPEC))
 source_root = Path(project, "src", "redlotus")
-worker_sha256 = "ce05b53e991313a7122b075035b94b33e8c2b2a31a25dad0b67f887c1b805f39"
+worker_sha256 = "07a051bdaf8fe7c1bd5fbbf8ad74dc07711d40d7af07a9170288c0b1cd0ce1ba"
 bundle_mode = os.environ.get("REDLOTUS_PYINSTALLER_MODE", "onedir")
 # Match Windows' loader order: Qt uses the OS ICU, while unrelated tools on PATH
 # can supply an incompatible ICU DLL with the same unversioned filename.
@@ -103,6 +103,7 @@ a = Analysis(
         *datas,
         *copy_metadata("genai_prices"),
         *copy_metadata("pydantic_ai_slim"),
+        *copy_metadata("wechatbot-sdk"),
         *copy_metadata("sherpa-onnx"),
         *copy_metadata("sounddevice"),
         *copy_metadata("silk-python"),

@@ -191,6 +191,7 @@ class ReplyBubble(OverlayWindow):
         super().__init__()
         self.pet, self._reply_id, self._hidden_id, self._seq = pet, None, None, -1
         self._phase, self._remaining, self._hover = "streaming", 15000, False
+        self._follow_bottom = False
         self._tail = "bottom"
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setFixedWidth(280)
@@ -208,6 +209,11 @@ class ReplyBubble(OverlayWindow):
         body.addWidget(self.banner)
         self.banner.hide()
         self.text = ReplyText()
+        bar = self.text.verticalScrollBar()
+        bar.rangeChanged.connect(
+            lambda _, maximum: bar.setValue(maximum)
+            if self._follow_bottom and self.isVisible() else None)
+        bar.actionTriggered.connect(lambda _: setattr(self, "_follow_bottom", False))
         body.addWidget(self.text)
         self._timer = QTimer(self, singleShot=True, timeout=self.close)
 
@@ -221,11 +227,13 @@ class ReplyBubble(OverlayWindow):
         phase, text = snapshot["phase"], snapshot["text"]
         if phase == "clear" or not text or self._hidden_id == self._reply_id:
             self._phase = phase
+            self._follow_bottom = False
             self._timer.stop()
             self.hide()
             return
         bar = self.text.verticalScrollBar()
-        old, bottom = bar.value(), fresh or bar.value() >= bar.maximum() - 2
+        old, bottom = bar.value(), fresh or not self.isVisible() or bar.value() >= bar.maximum() - 2
+        self._follow_bottom = bottom
         self.ensurePolished()
         self.text.document().setMarkdown(text[-32768:], QTextDocument.MarkdownDialectGitHub | QTextDocument.MarkdownNoHTML)
         document = self.text.document().clone(self.text)

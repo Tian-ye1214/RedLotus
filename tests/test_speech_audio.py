@@ -32,6 +32,22 @@ async def test_silk_input_never_creates_spool_files(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_amr_header_uses_in_memory_decoder(monkeypatch):
+    observed = []
+
+    async def decode(cls, parts):
+        async for block in parts:
+            observed.append(block)
+        yield PCMChunk(np.array([0.5], dtype=np.float32), 16000)
+
+    monkeypatch.setattr(AudioIO, "_ffmpeg_chunks", classmethod(decode))
+    chunks = [chunk async for chunk in AudioIO.parse_input(b"#!AMR\nencoded", format="application/octet-stream")]
+    assert b"".join(observed) == b"#!AMR\nencoded"
+    assert len(chunks) == 1
+    np.testing.assert_array_equal(chunks[0].samples, [0.5])
+
+
+@pytest.mark.asyncio
 async def test_silk_decoder_error_is_not_mistaken_for_empty_audio(monkeypatch):
     def decode(source, output, sample_rate):
         raise ValueError("invalid SILK packet")
@@ -201,7 +217,7 @@ async def test_wav_output_segments_by_actual_duration():
 
 
 @pytest.mark.asyncio
-async def test_output_flushes_sentence_before_next_pcm_arrives():
+async def test_output_accumulates_sentences_until_duration_or_eof():
     next_sentence = asyncio.Event()
 
     async def source():
@@ -210,18 +226,22 @@ async def test_output_flushes_sentence_before_next_pcm_arrives():
         await next_sentence.wait()
         yield PCMChunk(np.zeros(2400, dtype=np.float32), 24000, end_of_segment=True)
 
-    output = AudioIO.parse_output(source(), target="wav")
+    output = AudioIO.parse_output(source(), target="wav", max_seconds=.25)
+    pending = asyncio.create_task(anext(output))
     try:
-        first = await asyncio.wait_for(anext(output), 1)
-        assert first.duration == .2
-        assert first.data.startswith(b"RIFF")
+        await asyncio.sleep(.02)
+        assert not pending.done(), "Model sentence markers must not create tiny channel messages"
         next_sentence.set()
+        first = await asyncio.wait_for(pending, 1)
+        assert first.duration == .25
+        assert first.data.startswith(b"RIFF")
         second = await asyncio.wait_for(anext(output), 1)
-        assert second.duration == .1
+        assert second.duration == .05
         with pytest.raises(StopAsyncIteration):
             await anext(output)
     finally:
         next_sentence.set()
+        await asyncio.gather(pending, return_exceptions=True)
         await output.aclose()
 
 

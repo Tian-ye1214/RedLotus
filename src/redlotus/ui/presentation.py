@@ -7,6 +7,7 @@ import difflib
 import math
 import sys
 import traceback
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -36,14 +37,7 @@ from redlotus.core.history import (
 from redlotus.runtime import logging as logger
 from redlotus.runtime.resources import conversations_root
 from redlotus.sessions.control import UserMessage
-
-
-@dataclass(frozen=True)
-class ContextUsageItem:
-    role_label: str
-    used_tokens: int
-    max_tokens: int
-    percent: float
+from redlotus.sessions.context import ContextUsageItem
 
 
 class OutputSink(Protocol):
@@ -101,6 +95,7 @@ class LegacyOutputSink:
 
 _console = Console(highlight=False, legacy_windows=sys.platform == "win32")
 _sink: OutputSink = LegacyOutputSink(_console)
+OUTPUT_SINK = ContextVar("output_sink", default=None)
 
 
 def set_output_sink(sink: OutputSink | None) -> None:
@@ -109,18 +104,18 @@ def set_output_sink(sink: OutputSink | None) -> None:
 
 
 def supports_model_stream() -> bool:
-    return _sink.supports_model_stream
+    return (OUTPUT_SINK.get() or _sink).supports_model_stream
 
 
 def emit_renderable(renderable: Any) -> None:
-    _sink.emit(renderable)
+    (OUTPUT_SINK.get() or _sink).emit(renderable)
 
 
 logger.console_sink = emit_renderable
 
 
 def update_output(action: str, *args) -> None:
-    _sink.update(action, *args)
+    (OUTPUT_SINK.get() or _sink).update(action, *args)
 
 
 class DiffKind(StrEnum):
