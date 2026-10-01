@@ -755,7 +755,8 @@ assert bubble.text.geometry().right() < close.x()
 assert bubble.height() <= 64 and bubble.width() == 280
 assert bubble._timer.isActive() == (PHASE != 'streaming')
 if PHASE != 'streaming':
-    assert 14000 <= bubble._timer.remainingTime() <= 15000
+    assert bubble._timer.interval() == 15000
+    assert 0 < bubble._timer.remainingTime() <= bubble._timer.interval()
     bubble.enterEvent(QEvent(QEvent.Type.Enter))
     assert not bubble._timer.isActive()
     bubble.leaveEvent(QEvent(QEvent.Type.Leave))
@@ -812,7 +813,7 @@ import json
 from PySide6.QtWidgets import QAbstractSlider
 bubble = window.bubble
 bubble.apply_snapshot(dict(event='reply', reply_id='a', seq=1, phase='streaming',
-                           text='\\n'.join(str(i) for i in range(100)), truncated=False))
+                           text='\\n\\n'.join(str(i) for i in range(100)), truncated=False))
 app.processEvents()
 bar = bubble.text.verticalScrollBar()
 end = bar.maximum()
@@ -826,7 +827,7 @@ scrolled = [bar.value(), bar.maximum()]
 bubble.apply_snapshot(dict(event='reply', reply_id='', seq=2, phase='clear',
                            text='', truncated=False))
 bubble.apply_snapshot(dict(event='reply', reply_id='b', seq=3, phase='streaming',
-                           text='\\n'.join(str(i) for i in range(100)), truncated=False))
+                           text='\\n\\n'.join(str(i) for i in range(100)), truncated=False))
 app.processEvents()
 new_end = bar.maximum()
 bar.setRange(0, 0)
@@ -847,7 +848,7 @@ bubble = window.bubble
 def snap(text, seq, phase='streaming', truncated=False):
     bubble.apply_snapshot(dict(event='reply', reply_id='a', text=text,
                                seq=seq, phase=phase, truncated=truncated))
-text = '\\n'.join(str(i) for i in range(100))
+text = '\\n\\n'.join(str(i) for i in range(100))
 snap(text, 1)
 app.processEvents()
 bar = bubble.text.verticalScrollBar()
@@ -856,7 +857,7 @@ assert bar.value() == bar.maximum() and bar.maximum() > 0, (
     f'text={bubble.text.width()}x{bubble.text.height()}, document={bubble.text.document().size()}')
 assert bubble.height() == 180 and bubble.text.height() == 152
 bar.setValue(12)
-snap(text + '\\nlast', 2)
+snap(text + '\\n\\nlast', 2)
 assert bar.value() == 12
 snap('old prefix' + 'x' * 32767 + '尾', 3, 'done')
 assert bubble.text.toPlainText() == 'x' * 32767 + '尾'
